@@ -124,10 +124,18 @@ export class DeploymentMcpConnector implements ConnectorProvider {
   }
 }
 
-/** Lets the server attribute a call to its run and bot without trusting tool arguments. */
+/**
+ * Lets the server attribute a call to its run, bot, user and space without trusting
+ * tool arguments. These are attribution hints asserted by this instance, NOT an
+ * authorization credential: the server may use them to annotate audit records and
+ * conversation references, and must never grant rights from them. Fields this call
+ * does not know (a system run has no user) are omitted rather than sent empty.
+ */
 function callMeta(context: AdapterContext): Record<string, string> | undefined {
   const meta: Record<string, string> = {};
   if (context.runId) meta.runId = context.runId;
   if (context.botId) meta.botId = context.botId;
+  if (context.userId) meta.userId = context.userId;
+  if (context.spaceId) meta.spaceId = context.spaceId;
   return Object.keys(meta).length > 0 ? meta : undefined;
 }

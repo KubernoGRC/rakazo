@@ -1,6 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { AdapterContext, ConnectorEvent, ConnectorProvider } from "@rakazo/adapter-kit";
+import type {
+  AdapterContext,
+  ConnectorEvent,
+  ConnectorProvider,
+  SecretStore,
+} from "@rakazo/adapter-kit";
+import type { PrismaClient } from "@rakazo/db";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createConnectorStack } from "./composio-connector.js";
@@ -9,6 +15,7 @@ import {
   deploymentConnectorConfigFromEnv,
   deploymentConnectorProviders,
 } from "./deployment-connectors.js";
+import { InstalledConnectorProvider } from "./installed-connectors.js";
 
 const ENDPOINT = "https://mcp.private.example.test/mcp";
 const TOKEN = "deployment-token-value";
@@ -167,7 +174,7 @@ describe("deploymentConnectorProviders", () => {
       ),
     );
     expect(events[0]!.type).toBe("result");
-    expect(server.seen.meta).toEqual([{ runId: "run-1" }]);
+    expect(server.seen.meta).toEqual([{ runId: "run-1", userId: "user-1", spaceId: "space-1" }]);
     expect(user.calls).toEqual([]);
   });
 
@@ -201,21 +208,57 @@ describe("DeploymentMcpConnector", () => {
         context({ runId: "run-1", botId: "bot-1" }),
       ),
     );
-    expect(server.seen.meta).toEqual([{ runId: "run-1", botId: "bot-1" }]);
+    expect(server.seen.meta).toEqual([
+      { runId: "run-1", botId: "bot-1", userId: "user-1", spaceId: "space-1" },
+    ]);
     expect(events).toHaveLength(1);
     expect(events[0]!.type).toBe("result");
     expect(JSON.stringify(events[0])).not.toContain(TOKEN);
   });
 
-  it("sends no _meta when the call has no run or bot", async () => {
+  it("omits attribution fields a call does not know instead of sending placeholders", async () => {
     const server = mcpServer();
     const connector = new DeploymentMcpConnector(
       { endpoint: ENDPOINT, privateEndpoint: true },
       { fetch: server.fetch, resolveHostname: privateResolver },
     );
-    await collect(
-      connector.execute({ tool: "echo", args: { text: "hi" }, executionId: "call-1" }, context()),
+    const call = { tool: "echo", args: { text: "hi" }, executionId: "call-1" };
+    await collect(connector.execute(call, context({ runId: "run-1", userId: "", spaceId: "" })));
+    await collect(connector.execute(call, context({ userId: "", spaceId: "" })));
+    expect(server.seen.meta).toEqual([{ runId: "run-1" }, undefined]);
+  });
+
+  it("never sends attribution _meta to a user-owned MCP source", async () => {
+    const server = mcpServer();
+    const install = {
+      id: "install-1",
+      kind: "mcp",
+      name: "Mine",
+      source: "https://user-mcp.example.test/mcp",
+      secretId: null,
+      config: {},
+    };
+    const prisma = { capabilityInstall: { findFirst: async () => install } };
+    const installed = new InstalledConnectorProvider(
+      prisma as unknown as PrismaClient,
+      {} as SecretStore,
+      {
+        fetch: server.fetch,
+        resolveHostname: async () => [{ address: "203.0.113.10", family: 4 as const }],
+      },
     );
+    const events = await collect(
+      installed.execute(
+        {
+          tool: "echo",
+          args: { text: "hi" },
+          executionId: "call-1",
+          route: { connectorId: "installed", resourceId: install.id, toolName: "echo" },
+        },
+        context({ runId: "run-1", botId: "bot-1" }),
+      ),
+    );
+    expect(events[0]!.type).toBe("result");
     expect(server.seen.meta).toEqual([undefined]);
   });
 
