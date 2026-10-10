@@ -36,6 +36,7 @@ import {
   createTicketChangeNotifier,
   createWebProvider,
   deletePushToken,
+  deploymentConnectorProviders,
   destroyBot,
   EmailEmulator,
   ExpoPushProvider,
@@ -370,13 +371,21 @@ export async function createApp(
         : undefined),
     pipedream,
   });
-  const stack = createConnectorStack(false, composioOverride, [
-    installed,
-    ...integrationSettings
-      .providers()
-      .filter((provider) => !composioOverride || provider.describe().id !== "composio"),
-    mcp,
-  ]);
+  const stack = createConnectorStack(
+    false,
+    composioOverride,
+    deploymentConnectorProviders(
+      env.deploymentConnectors,
+      [
+        installed,
+        ...integrationSettings
+          .providers()
+          .filter((provider) => !composioOverride || provider.describe().id !== "composio"),
+        mcp,
+      ],
+      remoteConnectors,
+    ),
+  );
   const connector = stack.destination;
   await connector.start();
   integrationSettings.warmDirectories();
@@ -480,6 +489,7 @@ export async function createApp(
       env.composioApiKey ?? "",
       env.cursorApiKey ?? "",
       process.env.TYPESAFE_API_KEY ?? "",
+      env.deploymentConnectors.mcp?.token ?? "",
     ].filter(Boolean),
     secretStore: secrets,
     secretHttp: remoteConnectors,
