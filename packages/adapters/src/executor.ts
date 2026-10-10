@@ -2667,6 +2667,8 @@ export interface ExecutorDeps {
   secretHttp?: RemoteTransportDependencies;
   /** Allow RFC1918 / Docker-network MCP URLs when the deployment owner enabled the escape. */
   mcpAllowPrivateEndpoint?: boolean;
+  /** Built-in tools the deployment removes from every bot, on top of each bot's own list. */
+  disabledBuiltinTools?: readonly string[];
   /** Remote cloud coding agents. Null/omit means tools stay uninjected. */
   cloudAgent?: CloudAgentConnection | null;
   /** Optional Auto Review verifier. When omitted, the factory selects from env (llm | jev | scripted). */
@@ -3816,7 +3818,11 @@ export function createRunExecutor(deps: ExecutorDeps) {
         const graphicalToolsAllowed = graphical && acceptsImages && !heldForTakeover;
         const pageBrowserAllowed =
           graphical && browser.describe().capabilities.page && !heldForTakeover;
-        const disabledBuiltinTools = disabledBuiltinToolSet(bot.disabledBuiltinTools);
+        const botDisabledBuiltinTools = [
+          ...(bot.disabledBuiltinTools ?? []),
+          ...(deps.disabledBuiltinTools ?? []),
+        ];
+        const disabledBuiltinTools = disabledBuiltinToolSet(botDisabledBuiltinTools);
         const builtins = [
           ...selectBuiltinToolsForRun({
             ticketBoardEnabled: deps.ticketBoardEnabled,
@@ -3829,7 +3835,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
             cloudAgentEnabled: cloudAgentsEnabled(cloudAgent, run.spaceId),
             messagingChannelRun,
             voiceCall,
-            disabledBuiltinTools: bot.disabledBuiltinTools,
+            disabledBuiltinTools: botDisabledBuiltinTools,
           }),
           // Cross-owner agent connections only exist for chat-linked bots.
           ...(hasMessagingIdentity && !isBackgroundRunTrigger(run.trigger)

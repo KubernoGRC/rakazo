@@ -36,6 +36,8 @@ import {
   createTicketChangeNotifier,
   createWebProvider,
   deletePushToken,
+  deploymentConnectorProviders,
+  deploymentDisabledBuiltinTools,
   destroyBot,
   EmailEmulator,
   ExpoPushProvider,
@@ -100,6 +102,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createBillingService } from "./billing.js";
 import { mountBillingRoutes } from "./billing-webhook.js";
+import { rejectLockedDownRpc } from "./connector-lockdown.js";
 import type { AppEnv } from "./env.js";
 import { loadEnv } from "./env.js";
 import { healthRoutes } from "./health.js";
@@ -370,13 +373,21 @@ export async function createApp(
         : undefined),
     pipedream,
   });
-  const stack = createConnectorStack(false, composioOverride, [
-    installed,
-    ...integrationSettings
-      .providers()
-      .filter((provider) => !composioOverride || provider.describe().id !== "composio"),
-    mcp,
-  ]);
+  const stack = createConnectorStack(
+    false,
+    composioOverride,
+    deploymentConnectorProviders(
+      env.deploymentConnectors,
+      [
+        installed,
+        ...integrationSettings
+          .providers()
+          .filter((provider) => !composioOverride || provider.describe().id !== "composio"),
+        mcp,
+      ],
+      remoteConnectors,
+    ),
+  );
   const connector = stack.destination;
   await connector.start();
   integrationSettings.warmDirectories();
@@ -480,10 +491,12 @@ export async function createApp(
       env.composioApiKey ?? "",
       env.cursorApiKey ?? "",
       process.env.TYPESAFE_API_KEY ?? "",
+      env.deploymentConnectors.mcp?.token ?? "",
     ].filter(Boolean),
     secretStore: secrets,
     secretHttp: remoteConnectors,
     mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
+    disabledBuiltinTools: deploymentDisabledBuiltinTools(env.deploymentConnectors),
     deploymentModelKey: env.deploymentModelKey,
     deploymentModelConfigured: env.deploymentModelConfigured,
     dataDir: env.dataDir,
@@ -579,7 +592,10 @@ export async function createApp(
     },
   });
   const rpc = new RPCHandler(router, {
-    clientInterceptors: [onError((error, { path }) => logUnexpectedRpcError(error, path))],
+    clientInterceptors: [
+      ...(env.deploymentConnectors.lockdown ? [rejectLockedDownRpc] : []),
+      onError((error, { path }) => logUnexpectedRpcError(error, path)),
+    ],
   });
   const app = new Hono();
   app.use("*", requestLogging(logger));

@@ -30,6 +30,13 @@ export type { ResolveHostname } from "./network-address.js";
 export interface RemoteUrlPolicy {
   /** Deployment-owner escape for loopback / LAN / Docker-network endpoints. Default off. */
   allowPrivateEndpoint?: boolean;
+  /**
+   * One exact DNS name a deployment-owned connector may reach on private addresses,
+   * such as a private service endpoint. Only that name is exempt: it still needs HTTPS,
+   * and every address it resolves to must be private (never loopback, link-local or
+   * cloud metadata). Every other host keeps the default policy.
+   */
+  privateEndpointHost?: string;
 }
 
 export interface RemoteTransportDependencies {
@@ -41,6 +48,8 @@ export interface RemoteMcpOptions extends RemoteTransportDependencies, RemoteUrl
   endpoint: string;
   headers?: Record<string, string>;
   signal?: AbortSignal;
+  /** Sent as the request `_meta` of a tool call. */
+  meta?: Record<string, unknown>;
 }
 
 export interface SafeRemoteFetch {
@@ -82,10 +91,11 @@ export async function callRemoteMcpTool(
   args: Record<string, unknown>,
 ): Promise<unknown> {
   return withRemoteMcpClient(options, async (client, signal) => {
-    const result = await client.callTool({ name: toolName, arguments: args }, undefined, {
-      signal,
-      timeout: MCP_TIMEOUT_MS,
-    });
+    const result = await client.callTool(
+      { name: toolName, arguments: args, ...(options.meta ? { _meta: options.meta } : {}) },
+      undefined,
+      { signal, timeout: MCP_TIMEOUT_MS },
+    );
     return limitRemoteMcpPayload({
       content: result.content,
       structuredContent: result.structuredContent,
@@ -99,7 +109,10 @@ async function withRemoteMcpClient<T>(
   options: RemoteMcpOptions,
   run: (client: Client, signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
-  const policy = { allowPrivateEndpoint: options.allowPrivateEndpoint };
+  const policy = {
+    allowPrivateEndpoint: options.allowPrivateEndpoint,
+    privateEndpointHost: options.privateEndpointHost,
+  };
   const endpoint = await assertSafeRemoteUrl(
     options.endpoint,
     options.resolveHostname ?? resolveHostname,
@@ -155,6 +168,12 @@ async function inspectSafeRemoteUrl(
   if (url.hash) throw new Error("Connector URL must not contain a fragment");
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (isBlockedRemoteHostname(hostname)) throw new Error("Connector URL targets a private host");
+  if (isPinnedPrivateHost(hostname, policy)) {
+    if (url.protocol !== "https:") throw new Error("Connector URL must use HTTPS");
+    const addresses = await resolve(hostname);
+    assertPinnedPrivateAddresses(addresses);
+    return { url, addresses };
+  }
   // Loopback is a private endpoint too: only the private-endpoint escape reaches it.
   const allowPrivate = policy.allowPrivateEndpoint === true;
   const privateHost = isPrivateRemoteMcpHostname(hostname);
@@ -321,6 +340,10 @@ export function createSafeLookup(
   policy: RemoteUrlPolicy = {},
 ): LookupFunction {
   return createAddressCheckedLookup(resolve, (addresses, hostname) => {
+    if (isPinnedPrivateHost(hostname.replace(/^\[|\]$/g, ""), policy)) {
+      assertPinnedPrivateAddresses(addresses);
+      return;
+    }
     if (policy.allowPrivateEndpoint === true && isLocalMcpHost(hostname.replace(/^\[|\]$/g, ""))) {
       assertLoopbackAddresses(addresses);
       return;
@@ -356,6 +379,40 @@ export function isPrivateRemoteMcpHostname(hostname: string): boolean {
     normalized.endsWith(".internal") ||
     (isIP(normalized) !== 0 && isPrivateAddress(normalized))
   );
+}
+
+function normalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.$/, "");
+}
+
+/** Exact match only: no suffix, wildcard or IP-literal pins. */
+function isPinnedPrivateHost(hostname: string, policy: RemoteUrlPolicy): boolean {
+  const pin = policy.privateEndpointHost ? normalizeHostname(policy.privateEndpointHost) : "";
+  if (!pin || isIP(pin) !== 0) return false;
+  return normalizeHostname(hostname) === pin;
+}
+
+function isUnspecifiedAddress(address: string): boolean {
+  return /^0\./.test(address) || /^[0:]+$/.test(address);
+}
+
+function assertPinnedPrivateAddresses(addresses: ResolvedAddress[]): void {
+  if (
+    addresses.length === 0 ||
+    addresses.some((entry) => {
+      const address = entry.address.replace(/^::ffff:/i, "");
+      return (
+        isIP(address) === 0 ||
+        isUnspecifiedAddress(address) ||
+        isCloudMetadataAddress(address) ||
+        isLinkLocalAddress(address) ||
+        isLoopbackAddress(address) ||
+        !isPrivateAddress(address)
+      );
+    })
+  ) {
+    throw new Error("Private endpoint must resolve only to private addresses");
+  }
 }
 
 function assertLoopbackAddresses(addresses: ResolvedAddress[]): void {
