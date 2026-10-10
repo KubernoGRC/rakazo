@@ -38,7 +38,7 @@ conversation. It must never grant rights based on them.
 - `packages/adapters/src/deployment-connectors.ts` (new): config and the provider.
 - `packages/adapters/src/remote-mcp.ts`: the `privateEndpointHost` policy, and `meta` on tool calls.
 - `apps/api/src/app.ts`, `apps/api/src/env.ts` and `apps/worker/src/index.ts`: one wrapper around each `createConnectorStack` provider list, plus the env read.
-- `.github/workflows/public-fork-guard.yml` (new): fails when the tree, a commit message or a pull request's text contains deployment-specific values.
+- `.github/workflows/public-fork-guard.yml` and `.github/scripts/public-fork-guard*.sh` (new): fail when any introduced commit's tree, any commit message or a pull request's text contains deployment-specific values, or when gitleaks finds a credential in an introduced commit's patch, a commit message or the pull request text. Each commit is scanned, so a value added and then removed is still caught. Commits already on upstream's `main` are excluded. The guard's self-test plants generated values and must see them fail before the scan runs.
 
 Only the `app` image changes. The `updater` and `computer` images are unaffected.
 

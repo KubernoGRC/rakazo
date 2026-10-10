@@ -1,10 +1,11 @@
 name: public-fork-guard
 # This fork is public. Deployment values (organization names, AWS account IDs,
 # private endpoint IDs) belong in deployment config, never in the tree, commit
-# messages or pull request text. Commit messages and pull request text may link
-# an issue or pull request by its repository reference; nothing else is exempt.
-# Each pattern is written so it does not match itself, so this file needs no
-# exclusion.
+# messages or pull request text, and credentials belong nowhere in it. Commit
+# messages and pull request text may link an issue or pull request by its
+# repository reference; nothing else is exempt. The scan itself is
+# .github/scripts/public-fork-guard.sh, and it runs only after its self-test
+# has shown that planted values fail it.
 on:
   push:
     branches: [main]
@@ -13,17 +14,36 @@ on:
 permissions:
   contents: read
 
+env:
+  GITLEAKS_VERSION: 8.30.1
+  # sha256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz, from the release's checksums file.
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  UPSTREAM_URL: https://github.com/elie222/rakazo
+
 jobs:
   guard:
     name: Public fork guard
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Scan tree, commit messages and pull request text
+      - name: Install gitleaks (checksum-pinned)
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$tarball"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          echo "GITLEAKS=$RUNNER_TEMP/gitleaks" >> "$GITHUB_ENV"
+      - name: Self-test the guard
+        run: .github/scripts/public-fork-guard-selftest.sh
+      - name: Fetch upstream, whose commits are excluded from the scan
+        run: git fetch --no-tags "$UPSTREAM_URL" "+refs/heads/main:refs/remotes/upstream/main"
+      - name: Scan introduced commits, commit messages and pull request text
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.after }}
@@ -31,36 +51,9 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set -u
-          patterns=(
-            -e 'kuberno[g]rc'
-            -e 'vpce-[0-9a-z]'
-            -e 'arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:[0-9]{12}'
-            -e '[0-9]{12}\.dkr\.ecr'
-            -e '(account[_-]?id|aws[_-]?account)["'"'"' ]*[:=]+ *["'"'"']?[0-9]{12}([^0-9]|$)'
-          )
-          # Drops owner/repo#N and github.com/owner/repo/(issues|pull)/N links.
-          strip_links() {
-            sed -E 's#(https://)?(github\.com/)?kuberno[g]rc/[A-Za-z0-9._-]+(\#|/issues/|/pull/)[0-9]+##Ig'
-          }
-          found=0
-          if git grep -nIiE "${patterns[@]}"; then
-            echo "::error::Deployment-specific values are tracked in the tree"
-            found=1
-          fi
-          # A push whose previous head is unknown (first push, force-push) scans its head.
-          if [ -n "${BASE_SHA//0/}" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
-            range=("$BASE_SHA..$HEAD_SHA")
-          else
-            range=(-1 "$HEAD_SHA")
-          fi
-          if git log --format='%H %B' "${range[@]}" | strip_links | grep -niE "${patterns[@]}"; then
-            echo "::error::A commit message carries deployment-specific values"
-            found=1
-          fi
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            if printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | strip_links | grep -niE "${patterns[@]}"; then
-              echo "::error::The pull request title or body carries deployment-specific values"
-              found=1
-            fi
+            export PR_TEXT_FILE="$RUNNER_TEMP/pr-text"
+            printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" > "$PR_TEXT_FILE"
           fi
-          exit "$found"
+          UPSTREAM_REF=refs/remotes/upstream/main \
+            .github/scripts/public-fork-guard.sh "$BASE_SHA" "$HEAD_SHA"
