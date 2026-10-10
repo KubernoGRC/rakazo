@@ -676,6 +676,12 @@ describe("pinned private endpoint", () => {
     ["IPv6 loopback", ["::1"]],
     ["IPv6 link-local", ["fe80::1"]],
     ["shared address space", ["100.64.0.1"]],
+    ["AWS IPv6 metadata", ["fd00:ec2::254"]],
+    ["AWS IPv6 metadata, expanded", ["fd00:0ec2:0000:0000:0000:0000:0000:0254"]],
+    ["AWS IPv4 metadata", ["169.254.169.254"]],
+    ["IPv4 link-local", ["169.254.10.1"]],
+    ["unallocated fc00::/8", ["fc00::20"]],
+    ["a valid address beside IPv6 metadata", ["10.0.4.20", "fd00:ec2::254"]],
     ["nothing", []],
   ])("refuses the pinned host when it resolves to %s", async (_label, addresses) => {
     await expect(
@@ -719,10 +725,12 @@ describe("pinned private endpoint", () => {
     await expect(lookupError(lookup, "other.private.example.test")).resolves.toMatchObject({
       message: "Connector URL resolves to a private address",
     });
-    await expect(
-      lookupError(createSafeLookup(resolvesTo("203.0.113.10"), pin), "mcp.private.example.test"),
-    ).resolves.toMatchObject({
-      message: "Private endpoint must resolve only to private addresses",
-    });
+    for (const address of ["203.0.113.10", "fd00:ec2::254"]) {
+      await expect(
+        lookupError(createSafeLookup(resolvesTo(address), pin), "mcp.private.example.test"),
+      ).resolves.toMatchObject({
+        message: "Private endpoint must resolve only to private addresses",
+      });
+    }
   });
 });

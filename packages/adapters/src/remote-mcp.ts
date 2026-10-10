@@ -33,8 +33,9 @@ export interface RemoteUrlPolicy {
   /**
    * One exact DNS name a deployment-owned connector may reach on private addresses,
    * such as a private service endpoint. Only that name is exempt: it still needs HTTPS,
-   * and every address it resolves to must be RFC 1918 IPv4 or IPv6 unique-local.
-   * Every other host keeps the default policy.
+   * and every address it resolves to must be RFC 1918 IPv4 or IPv6 unique-local
+   * (fd00::/8), never cloud metadata, link-local or loopback. Every other host keeps
+   * the default policy.
    */
   privateEndpointHost?: string;
 }
@@ -392,17 +393,26 @@ function isPinnedPrivateHost(hostname: string, policy: RemoteUrlPolicy): boolean
   return normalizeHostname(hostname) === pin;
 }
 
-/** RFC 1918 IPv4 or IPv6 unique-local only. An allowlist, so loopback, link-local,
- * metadata, CGNAT and transition-encoded forms (NAT64, 6to4) never qualify. */
+/** RFC 1918 IPv4 or locally assigned IPv6 unique-local (fd00::/8) only. Cloud
+ * metadata, link-local and loopback are refused first, because AWS serves its IPv6
+ * metadata endpoint (fd00:ec2::254) from inside fd00::/8. Being an allowlist, it also
+ * refuses CGNAT and transition-encoded forms (NAT64, 6to4). */
 function isPinnablePrivateAddress(value: string): boolean {
   const address = value.toLowerCase().replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, "");
+  if (
+    isCloudMetadataAddress(address) ||
+    isLinkLocalAddress(address) ||
+    isLoopbackAddress(address)
+  ) {
+    return false;
+  }
   if (isIP(address) === 4) {
     const [a, b] = address.split(".").map(Number);
     return a === 10 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168);
   }
   if (isIP(address) !== 6) return false;
   const first = address.split(":")[0] ?? "";
-  return first.length === 4 && (Number.parseInt(first, 16) & 0xfe00) === 0xfc00;
+  return first.length === 4 && (Number.parseInt(first, 16) & 0xff00) === 0xfd00;
 }
 
 function assertPinnedPrivateAddresses(addresses: ResolvedAddress[]): void {

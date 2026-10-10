@@ -13,7 +13,7 @@ Set these on both the API and the worker. They read the same variables.
 | --- | --- |
 | `DEPLOYMENT_MCP_URL` | HTTPS URL of a deployment-owned MCP server. Its tools are offered to every run as connector `deployment`. |
 | `DEPLOYMENT_MCP_TOKEN` | Optional bearer token for that server. It is redacted from tool results, tool errors and discovery errors. |
-| `DEPLOYMENT_MCP_PRIVATE_ENDPOINT` | `true` lets exactly the hostname in `DEPLOYMENT_MCP_URL` resolve to private addresses, such as a private service endpoint. The URL must be HTTPS with a DNS hostname. Every address it resolves to must be RFC 1918 IPv4 or IPv6 unique-local; anything else is refused. No other host, subdomain or IP literal is exempt. `MCP_ALLOW_PRIVATE_ENDPOINT` is not involved. |
+| `DEPLOYMENT_MCP_PRIVATE_ENDPOINT` | `true` lets exactly the hostname in `DEPLOYMENT_MCP_URL` resolve to private addresses, such as a private service endpoint. The URL must be HTTPS with a DNS hostname. Every address it resolves to must be RFC 1918 IPv4 or IPv6 unique-local (`fd00::/8`). Cloud metadata addresses (including AWS's `fd00:ec2::254`), link-local and loopback addresses are refused even inside those ranges. Anything else is refused too. No other host, subdomain or IP literal is exempt. `MCP_ALLOW_PRIVATE_ENDPOINT` is not involved. |
 
 Each tool call to the deployment server includes `runId`, `botId`, `userId` and
 `spaceId` in the MCP request `_meta`. A field that is not known for a call is left
