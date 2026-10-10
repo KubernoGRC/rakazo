@@ -6,13 +6,18 @@
 # Scans every commit in base..head (or head alone when the base is unknown):
 #   - each commit's tree, for deployment-specific values;
 #   - each commit's patch, with gitleaks, for credentials, so a value added and
-#     removed inside the range is still caught;
+#     removed inside the range is still caught. A merge commit's patch is its
+#     diff against git's own re-merge of its parents (--diff-merges=remerge),
+#     so a value added in a conflict resolution or an "evil" merge is caught
+#     without rescanning everything the merge brought in;
 #   - each commit message, for both.
 # PR_TEXT_FILE, when set, names a file holding the pull request title and body,
 # which is scanned the same way as a commit message.
 # UPSTREAM_REF, when set, excludes commits already published by upstream: they
 # are not this fork's to leak, and upstream's own test fixtures trip gitleaks.
-# GITLEAKS is the gitleaks binary (default: gitleaks on PATH).
+# GITLEAKS is the gitleaks binary (default: gitleaks on PATH). GITLEAKS_CONFIG
+# is its config (default: .gitleaks.toml beside this script's repository root),
+# which extends the default rules.
 #
 # Each deployment pattern is written so it does not match itself.
 set -uo pipefail
@@ -20,6 +25,8 @@ set -uo pipefail
 base=${1:-}
 head=${2:?head sha required}
 gitleaks=${GITLEAKS:-gitleaks}
+config=${GITLEAKS_CONFIG:-$(cd "$(dirname "$0")/../.." && pwd)/.gitleaks.toml}
+[ -f "$config" ] || { echo "::error::gitleaks config $config is missing"; exit 2; }
 
 patterns=(
   -e 'kuberno[g]rc'
@@ -54,8 +61,8 @@ for c in "${commits[@]}"; do
 done
 
 if [ "${#commits[@]}" -gt 0 ]; then
-  if ! "$gitleaks" git --no-banner --redact --exit-code 1 \
-      --log-opts="${range[*]}" .; then
+  if ! "$gitleaks" git --no-banner --redact --exit-code 1 --config "$config" \
+      --log-opts="--diff-merges=remerge ${range[*]}" .; then
     echo "::error::gitleaks found credentials in a commit"
     found=1
   fi
@@ -71,7 +78,7 @@ if strip_links < "$text" | grep -niE "${patterns[@]}"; then
   echo "::error::A commit message or the pull request text carries deployment-specific values"
   found=1
 fi
-if ! "$gitleaks" stdin --no-banner --redact --exit-code 1 < "$text"; then
+if ! "$gitleaks" stdin --no-banner --redact --exit-code 1 --config "$config" < "$text"; then
   echo "::error::gitleaks found credentials in a commit message or the pull request text"
   found=1
 fi
