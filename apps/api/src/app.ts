@@ -37,7 +37,6 @@ import {
   createWebProvider,
   deletePushToken,
   deploymentConnectorProviders,
-  deploymentDisabledBuiltinTools,
   destroyBot,
   EmailEmulator,
   ExpoPushProvider,
@@ -102,7 +101,6 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createBillingService } from "./billing.js";
 import { mountBillingRoutes } from "./billing-webhook.js";
-import { rejectLockedDownRpc } from "./connector-lockdown.js";
 import type { AppEnv } from "./env.js";
 import { loadEnv } from "./env.js";
 import { healthRoutes } from "./health.js";
@@ -496,7 +494,6 @@ export async function createApp(
     secretStore: secrets,
     secretHttp: remoteConnectors,
     mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
-    disabledBuiltinTools: deploymentDisabledBuiltinTools(env.deploymentConnectors),
     deploymentModelKey: env.deploymentModelKey,
     deploymentModelConfigured: env.deploymentModelConfigured,
     dataDir: env.dataDir,
@@ -592,10 +589,7 @@ export async function createApp(
     },
   });
   const rpc = new RPCHandler(router, {
-    clientInterceptors: [
-      ...(env.deploymentConnectors.lockdown ? [rejectLockedDownRpc] : []),
-      onError((error, { path }) => logUnexpectedRpcError(error, path)),
-    ],
+    clientInterceptors: [onError((error, { path }) => logUnexpectedRpcError(error, path))],
   });
   const app = new Hono();
   app.use("*", requestLogging(logger));

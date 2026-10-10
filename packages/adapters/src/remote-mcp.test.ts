@@ -670,6 +670,12 @@ describe("pinned private endpoint", () => {
     ["link-local metadata", ["169.254.169.254"]],
     ["mapped link-local metadata", ["::ffff:169.254.169.254"]],
     ["the unspecified address", ["0.0.0.0"]],
+    ["NAT64-encoded loopback", ["64:ff9b::7f00:1"]],
+    ["NAT64-encoded link-local", ["64:ff9b::a9fe:101"]],
+    ["6to4-encoded loopback", ["2002:7f00:1::1"]],
+    ["IPv6 loopback", ["::1"]],
+    ["IPv6 link-local", ["fe80::1"]],
+    ["shared address space", ["100.64.0.1"]],
     ["nothing", []],
   ])("refuses the pinned host when it resolves to %s", async (_label, addresses) => {
     await expect(

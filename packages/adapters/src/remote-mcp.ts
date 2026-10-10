@@ -33,8 +33,8 @@ export interface RemoteUrlPolicy {
   /**
    * One exact DNS name a deployment-owned connector may reach on private addresses,
    * such as a private service endpoint. Only that name is exempt: it still needs HTTPS,
-   * and every address it resolves to must be private (never loopback, link-local or
-   * cloud metadata). Every other host keeps the default policy.
+   * and every address it resolves to must be RFC 1918 IPv4 or IPv6 unique-local.
+   * Every other host keeps the default policy.
    */
   privateEndpointHost?: string;
 }
@@ -392,24 +392,23 @@ function isPinnedPrivateHost(hostname: string, policy: RemoteUrlPolicy): boolean
   return normalizeHostname(hostname) === pin;
 }
 
-function isUnspecifiedAddress(address: string): boolean {
-  return /^0\./.test(address) || /^[0:]+$/.test(address);
+/** RFC 1918 IPv4 or IPv6 unique-local only. An allowlist, so loopback, link-local,
+ * metadata, CGNAT and transition-encoded forms (NAT64, 6to4) never qualify. */
+function isPinnablePrivateAddress(value: string): boolean {
+  const address = value.toLowerCase().replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, "");
+  if (isIP(address) === 4) {
+    const [a, b] = address.split(".").map(Number);
+    return a === 10 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168);
+  }
+  if (isIP(address) !== 6) return false;
+  const first = address.split(":")[0] ?? "";
+  return first.length === 4 && (Number.parseInt(first, 16) & 0xfe00) === 0xfc00;
 }
 
 function assertPinnedPrivateAddresses(addresses: ResolvedAddress[]): void {
   if (
     addresses.length === 0 ||
-    addresses.some((entry) => {
-      const address = entry.address.replace(/^::ffff:/i, "");
-      return (
-        isIP(address) === 0 ||
-        isUnspecifiedAddress(address) ||
-        isCloudMetadataAddress(address) ||
-        isLinkLocalAddress(address) ||
-        isLoopbackAddress(address) ||
-        !isPrivateAddress(address)
-      );
-    })
+    addresses.some((entry) => !isPinnablePrivateAddress(entry.address))
   ) {
     throw new Error("Private endpoint must resolve only to private addresses");
   }

@@ -10,10 +10,8 @@ import { redactConnectorPayload, sanitizeConnectorError } from "./connector-safe
 import type { RemoteMcpOptions, RemoteTransportDependencies } from "./remote-mcp.js";
 import { callRemoteMcpTool, listRemoteMcpTools } from "./remote-mcp.js";
 
-/** Connectors a lock-down deployment drops: user-added MCP servers and installs. */
-export const USER_MANAGED_CONNECTOR_IDS: ReadonlySet<string> = new Set(["mcp", "installed"]);
-/** Built-in tools a lock-down deployment removes from every run. */
-export const LOCKDOWN_DISABLED_BUILTIN_TOOLS: readonly string[] = ["add_mcp_server"];
+/** Connector id of the deployment-owned MCP server. User-added sources never use it. */
+export const DEPLOYMENT_CONNECTOR_ID = "deployment";
 
 export interface DeploymentMcpConfig {
   endpoint: string;
@@ -23,8 +21,6 @@ export interface DeploymentMcpConfig {
 }
 
 export interface DeploymentConnectorConfig {
-  /** Users cannot add their own MCP servers or connectors. */
-  lockdown: boolean;
   /** A deployment-owned MCP server offered to every run. */
   mcp?: DeploymentMcpConfig;
 }
@@ -35,14 +31,13 @@ export function deploymentConnectorConfigFromEnv(
   const endpoint = env.DEPLOYMENT_MCP_URL?.trim() || undefined;
   const token = env.DEPLOYMENT_MCP_TOKEN?.trim() || undefined;
   const privateEndpoint = env.DEPLOYMENT_MCP_PRIVATE_ENDPOINT === "true";
-  const lockdown = env.CONNECTOR_LOCKDOWN === "true";
   if (!endpoint) {
     if (token || privateEndpoint) {
       throw new Error(
         "DEPLOYMENT_MCP_TOKEN and DEPLOYMENT_MCP_PRIVATE_ENDPOINT need DEPLOYMENT_MCP_URL",
       );
     }
-    return { lockdown };
+    return {};
   }
   let url: URL;
   try {
@@ -56,23 +51,22 @@ export function deploymentConnectorConfigFromEnv(
   if (privateEndpoint && isIP(url.hostname.replace(/^\[|\]$/g, "")) !== 0) {
     throw new Error("DEPLOYMENT_MCP_PRIVATE_ENDPOINT needs a DNS hostname, not an IP address");
   }
-  return { lockdown, mcp: { endpoint, token, privateEndpoint } };
+  return { mcp: { endpoint, token, privateEndpoint } };
 }
 
-/** Applies the deployment's connector policy to the providers a composition root built. */
+/**
+ * Puts the deployment MCP server ahead of the user-owned providers a composition root
+ * built. The registry gives a colliding tool name to the provider listed first, so a
+ * user-added tool can never take a deployment tool's name; it gets a prefixed one.
+ * User sources are database rows the user RPCs edit, and this one is config, so those
+ * RPCs cannot reach it.
+ */
 export function deploymentConnectorProviders(
   config: DeploymentConnectorConfig,
   providers: ConnectorProvider[],
   remote: RemoteTransportDependencies = {},
 ): ConnectorProvider[] {
-  const kept = config.lockdown
-    ? providers.filter((provider) => !USER_MANAGED_CONNECTOR_IDS.has(provider.describe().id))
-    : providers;
-  return config.mcp ? [...kept, new DeploymentMcpConnector(config.mcp, remote)] : kept;
-}
-
-export function deploymentDisabledBuiltinTools(config: DeploymentConnectorConfig): string[] {
-  return config.lockdown ? [...LOCKDOWN_DISABLED_BUILTIN_TOOLS] : [];
+  return config.mcp ? [new DeploymentMcpConnector(config.mcp, remote), ...providers] : providers;
 }
 
 /** An MCP server the deployment owner configures; users cannot change or remove it. */
@@ -84,19 +78,24 @@ export class DeploymentMcpConnector implements ConnectorProvider {
 
   describe() {
     return {
-      id: "deployment",
+      id: DEPLOYMENT_CONNECTOR_ID,
       contractVersion: "1",
       adapterVersion: "0.1.0",
       capabilities: { discover: true, oauth: false, secretsBrokered: true },
     };
   }
 
-  discoverTools(context: AdapterContext): Promise<ConnectorTool[]> {
-    return listRemoteMcpTools(this.options(context));
+  async discoverTools(context: AdapterContext): Promise<ConnectorTool[]> {
+    try {
+      return await listRemoteMcpTools(this.options(context));
+    } catch (error) {
+      // The registry logs discovery failures; keep the token out of that log.
+      throw new Error(sanitizeConnectorError(error, this.secrets()));
+    }
   }
 
   async *execute(call: ConnectorCall, context: AdapterContext): AsyncIterable<ConnectorEvent> {
-    const secrets = this.config.token ? [this.config.token] : [];
+    const secrets = this.secrets();
     try {
       const result = await callRemoteMcpTool(
         { ...this.options(context), meta: callMeta(context) },
@@ -107,6 +106,10 @@ export class DeploymentMcpConnector implements ConnectorProvider {
     } catch (error) {
       yield { type: "error", message: sanitizeConnectorError(error, secrets) };
     }
+  }
+
+  private secrets(): string[] {
+    return this.config.token ? [this.config.token] : [];
   }
 
   private options(context: AdapterContext): RemoteMcpOptions {

@@ -100,7 +100,7 @@ export interface AppEnv {
   mcpStdioAllowedCommands: string[];
   /** Deployment-owner escape for remote MCP on RFC1918 / Docker-network hosts. */
   mcpAllowPrivateEndpoint: boolean;
-  /** Deployment-owned MCP server and the lock-down on user-added connectors. */
+  /** Deployment-owned MCP server, offered beside user-added connectors. */
   deploymentConnectors: DeploymentConnectorConfig;
   port: number;
   gitSha: string | undefined;

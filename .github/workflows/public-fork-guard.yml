@@ -25,8 +25,8 @@ jobs:
           fetch-depth: 0
       - name: Scan tree, commit messages and pull request text
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.after }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
@@ -47,11 +47,17 @@ jobs:
             echo "::error::Deployment-specific values are tracked in the tree"
             found=1
           fi
-          if [ -n "$BASE_SHA" ]; then
-            if git log --format='%H %B' "$BASE_SHA..$HEAD_SHA" | strip_links | grep -niE "${patterns[@]}"; then
-              echo "::error::A commit message carries deployment-specific values"
-              found=1
-            fi
+          # A push whose previous head is unknown (first push, force-push) scans its head.
+          if [ -n "${BASE_SHA//0/}" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            range=("$BASE_SHA..$HEAD_SHA")
+          else
+            range=(-1 "$HEAD_SHA")
+          fi
+          if git log --format='%H %B' "${range[@]}" | strip_links | grep -niE "${patterns[@]}"; then
+            echo "::error::A commit message carries deployment-specific values"
+            found=1
+          fi
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             if printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | strip_links | grep -niE "${patterns[@]}"; then
               echo "::error::The pull request title or body carries deployment-specific values"
               found=1

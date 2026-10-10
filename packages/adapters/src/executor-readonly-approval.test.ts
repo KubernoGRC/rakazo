@@ -11,7 +11,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isApprovalPausedResult } from "./approval-effect.js";
 import { MAX_SHARED_MEMORY_CHARS } from "./builtin-tools.js";
 import type * as ComputerLifecycleModule from "./computer-lifecycle.js";
-import { deploymentDisabledBuiltinTools } from "./deployment-connectors.js";
 import { createRunExecutor } from "./executor.js";
 import { catalogEntries, resolveCatalogCall } from "./lazy-tool-catalog.js";
 
@@ -60,13 +59,11 @@ function fixture({
   shutdownSignal,
   builtin = false,
   disabledBuiltinTools = [],
-  deploymentDisabledBuiltinTools,
   existingSharedMemory,
   advanceRevisionAfterRead = false,
 }: {
   builtin?: boolean;
   disabledBuiltinTools?: string[];
-  deploymentDisabledBuiltinTools?: string[];
   existingSharedMemory?: string;
   /** Simulates another writer landing between the save's read and its commit. */
   advanceRevisionAfterRead?: boolean;
@@ -289,12 +286,10 @@ function fixture({
     secrets,
     autoReview: autoReviewProvider,
     shutdownSignal,
-    disabledBuiltinTools: deploymentDisabledBuiltinTools,
   } as unknown as Parameters<typeof createRunExecutor>[0]);
   return {
     effects,
     results,
-    runtimeRun,
     execute,
     commit,
     sharedMemoryState,
@@ -325,26 +320,6 @@ describe("disabled builtins", () => {
     expect(f.commit).not.toHaveBeenCalled();
     expect(f.execute).not.toHaveBeenCalled();
     expect(f.effects).toEqual([]);
-  });
-
-  it("applies the deployment's disabled list on top of the bot's own", async () => {
-    const f = fixture({
-      name: "add_mcp_server",
-      builtin: true,
-      deploymentDisabledBuiltinTools: deploymentDisabledBuiltinTools({ lockdown: true }),
-    });
-    f.setCalls([
-      {
-        args: { name: "Mine", transport: "streamable_http", endpoint: "https://example.test/mcp" },
-        executionId: "call-1",
-      },
-    ]);
-    await f.run();
-    const offered = f.runtimeRun.mock.calls[0]![0].tools.map((tool) => tool.name);
-    expect(offered).not.toContain("add_mcp_server");
-    expect(offered).toContain("save_shared_memory");
-    expect(f.results).toEqual([{ error: "This tool is disabled for this bot." }]);
-    expect(f.execute).not.toHaveBeenCalled();
   });
 });
 
