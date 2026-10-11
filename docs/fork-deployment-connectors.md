@@ -82,6 +82,9 @@ applies.
 - `infra/sandboxes/supervisor/src/computer-hardening.ts` (new): the hardening check. `infra/sandboxes/supervisor/src/index.ts`: one import, a shared `createInput` for resume and create, and one term in the resume predicate.
 - `.github/workflows/public-fork-guard.yml` and `.github/scripts/public-fork-guard*.sh` (new): fail when any introduced commit's tree, any commit message or a pull request's text contains deployment-specific values, or when gitleaks finds a credential in an introduced commit's patch, a commit message or the pull request text. Each commit is scanned, so a value added and then removed is still caught. Commits already on upstream's `main` are excluded. The guard's self-test plants generated values and must see them fail before the scan runs.
 
+The OIDC group gate is a separate patch set. Its files are listed in
+[fork-oidc-group-gate.md](fork-oidc-group-gate.md), and the procedure below covers them too.
+
 Only the `app` image changes. The supervisor runs from it. The `updater` and `computer` images are unaffected.
 
 ## Rebasing on upstream
