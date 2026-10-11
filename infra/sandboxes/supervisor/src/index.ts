@@ -19,6 +19,7 @@ import Docker from "dockerode";
 import { Hono, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
+import { computerHardeningMatches } from "./computer-hardening.js";
 import {
   assertVolumeSubpathSupport,
   COMPUTER_GID,
@@ -236,6 +237,8 @@ app.post("/computers", async (c) => {
           restrictedBridgeOk &&
           info.Config.User === computerUser &&
           controlPublishOk &&
+          // Fork patch: never resume a computer holding more privilege than create grants.
+          computerHardeningMatches(info.HostConfig) &&
           (!storage.homeVolume || homeVolumeMatches(info.HostConfig.Mounts, storage.homeVolume)) &&
           // A computer that cannot rejoin its network is replaced below instead.
           (!reconnect ||

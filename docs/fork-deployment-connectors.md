@@ -33,14 +33,41 @@ conversation. It must never grant rights based on them.
   for MCP servers, installs and integration settings edit database rows only, so
   they cannot change or remove it.
 
+## Computer hardening on resume
+
+Upstream creates every computer unprivileged. It drops every capability, sets
+`no-new-privileges`, runs as UID 1000, and maps no devices
+(`containerCreateOptions` in `infra/sandboxes/supervisor/src/computer-spec.ts`).
+That is what keeps a computer from rewriting the host's netfilter rules and
+undoing the host's per-computer network isolation.
+
+Upstream's resume path, though, reuses an existing `rakazo.managed` container
+after checking only its image, user, network and mounts. A container created
+some other way could be resumed with whatever privileges it was created with:
+an older build, a hand-run `docker run`, or a compose override. The fork adds
+`computerHardeningMatches` (`infra/sandboxes/supervisor/src/computer-hardening.ts`)
+to the resume predicate. A container is replaced instead of resumed if it:
+
+- is privileged;
+- adds any capability;
+- does not drop `ALL`;
+- lacks `no-new-privileges`;
+- turns seccomp, AppArmor or SELinux labelling off;
+- maps devices;
+- shares a host namespace.
+
+This check is not behind a flag. Upstream never creates a container that fails
+it, so on an otherwise unpatched instance it changes nothing.
+
 ## Where the patch touches upstream
 
 - `packages/adapters/src/deployment-connectors.ts` (new): config and the provider.
 - `packages/adapters/src/remote-mcp.ts`: the `privateEndpointHost` policy, and `meta` on tool calls.
 - `apps/api/src/app.ts`, `apps/api/src/env.ts` and `apps/worker/src/index.ts`: one wrapper around each `createConnectorStack` provider list, plus the env read.
+- `infra/sandboxes/supervisor/src/computer-hardening.ts` (new): the hardening check. `infra/sandboxes/supervisor/src/index.ts`: one import and one term in the resume predicate.
 - `.github/workflows/public-fork-guard.yml` and `.github/scripts/public-fork-guard*.sh` (new): fail when any introduced commit's tree, any commit message or a pull request's text contains deployment-specific values, or when gitleaks finds a credential in an introduced commit's patch, a commit message or the pull request text. Each commit is scanned, so a value added and then removed is still caught. Commits already on upstream's `main` are excluded. The guard's self-test plants generated values and must see them fail before the scan runs.
 
-Only the `app` image changes. The `updater` and `computer` images are unaffected.
+Only the `app` image changes. The supervisor runs from it. The `updater` and `computer` images are unaffected.
 
 ## Rebasing on upstream
 
