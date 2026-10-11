@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   computerMatchesCreateSpec,
   computerSpecMismatches,
+  DOCKER_DEFAULT_MASKED_PATHS,
   type InspectedComputer,
   SPEC_FIELDS,
   UNCHECKED_CREATE_FIELDS,
@@ -35,6 +36,7 @@ function inspectedFrom(
 ): InspectedComputer {
   return {
     Config: { User: spec.User },
+    NetworkSettings: { Networks: { [spec.HostConfig.NetworkMode]: {} } },
     HostConfig: {
       CapAdd: null,
       Devices: [],
@@ -46,7 +48,21 @@ function inspectedFrom(
       UsernsMode: "",
       Privileged: false,
       ReadonlyRootfs: false,
-      MaskedPaths: ["/proc/kcore", "/proc/keys"],
+      PublishAllPorts: false,
+      MaskedPaths: [
+        "/proc/acpi",
+        "/proc/asound",
+        "/proc/interrupts",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/latency_stats",
+        "/proc/sched_debug",
+        "/proc/scsi",
+        "/proc/timer_list",
+        "/proc/timer_stats",
+        "/sys/devices/virtual/powercap",
+        "/sys/firmware",
+      ],
       Tmpfs: null,
       VolumesFrom: null,
       OomKillDisable: false,
@@ -163,6 +179,60 @@ describe("computer spec on resume", () => {
     expect(computerSpecMismatches(inspectedFrom(spec, override), spec)).toContain(field);
   });
 
+  // Review round 2.
+  it("refuses a container attached to a network beside its own", () => {
+    const spec = expected({ networkMode: computerNetworkNameFor("bot") });
+    const inspected = {
+      ...inspectedFrom(spec),
+      NetworkSettings: {
+        Networks: { [computerNetworkNameFor("bot")]: {}, [computerNetworkNameFor("other")]: {} },
+      },
+    };
+    expect(computerSpecMismatches(inspected, spec)).toEqual(["Networks"]);
+  });
+
+  it("refuses a container attached only to another network", () => {
+    const spec = expected({ networkMode: computerNetworkNameFor("bot") });
+    const inspected = {
+      ...inspectedFrom(spec),
+      NetworkSettings: { Networks: { bridge: {} } },
+    };
+    expect(computerSpecMismatches(inspected, spec)).toEqual(["Networks"]);
+  });
+
+  it("accepts a stopped container with no live attachment", () => {
+    const spec = expected({ networkMode: computerNetworkNameFor("bot") });
+    const inspected = { ...inspectedFrom(spec), NetworkSettings: { Networks: {} } };
+    expect(computerSpecMismatches(inspected, spec)).toEqual([]);
+  });
+
+  it("refuses PublishAllPorts", () => {
+    const spec = expected();
+    expect(computerSpecMismatches(inspectedFrom(spec, { PublishAllPorts: true }), spec)).toEqual([
+      "PublishAllPorts",
+    ]);
+  });
+
+  it.each([
+    [["/irrelevant"]],
+    [["/proc/kcore"]],
+    [DOCKER_DEFAULT_MASKED_PATHS.filter((path) => path !== "/proc/keys")],
+  ])("refuses a partial mask list %j", (masked) => {
+    const spec = expected();
+    expect(computerSpecMismatches(inspectedFrom(spec, { MaskedPaths: masked }), spec)).toEqual([
+      "MaskedPaths",
+    ]);
+  });
+
+  it("accepts the default mask list with or without a newer daemon's extras", () => {
+    const spec = expected();
+    for (const masked of [[...DOCKER_DEFAULT_MASKED_PATHS], null]) {
+      expect(computerSpecMismatches(inspectedFrom(spec, { MaskedPaths: masked }), spec)).toEqual(
+        [],
+      );
+    }
+  });
+
   it("refuses a different user and a missing HostConfig", () => {
     const spec = expected();
     expect(
@@ -199,6 +269,7 @@ describe("computer spec on resume", () => {
     PidsLimit: 1,
     ShmSize: 1,
     OomKillDisable: true,
+    PublishAllPorts: true,
     PortBindings: { "1/tcp": [{ HostIp: "127.0.0.1", HostPort: "0" }] },
   };
 

@@ -57,11 +57,12 @@ on every field in `SPEC_FIELDS`
 - devices;
 - network, PID, IPC, UTS and user namespaces;
 - binds, mounts, volumes-from and tmpfs;
-- read-only and masked paths;
+- read-only paths, and masked paths (which must include Docker's default list);
 - sysctls;
 - memory, swap, CPU, PID and shm ceilings;
-- published ports;
-- the user.
+- published ports and `PublishAllPorts`;
+- the user;
+- attachment to no network other than its own.
 
 A container that differs is replaced. The check is structural, not a deny-list:
 a field create leaves unset must hold Docker's isolated default. A test fails

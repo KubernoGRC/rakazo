@@ -375,7 +375,19 @@ describe("computer hardening on resume", () => {
     },
     { name: "no PID ceiling", override: { PidsLimit: undefined }, resumed: false },
     { name: "no memory ceiling", override: { Memory: 0, MemorySwap: 0 }, resumed: false },
-  ])("$name: resumed=$resumed", async ({ override, resumed }) => {
+    { name: "PublishAllPorts", override: { PublishAllPorts: true }, resumed: false },
+    {
+      name: "a second network attached",
+      override: {},
+      extraNetwork: computerNetworkNameFor("other"),
+      resumed: false,
+    },
+  ] as Array<{
+    name: string;
+    override: Record<string, unknown>;
+    extraNetwork?: string;
+    resumed: boolean;
+  }>)("$name: resumed=$resumed", async ({ override, extraNetwork, resumed }) => {
     const { supervisorApp } = await import("./index.js");
     const homePath = path.join(process.env.DATA_DIR!, "homes", "bot");
     const info = {
@@ -393,7 +405,10 @@ describe("computer hardening on resume", () => {
       State: { Running: false },
       NetworkSettings: {
         Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
-        Networks: { [computerNetworkNameFor("bot")]: { NetworkID: "bot-network" } },
+        Networks: {
+          [computerNetworkNameFor("bot")]: { NetworkID: "bot-network" },
+          ...(extraNetwork ? { [extraNetwork]: { NetworkID: "other-network" } } : {}),
+        },
       },
     };
     const existing = {

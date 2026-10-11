@@ -26,6 +26,7 @@ type Json = unknown;
 export interface InspectedComputer {
   Config?: { User?: string | null } | null;
   HostConfig?: object | null;
+  NetworkSettings?: { Networks?: object | null } | null;
 }
 
 /** What `containerCreateOptions` returns that this check reads. */
@@ -85,9 +86,34 @@ const supersetOf: FieldCheck = (actual, expected) => {
   return list(expected).every((path) => have.has(String(path)));
 };
 
-/** Unset means the daemon's default mask list. An explicit empty list unmasks /proc. */
+/**
+ * The /proc and /sys paths Docker has masked by default since 20.10. Newer
+ * daemons mask more (for example /proc/interrupts), which is fine; a list
+ * missing any of these exposes what the default hides.
+ */
+export const DOCKER_DEFAULT_MASKED_PATHS: readonly string[] = [
+  "/proc/acpi",
+  "/proc/asound",
+  "/proc/kcore",
+  "/proc/keys",
+  "/proc/latency_stats",
+  "/proc/sched_debug",
+  "/proc/scsi",
+  "/proc/timer_list",
+  "/proc/timer_stats",
+  "/sys/firmware",
+];
+
+/**
+ * When create leaves MaskedPaths unset, the daemon applies its default list and
+ * reports it on inspect. A list that leaves out a default path fails, and an
+ * explicit empty list (which unmasks everything) fails with it. `null` means the
+ * daemon recorded no override, so its defaults apply.
+ */
 const maskedPaths: FieldCheck = (actual, expected) =>
-  expected === undefined ? actual == null || list(actual).length > 0 : exactSet(actual, expected);
+  expected === undefined
+    ? actual == null || supersetOf(actual, DOCKER_DEFAULT_MASKED_PATHS)
+    : exactSet(actual, expected);
 
 /** Mounts compare on what decides what the computer can reach and write. */
 const mounts: FieldCheck = (actual, expected) => {
@@ -155,6 +181,7 @@ export const SPEC_FIELDS: Readonly<Record<string, FieldCheck>> = {
   PidsLimit: exact,
   ShmSize: exact,
   OomKillDisable: flag,
+  PublishAllPorts: flag,
   PortBindings: portBindings,
 };
 
@@ -173,6 +200,11 @@ export function computerSpecMismatches(
     .filter(([field, check]) => !check(actual[field], want[field]))
     .map(([field]) => field);
   if ((inspected.Config?.User ?? undefined) !== expected.User) mismatches.unshift("User");
+  // A computer is attached to its own network and nothing else. The supervisor
+  // attaches peers to a computer's network, never a computer to another one, so
+  // an extra attachment (`docker network connect`) can only reach other bots.
+  const attached = Object.keys(record(inspected.NetworkSettings?.Networks));
+  if (attached.some((name) => name !== want.NetworkMode)) mismatches.push("Networks");
   return mismatches;
 }
 
