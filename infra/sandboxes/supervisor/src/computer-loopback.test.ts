@@ -4,18 +4,34 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { resolveSupervisorToken } from "@rakazo/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { computerHardeningProblems } from "./computer-hardening.js";
+import { computerSpecMismatches } from "./computer-hardening.js";
 import {
   COMPUTER_IMAGE,
   computerBridgeNameFor,
   computerNetworkNameFor,
   computerNetworkOwnerFor,
+  containerCreateOptions,
   containerNameFor,
   hostComputerUser,
 } from "./computer-spec.js";
 
-// Fork patch: the resume path now requires the hardening containerCreateOptions applies.
-const HARDENED_HOST_CONFIG = { CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"] };
+// Fork patch: a computer resumes only when it matches what create would build, so
+// resume fixtures carry create's own HostConfig. Their network and ports are set
+// per test on top of it.
+function createdHostConfig(homePath = path.join(process.env.DATA_DIR!, "homes", "bot")) {
+  const {
+    NetworkMode: _network,
+    PortBindings: _ports,
+    ...hostConfig
+  } = containerCreateOptions({
+    name: containerNameFor("bot"),
+    image: COMPUTER_IMAGE,
+    botId: "bot",
+    spaceId: "space",
+    homePath,
+  }).HostConfig;
+  return hostConfig;
+}
 
 const mocks = vi.hoisted(() => ({
   docker: {
@@ -251,7 +267,7 @@ describe("computer loopback provision lifecycle", () => {
         Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
       },
       HostConfig: {
-        ...HARDENED_HOST_CONFIG,
+        ...createdHostConfig(),
         NetworkMode: computerNetworkNameFor("bot"),
         PortBindings: { "7070/tcp": hosts.map((HostIp) => ({ HostIp, HostPort: "0" })) },
       },
@@ -319,8 +335,8 @@ describe("computer loopback provision lifecycle", () => {
   });
 });
 
-// Fork patch: a computer is resumed only when it is as confined as one
-// containerCreateOptions would build. Anything with more privilege is replaced.
+// Fork patch: a computer is resumed only when it matches what
+// containerCreateOptions would build. Anything else is replaced.
 describe("computer hardening on resume", () => {
   it.each([
     { name: "hardened", override: {}, resumed: true },
@@ -335,6 +351,30 @@ describe("computer hardening on resume", () => {
       override: { Devices: [{ PathOnHost: "/dev/net/tun" }] },
       resumed: false,
     },
+    {
+      name: "a later no-new-privileges=false",
+      override: { SecurityOpt: ["no-new-privileges:true", "no-new-privileges:false"] },
+      resumed: false,
+    },
+    {
+      name: "a bare SELinux disable",
+      override: { SecurityOpt: ["no-new-privileges:true", "disable"] },
+      resumed: false,
+    },
+    { name: "a shared PID namespace", override: { PidMode: "container:peer" }, resumed: false },
+    { name: "a shared IPC namespace", override: { IpcMode: "container:peer" }, resumed: false },
+    {
+      name: "another bot's home mounted",
+      override: {
+        Binds: [
+          `${path.join(process.env.DATA_DIR ?? "", "homes", "bot")}:/home/rakazo`,
+          "/var/rakazo/homes/other:/mnt/other",
+        ],
+      },
+      resumed: false,
+    },
+    { name: "no PID ceiling", override: { PidsLimit: undefined }, resumed: false },
+    { name: "no memory ceiling", override: { Memory: 0, MemorySwap: 0 }, resumed: false },
   ])("$name: resumed=$resumed", async ({ override, resumed }) => {
     const { supervisorApp } = await import("./index.js");
     const homePath = path.join(process.env.DATA_DIR!, "homes", "bot");
@@ -345,7 +385,7 @@ describe("computer hardening on resume", () => {
         Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
       },
       HostConfig: {
-        ...HARDENED_HOST_CONFIG,
+        ...createdHostConfig(),
         NetworkMode: computerNetworkNameFor("bot"),
         PortBindings: {},
         ...override,
@@ -400,7 +440,9 @@ describe("computer hardening on resume", () => {
       expect(existing.start).not.toHaveBeenCalled();
       expect(existing.remove).toHaveBeenCalledWith({ force: true });
       const [options] = mocks.docker.createContainer.mock.calls[0]!;
-      expect(computerHardeningProblems(options.HostConfig)).toEqual([]);
+      expect(
+        computerSpecMismatches({ Config: options, HostConfig: options.HostConfig }, options),
+      ).toEqual([]);
     }
   });
 });
@@ -531,7 +573,7 @@ describe("provisioning network rollback", () => {
         Config: {
           Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
         },
-        HostConfig: { ...HARDENED_HOST_CONFIG, PortBindings: {} },
+        HostConfig: { ...createdHostConfig(), PortBindings: {} },
         State: { Running: true },
       }),
     };
@@ -593,7 +635,7 @@ describe("restricted egress rekeying", () => {
         User: hostComputerUser(),
         Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
       },
-      HostConfig: { ...HARDENED_HOST_CONFIG, NetworkMode: botNet, PortBindings: {} },
+      HostConfig: { ...createdHostConfig(), NetworkMode: botNet, PortBindings: {} },
       State: { Running: false },
       NetworkSettings: {
         Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
@@ -771,7 +813,7 @@ describe("space computer limit enforcement", () => {
       start: vi.fn().mockResolvedValue(undefined),
       inspect: vi.fn().mockResolvedValue({
         State: { Running: true },
-        HostConfig: { ...HARDENED_HOST_CONFIG, PortBindings: {} },
+        HostConfig: { ...createdHostConfig(), PortBindings: {} },
       }),
       remove: vi.fn().mockResolvedValue(undefined),
     };
@@ -866,7 +908,7 @@ describe("space computer limit enforcement", () => {
         },
         State: { Running: true },
         HostConfig: {
-          ...HARDENED_HOST_CONFIG,
+          ...createdHostConfig(path.join(process.env.DATA_DIR!, "homes", "bot-existing")),
           NetworkMode: computerNetworkNameFor("bot-existing"),
           PortBindings: {},
           Mounts: [],
@@ -928,7 +970,7 @@ describe("space computer limit enforcement", () => {
         },
         State: { Running: true },
         HostConfig: {
-          ...HARDENED_HOST_CONFIG,
+          ...createdHostConfig(),
           NetworkMode: computerNetworkNameFor("bot-detached"),
           PortBindings: {},
           Mounts: [],
@@ -1056,7 +1098,7 @@ describe("space computer limit enforcement", () => {
         },
         State: { Running: true },
         HostConfig: {
-          ...HARDENED_HOST_CONFIG,
+          ...createdHostConfig(path.join(process.env.DATA_DIR!, "homes", "bot-existing")),
           NetworkMode: computerNetworkNameFor("bot-existing"),
           PortBindings: {},
           Mounts: [],
@@ -1136,7 +1178,7 @@ describe("screen release status", () => {
         Config: {
           Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
         },
-        HostConfig: { ...HARDENED_HOST_CONFIG, NetworkMode: computerNetworkNameFor("bot") },
+        HostConfig: { ...createdHostConfig(), NetworkMode: computerNetworkNameFor("bot") },
         State: { Running: true },
         NetworkSettings: {
           Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
@@ -1257,7 +1299,7 @@ describe("screen registry across run boundaries", () => {
         Config: {
           Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
         },
-        HostConfig: { ...HARDENED_HOST_CONFIG, NetworkMode: computerNetworkNameFor("bot") },
+        HostConfig: { ...createdHostConfig(), NetworkMode: computerNetworkNameFor("bot") },
         State: { Running: true },
         NetworkSettings: {
           Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
@@ -1672,7 +1714,7 @@ describe("computer network reclaim", () => {
           User: hostComputerUser(),
           Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
         },
-        HostConfig: { ...HARDENED_HOST_CONFIG, NetworkMode: botNet, PortBindings: {} },
+        HostConfig: { ...createdHostConfig(), NetworkMode: botNet, PortBindings: {} },
         State: { Running: false },
         NetworkSettings: { Networks: networks },
       };

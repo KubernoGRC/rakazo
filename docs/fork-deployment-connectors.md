@@ -36,35 +36,49 @@ conversation. It must never grant rights based on them.
 ## Computer hardening on resume
 
 Upstream creates every computer unprivileged. It drops every capability, sets
-`no-new-privileges`, runs as UID 1000, and maps no devices
-(`containerCreateOptions` in `infra/sandboxes/supervisor/src/computer-spec.ts`).
-That is what keeps a computer from rewriting the host's netfilter rules and
-undoing the host's per-computer network isolation.
+`no-new-privileges`, runs as UID 1000, maps no devices, mounts only the bot's
+home, and sets resource ceilings (`containerCreateOptions` in
+`infra/sandboxes/supervisor/src/computer-spec.ts`). That is what keeps a computer
+from rewriting the host's netfilter rules, reading another bot's home, or
+starving the host.
 
 Upstream's resume path, though, reuses an existing `rakazo.managed` container
-after checking only its image, user, network and mounts. A container created
-some other way could be resumed with whatever privileges it was created with:
-an older build, a hand-run `docker run`, or a compose override. The fork adds
-`computerHardeningMatches` (`infra/sandboxes/supervisor/src/computer-hardening.ts`)
-to the resume predicate. A container is replaced instead of resumed if it:
+after checking only its image, user, network and home mount. A container created
+some other way (an older build, a hand-run `docker run`, a compose override) was
+started with whatever privileges it had.
 
-- is privileged;
-- adds any capability;
-- does not drop `ALL`;
-- lacks `no-new-privileges`;
-- turns seccomp, AppArmor or SELinux labelling off;
-- maps devices;
-- shares a host namespace.
+The fork builds the expected options with the same `containerCreateOptions` call
+that create uses, from one shared input. The inspected container must then match
+on every field in `SPEC_FIELDS`
+(`infra/sandboxes/supervisor/src/computer-hardening.ts`):
 
-This check is not behind a flag. Upstream never creates a container that fails
-it, so on an otherwise unpatched instance it changes nothing.
+- privileged mode and capabilities;
+- `SecurityOpt` as an exact set;
+- devices;
+- network, PID, IPC, UTS and user namespaces;
+- binds, mounts, volumes-from and tmpfs;
+- read-only and masked paths;
+- sysctls;
+- memory, swap, CPU, PID and shm ceilings;
+- published ports;
+- the user.
+
+A container that differs is replaced. The check is structural, not a deny-list:
+a field create leaves unset must hold Docker's isolated default. A test fails
+when create sets a field the check does not cover.
+
+This check is not behind a flag. A container create built matches it as reported
+by a live Docker daemon, so an otherwise unpatched instance resumes exactly as
+before. One consequence: changing `RAKAZO_COMPUTER_MEMORY`, `_CPUS` or
+`_PIDS_LIMIT` now replaces each computer at its next resume, so the new ceiling
+applies.
 
 ## Where the patch touches upstream
 
 - `packages/adapters/src/deployment-connectors.ts` (new): config and the provider.
 - `packages/adapters/src/remote-mcp.ts`: the `privateEndpointHost` policy, and `meta` on tool calls.
 - `apps/api/src/app.ts`, `apps/api/src/env.ts` and `apps/worker/src/index.ts`: one wrapper around each `createConnectorStack` provider list, plus the env read.
-- `infra/sandboxes/supervisor/src/computer-hardening.ts` (new): the hardening check. `infra/sandboxes/supervisor/src/index.ts`: one import and one term in the resume predicate.
+- `infra/sandboxes/supervisor/src/computer-hardening.ts` (new): the hardening check. `infra/sandboxes/supervisor/src/index.ts`: one import, a shared `createInput` for resume and create, and one term in the resume predicate.
 - `.github/workflows/public-fork-guard.yml` and `.github/scripts/public-fork-guard*.sh` (new): fail when any introduced commit's tree, any commit message or a pull request's text contains deployment-specific values, or when gitleaks finds a credential in an introduced commit's patch, a commit message or the pull request text. Each commit is scanned, so a value added and then removed is still caught. Commits already on upstream's `main` are excluded. The guard's self-test plants generated values and must see them fail before the scan runs.
 
 Only the `app` image changes. The supervisor runs from it. The `updater` and `computer` images are unaffected.

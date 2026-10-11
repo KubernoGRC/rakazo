@@ -1,70 +1,184 @@
 /**
- * Fork patch: refuse to resume a computer whose runtime privileges
- * exceed what `containerCreateOptions` grants.
+ * Fork patch: never resume a computer that is not the computer create would build.
  *
- * The create path already drops every capability, sets `no-new-privileges`
- * and adds no devices. The resume path only compared image, user, network and
- * mounts, so a `rakazo.managed` container created some other way (an older
- * build, a hand-run `docker run`, a compose override) was started as it was,
- * privileged or not. A computer holding NET_ADMIN, NET_RAW or SYS_ADMIN, or
- * running privileged, can rewrite the host's netfilter rules and undo the
- * host's per-computer network isolation. Such a container is replaced instead.
+ * `containerCreateOptions` is the single definition of a computer's privileges:
+ * no capabilities, `no-new-privileges`, no devices, its own namespaces, exactly
+ * its home mounted, resource ceilings. Upstream's resume path reused a managed
+ * container after checking only its image, user, network and home mount, so a
+ * container created some other way (an older build, a hand-run `docker run`, a
+ * compose override) was started with whatever it had. A privileged computer, or
+ * one holding NET_ADMIN, NET_RAW or SYS_ADMIN, can rewrite host netfilter and
+ * undo the host's per-computer network isolation. Extra mounts expose other
+ * bots' homes, and missing ceilings let one computer starve the host.
  *
- * Upstream never creates a container that fails this check, so on an unpatched
- * deployment it changes nothing.
+ * The check is structural, not a deny-list. The expected HostConfig is built by
+ * the same function create uses, and the inspected container must match it on
+ * every field in `SPEC_FIELDS`. A field create leaves unset must hold its
+ * isolated default. A deny-list misses the next spelling of the same escalation.
+ *
+ * Upstream never creates a container that fails this, so an otherwise unpatched
+ * instance resumes exactly as before.
  */
 
-/** The HostConfig fields this check reads; Docker's inspect output carries more. */
-interface HostConfig {
-  Privileged?: boolean | null;
-  CapAdd?: string[] | null;
-  CapDrop?: string[] | null;
-  SecurityOpt?: string[] | null;
-  Devices?: unknown[] | null;
-  DeviceCgroupRules?: string[] | null;
-  DeviceRequests?: unknown[] | null;
-  NetworkMode?: string | null;
-  PidMode?: string | null;
-  IpcMode?: string | null;
-  UTSMode?: string | null;
-  UsernsMode?: string | null;
+type Json = unknown;
+
+/** What `docker inspect` returns that this check reads. */
+export interface InspectedComputer {
+  Config?: { User?: string | null } | null;
+  HostConfig?: object | null;
 }
 
-const HOST_NAMESPACE = "host";
-
-/** Security options that switch off a confinement layer outright. */
-const UNCONFINED_OPTION = /^(seccomp|apparmor|label)[=:](unconfined|disable)$/i;
-
-/** Returns the reasons a computer's HostConfig is not hardened; empty means hardened. */
-export function computerHardeningProblems(hostConfig: HostConfig | undefined): string[] {
-  if (!hostConfig) return ["HostConfig is missing"];
-  const problems: string[] = [];
-  if (hostConfig.Privileged) problems.push("privileged");
-  if (hostConfig.CapAdd?.length) problems.push(`adds capabilities ${hostConfig.CapAdd.join(",")}`);
-  if (!hostConfig.CapDrop?.some((cap) => cap.toUpperCase() === "ALL")) {
-    problems.push("does not drop ALL capabilities");
-  }
-  const securityOpt = hostConfig.SecurityOpt ?? [];
-  if (!securityOpt.some((option) => /^no-new-privileges(:true|=true)?$/i.test(option))) {
-    problems.push("no-new-privileges is not set");
-  }
-  const unconfined = securityOpt.filter((option) => UNCONFINED_OPTION.test(option));
-  if (unconfined.length) problems.push(`unconfined: ${unconfined.join(",")}`);
-  if (hostConfig.Devices?.length) problems.push("host devices are mapped");
-  if (hostConfig.DeviceCgroupRules?.length) problems.push("device cgroup rules are set");
-  if (hostConfig.DeviceRequests?.length) problems.push("device requests are set");
-  for (const [field, value] of [
-    ["NetworkMode", hostConfig.NetworkMode],
-    ["PidMode", hostConfig.PidMode],
-    ["IpcMode", hostConfig.IpcMode],
-    ["UTSMode", hostConfig.UTSMode],
-    ["UsernsMode", hostConfig.UsernsMode],
-  ] as const) {
-    if (value === HOST_NAMESPACE) problems.push(`${field} shares the host namespace`);
-  }
-  return problems;
+/** What `containerCreateOptions` returns that this check reads. */
+export interface ExpectedComputer {
+  User?: string;
+  HostConfig: object;
 }
 
-export function computerHardeningMatches(hostConfig: HostConfig | undefined): boolean {
-  return computerHardeningProblems(hostConfig).length === 0;
+type FieldCheck = (actual: Json, expected: Json) => boolean;
+
+const list = (value: Json): unknown[] => (Array.isArray(value) ? value : []);
+const record = (value: Json): Record<string, Json> =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, Json>)
+    : {};
+const canonical = (value: Json): string =>
+  JSON.stringify(value, (_key, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)))
+      : v,
+  );
+const sameSet = (a: unknown[], b: unknown[]) => {
+  const left = new Set(a.map(canonical));
+  const right = new Set(b.map(canonical));
+  return left.size === right.size && [...left].every((value) => right.has(value));
+};
+
+/** Exact set equality; absent and empty are the same. */
+const exactSet: FieldCheck = (actual, expected) => sameSet(list(actual), list(expected));
+
+/** Capability names compare case-insensitively, with or without the CAP_ prefix. */
+const capabilitySet: FieldCheck = (actual, expected) => {
+  const norm = (value: Json) =>
+    list(value).map((cap) => String(cap).toUpperCase().replace(/^CAP_/, ""));
+  return sameSet(norm(actual), norm(expected));
+};
+
+const flag: FieldCheck = (actual, expected) => Boolean(actual) === Boolean(expected);
+const exact: FieldCheck = (actual, expected) => actual === expected;
+const sameRecord: FieldCheck = (actual, expected) =>
+  canonical(record(actual)) === canonical(record(expected));
+
+/**
+ * A namespace mode that create leaves unset must be one of Docker's private
+ * spellings. Anything else fails, including `host` and `container:<id>`.
+ */
+const namespace =
+  (privateDefaults: string[]): FieldCheck =>
+  (actual, expected) =>
+    expected === undefined || expected === ""
+      ? privateDefaults.includes(String(actual ?? ""))
+      : actual === expected;
+
+/** Every path create makes read-only stays read-only; more is fine. */
+const supersetOf: FieldCheck = (actual, expected) => {
+  const have = new Set(list(actual).map(String));
+  return list(expected).every((path) => have.has(String(path)));
+};
+
+/** Unset means the daemon's default mask list. An explicit empty list unmasks /proc. */
+const maskedPaths: FieldCheck = (actual, expected) =>
+  expected === undefined ? actual == null || list(actual).length > 0 : exactSet(actual, expected);
+
+/** Mounts compare on what decides what the computer can reach and write. */
+const mounts: FieldCheck = (actual, expected) => {
+  const norm = (value: Json) =>
+    list(value).map((entry) => {
+      const mount = record(entry);
+      const options = record(mount.VolumeOptions);
+      const bind = record(mount.BindOptions);
+      return {
+        Type: mount.Type ?? "",
+        Source: mount.Source ?? "",
+        Target: mount.Target ?? "",
+        ReadOnly: Boolean(mount.ReadOnly),
+        Subpath: options.Subpath ?? "",
+        Propagation: bind.Propagation ?? "",
+      };
+    });
+  return sameSet(norm(actual), norm(expected));
+};
+
+/**
+ * No port is published that create does not publish, and none on a host
+ * address other than create's.
+ */
+const portBindings: FieldCheck = (actual, expected) => {
+  const want = record(expected);
+  return Object.entries(record(actual)).every(([port, bindings]) => {
+    if (!list(bindings).length) return true;
+    const hostIps = new Set(list(want[port]).map((binding) => record(binding).HostIp));
+    return (
+      hostIps.size > 0 && list(bindings).every((binding) => hostIps.has(record(binding).HostIp))
+    );
+  });
+};
+
+/**
+ * Every security- and resource-relevant HostConfig field, and how it is
+ * compared. A field missing here is not checked. A test fails when create sets a
+ * field that is neither listed here nor in `UNCHECKED_CREATE_FIELDS`.
+ */
+export const SPEC_FIELDS: Readonly<Record<string, FieldCheck>> = {
+  Privileged: flag,
+  CapAdd: capabilitySet,
+  CapDrop: capabilitySet,
+  SecurityOpt: exactSet,
+  Devices: exactSet,
+  DeviceCgroupRules: exactSet,
+  DeviceRequests: exactSet,
+  NetworkMode: exact,
+  PidMode: namespace(["", "private"]),
+  IpcMode: namespace(["", "private", "shareable"]),
+  UTSMode: namespace(["", "private"]),
+  UsernsMode: namespace(["", "private"]),
+  Binds: exactSet,
+  Mounts: mounts,
+  VolumesFrom: exactSet,
+  Tmpfs: sameRecord,
+  ReadonlyRootfs: flag,
+  ReadonlyPaths: supersetOf,
+  MaskedPaths: maskedPaths,
+  Sysctls: sameRecord,
+  Memory: exact,
+  MemorySwap: exact,
+  NanoCpus: exact,
+  PidsLimit: exact,
+  ShmSize: exact,
+  OomKillDisable: flag,
+  PortBindings: portBindings,
+};
+
+/** Create fields that grant nothing, so the check does not compare them. */
+export const UNCHECKED_CREATE_FIELDS: ReadonlySet<string> = new Set(["AutoRemove"]);
+
+/** Returns the fields that differ from what create would build; empty means it matches. */
+export function computerSpecMismatches(
+  inspected: InspectedComputer,
+  expected: ExpectedComputer,
+): string[] {
+  if (!inspected.HostConfig) return ["HostConfig"];
+  const actual = record(inspected.HostConfig);
+  const want = record(expected.HostConfig);
+  const mismatches = Object.entries(SPEC_FIELDS)
+    .filter(([field, check]) => !check(actual[field], want[field]))
+    .map(([field]) => field);
+  if ((inspected.Config?.User ?? undefined) !== expected.User) mismatches.unshift("User");
+  return mismatches;
+}
+
+export function computerMatchesCreateSpec(
+  inspected: InspectedComputer,
+  expected: ExpectedComputer,
+): boolean {
+  return computerSpecMismatches(inspected, expected).length === 0;
 }
