@@ -140,6 +140,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   const passwordAuth = source.AUTH_PASSWORD_ENABLED !== "false";
   if (!passwordAuth && !issuer)
     throw new Error("AUTH_PASSWORD_ENABLED=false requires OIDC configuration");
+  const requiredGroup = oidcRequiredGroup(source, { issuer, passwordAuth });
   const oidc =
     issuer && clientId && clientSecret
       ? {
@@ -151,6 +152,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
             .split(/[\s,]+/)
             .filter(Boolean),
           allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS === "true",
+          ...(requiredGroup ? { requiredGroup } : {}),
         }
       : undefined;
   const authSecret = resolveAuthSecret(source);
@@ -253,6 +255,29 @@ function required(source: NodeJS.ProcessEnv, key: string): string {
   const value = source[key];
   if (!value) throw new Error(`Missing ${key}`);
   return value;
+}
+
+/**
+ * Fork: OIDC_REQUIRED_GROUP restricts sign-in to one IdP group. Once the
+ * variable is present at all, every setting the gate depends on is required,
+ * so a deployment that asked for it cannot start with it silently off.
+ * See docs/fork-oidc-group-gate.md.
+ */
+function oidcRequiredGroup(
+  source: NodeJS.ProcessEnv,
+  { issuer, passwordAuth }: { issuer: string | undefined; passwordAuth: boolean },
+): string | undefined {
+  if (source.OIDC_REQUIRED_GROUP === undefined) return undefined;
+  const group = optional(source.OIDC_REQUIRED_GROUP);
+  if (!group) throw new Error("OIDC_REQUIRED_GROUP must not be empty");
+  if (!issuer)
+    throw new Error(
+      "OIDC_REQUIRED_GROUP requires OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET",
+    );
+  if (passwordAuth) throw new Error("OIDC_REQUIRED_GROUP requires AUTH_PASSWORD_ENABLED=false");
+  if (source.MESSAGING_OPEN_SIGNUP === "true")
+    throw new Error("OIDC_REQUIRED_GROUP requires MESSAGING_OPEN_SIGNUP to be off");
+  return group;
 }
 
 function optional(value: string | undefined): string | undefined {
