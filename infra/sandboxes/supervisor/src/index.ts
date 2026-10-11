@@ -19,6 +19,7 @@ import Docker from "dockerode";
 import { Hono, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
+import { computerMatchesCreateSpec } from "./computer-hardening.js";
 import {
   assertVolumeSubpathSupport,
   COMPUTER_GID,
@@ -193,6 +194,18 @@ app.post("/computers", async (c) => {
         assertVolumeSubpathSupport((await docker.version()).ApiVersion);
       }
       const computerUser = runtimeInfo ? COMPUTER_USER : hostComputerUser(hostUid, hostGid);
+      // Fork patch: resume and create share one input, so a resumed computer is
+      // compared against exactly what create would build.
+      const createInput = {
+        name: containerNameFor(body.botId),
+        image: COMPUTER_IMAGE,
+        botId: body.botId,
+        spaceId: body.spaceId,
+        ...storage,
+        user: computerUser,
+        networkMode,
+        publishControlPort: controlViaLoopback,
+      };
       const existing = await findBotContainer(body.botId, body.spaceId);
       if (existing) {
         const info = await existing.inspect();
@@ -236,6 +249,8 @@ app.post("/computers", async (c) => {
           restrictedBridgeOk &&
           info.Config.User === computerUser &&
           controlPublishOk &&
+          // Fork patch: never resume a computer that differs from what create would build.
+          computerMatchesCreateSpec(info, containerCreateOptions(createInput)) &&
           (!storage.homeVolume || homeVolumeMatches(info.HostConfig.Mounts, storage.homeVolume)) &&
           // A computer that cannot rejoin its network is replaced below instead.
           (!reconnect ||
@@ -281,7 +296,6 @@ app.post("/computers", async (c) => {
             ? COMPUTER_GID
             : hostGid;
         await assertComputerHomeWritable(serviceHomePath, effectiveUid, effectiveGid);
-        const name = containerNameFor(body.botId);
         const createdNetwork =
           screenNetworkMode === "internal"
             ? undefined
@@ -292,17 +306,7 @@ app.post("/computers", async (c) => {
             await existing.remove({ force: true }).catch(() => undefined);
           }
           container = await docker.createContainer(
-            containerCreateOptions({
-              name,
-              image: COMPUTER_IMAGE,
-              botId: body.botId,
-              spaceId: body.spaceId,
-              ...storage,
-              user: computerUser,
-              networkMode,
-              controlToken: randomUUID(),
-              publishControlPort: controlViaLoopback,
-            }),
+            containerCreateOptions({ ...createInput, controlToken: randomUUID() }),
           );
           await container.start();
         } catch (error) {

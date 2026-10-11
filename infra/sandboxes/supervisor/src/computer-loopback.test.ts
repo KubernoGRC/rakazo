@@ -4,14 +4,34 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { resolveSupervisorToken } from "@rakazo/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { computerSpecMismatches } from "./computer-hardening.js";
 import {
   COMPUTER_IMAGE,
   computerBridgeNameFor,
   computerNetworkNameFor,
   computerNetworkOwnerFor,
+  containerCreateOptions,
   containerNameFor,
   hostComputerUser,
 } from "./computer-spec.js";
+
+// Fork patch: a computer resumes only when it matches what create would build, so
+// resume fixtures carry create's own HostConfig. Their network and ports are set
+// per test on top of it.
+function createdHostConfig(homePath = path.join(process.env.DATA_DIR!, "homes", "bot")) {
+  const {
+    NetworkMode: _network,
+    PortBindings: _ports,
+    ...hostConfig
+  } = containerCreateOptions({
+    name: containerNameFor("bot"),
+    image: COMPUTER_IMAGE,
+    botId: "bot",
+    spaceId: "space",
+    homePath,
+  }).HostConfig;
+  return hostConfig;
+}
 
 const mocks = vi.hoisted(() => ({
   docker: {
@@ -247,6 +267,7 @@ describe("computer loopback provision lifecycle", () => {
         Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
       },
       HostConfig: {
+        ...createdHostConfig(),
         NetworkMode: computerNetworkNameFor("bot"),
         PortBindings: { "7070/tcp": hosts.map((HostIp) => ({ HostIp, HostPort: "0" })) },
       },
@@ -310,6 +331,133 @@ describe("computer loopback provision lifecycle", () => {
       expect(options.Env).toContainEqual(
         expect.stringMatching(/^RAKAZO_COMPUTER_CONTROL_TOKEN=.+/),
       );
+    }
+  });
+});
+
+// Fork patch: a computer is resumed only when it matches what
+// containerCreateOptions would build. Anything else is replaced.
+describe("computer hardening on resume", () => {
+  it.each([
+    { name: "hardened", override: {}, resumed: true },
+    { name: "privileged", override: { Privileged: true }, resumed: false },
+    { name: "NET_ADMIN", override: { CapAdd: ["NET_ADMIN"] }, resumed: false },
+    { name: "NET_RAW", override: { CapAdd: ["NET_RAW"] }, resumed: false },
+    { name: "SYS_ADMIN", override: { CapAdd: ["SYS_ADMIN"] }, resumed: false },
+    { name: "default capabilities", override: { CapDrop: [] }, resumed: false },
+    { name: "no no-new-privileges", override: { SecurityOpt: [] }, resumed: false },
+    {
+      name: "host devices",
+      override: { Devices: [{ PathOnHost: "/dev/net/tun" }] },
+      resumed: false,
+    },
+    {
+      name: "a later no-new-privileges=false",
+      override: { SecurityOpt: ["no-new-privileges:true", "no-new-privileges:false"] },
+      resumed: false,
+    },
+    {
+      name: "a bare SELinux disable",
+      override: { SecurityOpt: ["no-new-privileges:true", "disable"] },
+      resumed: false,
+    },
+    { name: "a shared PID namespace", override: { PidMode: "container:peer" }, resumed: false },
+    { name: "a shared IPC namespace", override: { IpcMode: "container:peer" }, resumed: false },
+    {
+      name: "another bot's home mounted",
+      override: {
+        Binds: [
+          `${path.join(process.env.DATA_DIR ?? "", "homes", "bot")}:/home/rakazo`,
+          "/var/rakazo/homes/other:/mnt/other",
+        ],
+      },
+      resumed: false,
+    },
+    { name: "no PID ceiling", override: { PidsLimit: undefined }, resumed: false },
+    { name: "no memory ceiling", override: { Memory: 0, MemorySwap: 0 }, resumed: false },
+    { name: "PublishAllPorts", override: { PublishAllPorts: true }, resumed: false },
+    {
+      name: "a second network attached",
+      override: {},
+      extraNetwork: computerNetworkNameFor("other"),
+      resumed: false,
+    },
+  ] as Array<{
+    name: string;
+    override: Record<string, unknown>;
+    extraNetwork?: string;
+    resumed: boolean;
+  }>)("$name: resumed=$resumed", async ({ override, extraNetwork, resumed }) => {
+    const { supervisorApp } = await import("./index.js");
+    const homePath = path.join(process.env.DATA_DIR!, "homes", "bot");
+    const info = {
+      Image: "test-image-id",
+      Config: {
+        User: hostComputerUser(),
+        Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
+      },
+      HostConfig: {
+        ...createdHostConfig(),
+        NetworkMode: computerNetworkNameFor("bot"),
+        PortBindings: {},
+        ...override,
+      },
+      State: { Running: false },
+      NetworkSettings: {
+        Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
+        Networks: {
+          [computerNetworkNameFor("bot")]: { NetworkID: "bot-network" },
+          ...(extraNetwork ? { [extraNetwork]: { NetworkID: "other-network" } } : {}),
+        },
+      },
+    };
+    const existing = {
+      id: "existing",
+      inspect: vi.fn().mockResolvedValue(info),
+      start: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    };
+    const replacement = {
+      id: "replacement",
+      inspect: vi.fn().mockResolvedValue(info),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+    mocks.docker.getImage.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Id: info.Image }),
+    });
+    mocks.docker.getContainer.mockReturnValue(existing);
+    mocks.docker.listContainers.mockResolvedValue([{ Id: existing.id }]);
+    mocks.docker.createContainer.mockResolvedValue(replacement);
+    mocks.docker.createNetwork.mockResolvedValue({});
+    mocks.docker.getNetwork.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Id: "bot-network" }),
+    });
+
+    const response = await supervisorApp.request("/computers", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${resolveSupervisorToken(process.env)}`,
+        "content-type": "application/json",
+        "x-rakazo-bot-id": "bot",
+        "x-rakazo-space-id": "space",
+      },
+      body: JSON.stringify({ botId: "bot", spaceId: "space", homePath }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      resumed,
+      id: resumed ? "existing" : "replacement",
+    });
+    if (resumed) {
+      expect(existing.remove).not.toHaveBeenCalled();
+      expect(mocks.docker.createContainer).not.toHaveBeenCalled();
+    } else {
+      expect(existing.start).not.toHaveBeenCalled();
+      expect(existing.remove).toHaveBeenCalledWith({ force: true });
+      const [options] = mocks.docker.createContainer.mock.calls[0]!;
+      expect(
+        computerSpecMismatches({ Config: options, HostConfig: options.HostConfig }, options),
+      ).toEqual([]);
     }
   });
 });
@@ -440,7 +588,7 @@ describe("provisioning network rollback", () => {
         Config: {
           Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
         },
-        HostConfig: { PortBindings: {} },
+        HostConfig: { ...createdHostConfig(), PortBindings: {} },
         State: { Running: true },
       }),
     };
@@ -502,7 +650,7 @@ describe("restricted egress rekeying", () => {
         User: hostComputerUser(),
         Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
       },
-      HostConfig: { NetworkMode: botNet, PortBindings: {} },
+      HostConfig: { ...createdHostConfig(), NetworkMode: botNet, PortBindings: {} },
       State: { Running: false },
       NetworkSettings: {
         Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
@@ -680,7 +828,7 @@ describe("space computer limit enforcement", () => {
       start: vi.fn().mockResolvedValue(undefined),
       inspect: vi.fn().mockResolvedValue({
         State: { Running: true },
-        HostConfig: { PortBindings: {} },
+        HostConfig: { ...createdHostConfig(), PortBindings: {} },
       }),
       remove: vi.fn().mockResolvedValue(undefined),
     };
@@ -775,6 +923,7 @@ describe("space computer limit enforcement", () => {
         },
         State: { Running: true },
         HostConfig: {
+          ...createdHostConfig(path.join(process.env.DATA_DIR!, "homes", "bot-existing")),
           NetworkMode: computerNetworkNameFor("bot-existing"),
           PortBindings: {},
           Mounts: [],
@@ -836,6 +985,7 @@ describe("space computer limit enforcement", () => {
         },
         State: { Running: true },
         HostConfig: {
+          ...createdHostConfig(),
           NetworkMode: computerNetworkNameFor("bot-detached"),
           PortBindings: {},
           Mounts: [],
@@ -963,6 +1113,7 @@ describe("space computer limit enforcement", () => {
         },
         State: { Running: true },
         HostConfig: {
+          ...createdHostConfig(path.join(process.env.DATA_DIR!, "homes", "bot-existing")),
           NetworkMode: computerNetworkNameFor("bot-existing"),
           PortBindings: {},
           Mounts: [],
@@ -1042,7 +1193,7 @@ describe("screen release status", () => {
         Config: {
           Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
         },
-        HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+        HostConfig: { ...createdHostConfig(), NetworkMode: computerNetworkNameFor("bot") },
         State: { Running: true },
         NetworkSettings: {
           Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
@@ -1163,7 +1314,7 @@ describe("screen registry across run boundaries", () => {
         Config: {
           Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
         },
-        HostConfig: { NetworkMode: computerNetworkNameFor("bot") },
+        HostConfig: { ...createdHostConfig(), NetworkMode: computerNetworkNameFor("bot") },
         State: { Running: true },
         NetworkSettings: {
           Ports: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: screenPort }] },
@@ -1578,7 +1729,7 @@ describe("computer network reclaim", () => {
           User: hostComputerUser(),
           Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
         },
-        HostConfig: { NetworkMode: botNet, PortBindings: {} },
+        HostConfig: { ...createdHostConfig(), NetworkMode: botNet, PortBindings: {} },
         State: { Running: false },
         NetworkSettings: { Networks: networks },
       };
