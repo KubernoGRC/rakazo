@@ -1,0 +1,135 @@
+name: kgrc-publish-images
+
+# Fork-owned image publishing. Upstream's publish-server-image.yml is left
+# untouched: it only fires on pushes to `main` (a pure upstream mirror) and on
+# `v*` tags, and this fork's releases are `kgrc-v*`, so the two never overlap.
+#
+# Two modes:
+#   * source   - push to `kgrc`, a `kgrc-v*` tag, or dispatch without
+#                base_image: build upstream's infra/compose/Dockerfile from this
+#                commit unmodified, then infra/compose/Dockerfile.kgrc on top.
+#                The computer image is built from source unmodified.
+#   * overlay  - dispatch with base_image (a digest-pinned app image): apply
+#                Dockerfile.kgrc to that image only. Used to fix an already
+#                deployed release without moving its code.
+# Every app image is started once with networking off before it is pushed.
+on:
+  push:
+    branches: [kgrc]
+    tags: ["kgrc-v*"]
+  pull_request:
+    branches: [kgrc]
+    paths:
+      - "infra/compose/Dockerfile.kgrc"
+      - ".github/workflows/kgrc-publish-images.yml"
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: "Overlay mode: digest-pinned app image (registry/name@sha256:...). Empty = build from source."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kgrc-publish-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    name: Build, offline-check and publish (linux/amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      BASE_INPUT: ${{ github.event.inputs.base_image }}
+      PUBLISH: ${{ github.event_name != 'pull_request' }}
+      REGISTRY_PREFIX: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Validate the overlay base
+        if: env.BASE_INPUT != ''
+        run: |
+          set -euo pipefail
+          # Digest-pinned only: a tag could move between review and build.
+          [[ "$BASE_INPUT" =~ ^[a-z0-9./-]+@sha256:[0-9a-f]{64}$ ]] || {
+            echo "base_image must be <registry/name>@sha256:<64 hex>" >&2; exit 1; }
+
+      - name: Build the app base from upstream's Dockerfile, unmodified
+        if: env.BASE_INPUT == ''
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 -f infra/compose/Dockerfile \
+            --build-arg GIT_SHA="$GITHUB_SHA" -t kgrc-app-base:ci .
+          echo "BASE=kgrc-app-base:ci" >> "$GITHUB_ENV"
+
+      - name: Pull the overlay base
+        if: env.BASE_INPUT != ''
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$BASE_INPUT"
+          echo "BASE=$BASE_INPUT" >> "$GITHUB_ENV"
+
+      - name: Apply Dockerfile.kgrc
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 -f infra/compose/Dockerfile.kgrc \
+            --build-arg BASE_IMAGE="$BASE" -t kgrc-app:ci infra/compose
+
+      - name: Start offline as the runtime user
+        run: |
+          set -euo pipefail
+          # A package manager that downloads itself at start crash-loops on a
+          # host with no outbound internet. Prove it is already in the image.
+          docker run --rm --network none --entrypoint pnpm kgrc-app:ci --version
+          docker run --rm --network none --entrypoint sh kgrc-app:ci -c \
+            '[ "$(id -un)" = node ] && pnpm --filter @rakazo/api exec node -e "process.exit(0)"'
+
+      - name: Build the computer image from source, unmodified
+        if: env.BASE_INPUT == ''
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 -f infra/sandboxes/computer/Dockerfile \
+            -t kgrc-computer:ci infra/sandboxes/computer
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish and report digests
+        if: env.PUBLISH == 'true'
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA}"
+          if [[ -n "$BASE_INPUT" ]]; then
+            base_digest="${BASE_INPUT##*@sha256:}"
+            tag="overlay-${base_digest:0:16}-${sha:0:12}"
+          else
+            tag="sha-${sha}"
+          fi
+          push() {  # local-image remote-name
+            docker tag "$1" "$REGISTRY_PREFIX/$2:$tag"
+            if [[ "$GITHUB_REF" == refs/tags/kgrc-v* ]]; then
+              docker tag "$1" "$REGISTRY_PREFIX/$2:${GITHUB_REF_NAME}"
+              docker push -q "$REGISTRY_PREFIX/$2:${GITHUB_REF_NAME}" >/dev/null
+            fi
+            docker push -q "$REGISTRY_PREFIX/$2:$tag" >/dev/null
+            digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$REGISTRY_PREFIX/$2:$tag")
+            echo "$2: $digest" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          {
+            echo "### Published images"
+            echo
+            echo "Pin these by digest. Base: \`$BASE\`"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          push kgrc-app:ci app
+          if [[ -z "$BASE_INPUT" ]]; then push kgrc-computer:ci computer; fi
