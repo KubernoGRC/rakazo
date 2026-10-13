@@ -31,9 +31,24 @@ conflict with them:
 
 - **Image changes** go in `infra/compose/Dockerfile.kgrc`, an overlay applied on top
   of the image built from upstream's unmodified `infra/compose/Dockerfile`.
-- **Image publishing** is `.github/workflows/kgrc-publish-images.yml`. Upstream's
-  `publish-server-image.yml` is left as is. It fires only on pushes to `main` and
-  on `v*` tags, while this fork releases from `kgrc` with `kgrc-v*` tags.
+- **Image publishing** is `.github/workflows/kgrc-publish-images.yml`, which releases
+  from `kgrc` with `kgrc-v*` tags.
+
+## Upstream workflows disabled in this fork
+
+Syncing `main` runs upstream's own workflow files, so the ones that publish or
+create things are **disabled in the repository's Actions settings**, not edited:
+
+| Workflow | Why |
+|---|---|
+| `publish-server-image.yml` | Would publish upstream code under this fork's image namespace on every sync. `kgrc-publish-images.yml` replaces it. |
+| `release-desktop.yml` | Creates GitHub releases on push |
+| `model-catalog-bump.yml` | Scheduled job that opens pull requests, which here would target `kgrc` |
+| `desktop-macos-screenshot.yml` | macOS runners on every push and pull request; no use here |
+
+Re-enable one only on purpose (`gh workflow enable <file>`). `ci.yml`,
+`playwright.yml` and the guard and verification workflows stay enabled and check
+every pull request into `kgrc`.
 
 Code changes that have to edit upstream source (for example in `packages/` or
 `apps/`) are the exception. Keep them small, and offer generally useful ones
