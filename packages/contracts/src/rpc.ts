@@ -403,6 +403,8 @@ export const appContract = {
           runId: Id,
           messageId: Id,
           answer: z.string().min(1),
+          /** Carries the call id for an answer spoken during a call. */
+          clientNonce: z.string().min(1).max(200).optional(),
           /** Only for a login card; `answer` carries its password. */
           username: z.string().min(1).max(512).optional(),
         }),
@@ -852,6 +854,8 @@ export const appContract = {
             description: z.string().max(ARTIFACT_DESCRIPTION_MAX_LENGTH).optional(),
             mimeType: z.string().min(1),
             contentBase64: z.string().min(1).max(ATTACHMENT_MAX_BASE64_LENGTH),
+            /** Unique per upload; a retry with the same nonce returns the artifact it created. */
+            clientNonce: z.string().min(1).max(200).optional(),
           }),
         ),
       )

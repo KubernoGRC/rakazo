@@ -571,6 +571,25 @@ describe("mobile call session", () => {
     expect(fake.closeCall).toHaveBeenCalledWith("bot-1", callId);
   });
 
+  it("waits for an in-flight spoken turn before closing the call server-side", async () => {
+    const fake = fakes();
+    const pendingSend = deferred<string | undefined>();
+    fake.send.mockReturnValueOnce(pendingSend.promise);
+    startCall({ botId: "bot-1", botName: "Ada" }, fake.deps);
+    await flush();
+    fake.say("status please");
+    await flush();
+    const callId = callIdFromClientNonce(fake.send.mock.calls[0]?.[2]);
+
+    endCall();
+    expect(fake.closeCall).not.toHaveBeenCalled();
+
+    pendingSend.resolve("run-1");
+    await pendingSend.promise;
+    await flush();
+    expect(fake.closeCall).toHaveBeenCalledWith("bot-1", callId);
+  });
+
   it("drops a run id that lands after the same bot was called again", async () => {
     const fake = fakes();
     const pending = deferred<string | undefined>();

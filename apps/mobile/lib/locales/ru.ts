@@ -1,5 +1,9 @@
 export const RU_MESSAGES: Record<string, string> = {
+  "Couldn't refresh — showing the last loaded messages.":
+    "Не удалось обновить — показаны последние загруженные сообщения.",
   "Try Again": "Повторить",
+  "Too many unsent messages": "Слишком много неотправленных сообщений",
+  "Not sent": "Не отправлено",
   "Not sent · Tap to retry": "Не отправлено · Нажмите, чтобы повторить",
   Photo: "Фото",
   Today: "Сегодня",

@@ -107,6 +107,8 @@ const MAX_CLIP_MS = 30_000;
 let state: CallState | null = null;
 /** Shared by every message this call sends, so the thread can group one call's exchange. */
 let callId = "";
+/** Requests for this call that must persist before its server-side hang-up. */
+const pendingCallSends = new Map<string, Set<Promise<unknown>>>();
 /** The run this call's last turn started: replies to anything else are not spoken. */
 let callRunId: string | null = null;
 let deps: CallDeps = productionDeps();
@@ -234,7 +236,19 @@ export function setCallProviderTranscribe(enabled: boolean, forCallId?: string):
 export function endCall(): void {
   // The bot's own end_call already closed the call server-side; only a caller hang-up
   // has to say so. Fire and forget: the card is going away either way.
-  if (state && !botEndedCall) void deps.endCall(state.botId, callId).catch(() => undefined);
+  if (state && !botEndedCall) {
+    const { botId } = state;
+    const closingCallId = callId;
+    const closeServerCall = deps.endCall;
+    const pendingSends = [...(pendingCallSends.get(closingCallId) ?? [])];
+    // The server checks durable user messages, so its close must follow an in-flight write.
+    if (pendingSends.length === 0)
+      void closeServerCall(botId, closingCallId).catch(() => undefined);
+    else
+      void Promise.allSettled(pendingSends)
+        .then(() => closeServerCall(botId, closingCallId))
+        .catch(() => undefined);
+  }
   if (state) deps.waitSound("release");
   turn?.abort();
   turn = null;
@@ -409,8 +423,11 @@ async function handleTranscript(raw: string): Promise<void> {
     if (hangUpTimer) clearTimeout(hangUpTimer);
     hangUpTimer = setTimeout(endCall, FAREWELL_TIMEOUT_MS);
   }
+  let releasePendingSend: (() => void) | undefined;
   try {
-    const runId = await deps.send(botId, text, callClientNonce(turnCallId));
+    const sendRequest = deps.send(botId, text, callClientNonce(turnCallId));
+    releasePendingSend = trackPendingCallSend(turnCallId, sendRequest);
+    const runId = await sendRequest;
     if (state?.botId === botId && callId === turnCallId) {
       callRunId = runId ?? null;
       if (hangUpAfterReply) farewellSent = true;
@@ -432,6 +449,8 @@ async function handleTranscript(raw: string): Promise<void> {
       return;
     }
     failTurn(error);
+  } finally {
+    releasePendingSend?.();
   }
 }
 
@@ -783,6 +802,16 @@ function watchReplies(
 
 function asText(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function trackPendingCallSend(callId: string, request: Promise<unknown>): () => void {
+  const pending = pendingCallSends.get(callId) ?? new Set<Promise<unknown>>();
+  pending.add(request);
+  pendingCallSends.set(callId, pending);
+  return () => {
+    pending.delete(request);
+    if (pending.size === 0) pendingCallSends.delete(callId);
+  };
 }
 
 function randomId(): string {

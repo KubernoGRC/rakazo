@@ -8,7 +8,7 @@ import { createRoot } from "react-dom/client";
 import ts from "typescript";
 import { expect, it, vi } from "vitest";
 import type { MobileBot } from "./api";
-import { formatThreadTime } from "./inbox";
+import { botTag, formatThreadTime } from "./inbox";
 import { retainInboxValue } from "./inbox-retention";
 
 const testFileUrl = import.meta.url;
@@ -274,3 +274,67 @@ it.each(["midnight", "focus", "foreground"])(
     }
   },
 );
+
+it("renders saved bot rows without a title or notification setting", () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const scope = {
+    React,
+    memo,
+    useI18n: () => ({ t: (text: string) => text }),
+    previewSnippet: (text: string) => text,
+    formatThreadTime,
+    botTag,
+    ACTIVE_RUN_STATUSES: ["running"],
+    mobileBotAvatarPresentation: () => ({ kind: "color", color: "gray" }),
+    FALLBACK_COLOR: "gray",
+    ConversationRow: ({
+      tag,
+      preview,
+      accessibilityLabel,
+      avatar,
+    }: {
+      tag: string;
+      preview: string;
+      accessibilityLabel: string;
+      avatar: ReactElement;
+    }) => (
+      <span>
+        {[tag, preview, accessibilityLabel].join("|")}
+        {avatar}
+      </span>
+    ),
+    BotAvatar: ({ muted }: { muted: boolean }) => (muted ? " muted" : null),
+    WorkingIndicator: () => null,
+  };
+  const rowSource = source.slice(
+    source.indexOf("const BotRow = memo("),
+    source.indexOf("const GroupRow = memo("),
+  );
+  const compiled = ts.transpileModule(`${rowSource}\nreturn BotRow;`, {
+    compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const BotRow = new Function(...Object.keys(scope), compiled)(...Object.values(scope));
+  // Inboxes saved before titles and notification settings were kept have bots without them.
+  const bots = [
+    { id: "bot-a", name: "Alpha", title: "Research", preview: "", notifyOnFinish: true },
+    { id: "bot-b", name: "Beta", preview: "" },
+    { id: "bot-c", name: "Gamma", title: "", preview: "", notifyOnFinish: false },
+  ];
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    act(() =>
+      root.render(
+        bots.map((bot) => <BotRow key={bot.id} bot={bot} day={0} onPress={() => undefined} />),
+      ),
+    );
+    expect(Array.from(container.querySelectorAll("span"), (span) => span.textContent)).toEqual([
+      "Research|Research|Alpha, Research, Research",
+      "|No messages yet|Beta, No messages yet",
+      "|No messages yet|Gamma, notifications silenced, No messages yet muted",
+    ]);
+  } finally {
+    act(() => root.unmount());
+    vi.unstubAllGlobals();
+  }
+});

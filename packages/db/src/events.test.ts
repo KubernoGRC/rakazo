@@ -1034,55 +1034,112 @@ describe("answerRunInput", () => {
     expect(publish).toHaveBeenCalledWith("thread:thread-1", JSON.stringify({ cursor: 9 }));
   });
 
-  it("resumes with the offered choice label when the persisted label was redacted", async () => {
+  it("keeps a routine's instructions and every earlier answer across choice resumes", async () => {
+    // A routine run sees no thread history: its resumed attempt only has the task prompt.
+    const answerChoice = async (prompt: string, question: string, answer: string) => {
+      const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
+        message: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: "message-1",
+            blocks: [
+              {
+                kind: "ask",
+                text: question,
+                status: "pending",
+                actions: [
+                  { id: "choice-1", label: "Two people" },
+                  { id: "choice-2", label: "Italian" },
+                ],
+              },
+            ],
+          }),
+          update: vi.fn().mockResolvedValue({ id: "message-1" }),
+        },
+        run: {
+          findFirst: vi.fn().mockResolvedValue({
+            botId: "bot-2",
+            trigger: "routine",
+            task: { prompt },
+          }),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+          findUnique: vi.fn().mockResolvedValue({
+            status: "queued",
+            createdAt: new Date("2026-08-16T12:00:00.000Z"),
+            threadId: "thread-1",
+          }),
+        },
+        task: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        thread: { update: vi.fn().mockResolvedValue({ nextEventSeq: 10 }) },
+        event: {
+          create: vi.fn(async ({ data }: { data: { seq: number; type: string } }) => ({
+            ...event(data.seq),
+            type: data.type,
+          })),
+          findFirst: vi.fn().mockResolvedValue(null),
+        },
+      };
+      const prisma = {
+        $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+      } as unknown as PrismaClient;
+      await expect(
+        answerRunInput(prisma, {
+          spaceId: "workspace-1",
+          threadId: "thread-1",
+          runId: "run-1",
+          messageId: "message-1",
+          answeredByUserId: "user-1",
+          answer,
+        }),
+      ).resolves.toBe(true);
+      return (tx.task.updateMany.mock.calls[0]![0] as { data: { prompt: string } }).data.prompt;
+    };
+
+    const afterFirst = await answerChoice("Plan tonight's dinner.", "Who is eating?", "choice-1");
+    expect(afterFirst).toBe(
+      "Plan tonight's dinner.\n\nWho is eating?\nAnswer: Selected choice choice-1: Two people",
+    );
+    const afterSecond = await answerChoice(afterFirst, "Which cuisine?", "choice-2");
+    expect(afterSecond).toBe(
+      [
+        "Plan tonight's dinner.",
+        "Who is eating?\nAnswer: Selected choice choice-1: Two people",
+        "Which cuisine?\nAnswer: Selected choice choice-2: Italian",
+      ].join("\n\n"),
+    );
+  });
+
+  it("records a spoken call answer as a user utterance with the call identity", async () => {
     const fanout = new TestFanout();
-    const secret = "sk-live-choice-secret";
     const tx = {
       $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
       message: {
         findFirst: vi.fn().mockResolvedValue({
           id: "message-1",
-          blocks: [
-            {
-              kind: "ask",
-              text: "Which token?",
-              status: "pending",
-              actions: [
-                { id: "choice-1", label: `use [redacted]` },
-                { id: "choice-2", label: "use plain" },
-              ],
-            },
-          ],
+          blocks: [{ kind: "ask", text: "Which city?", status: "pending" }],
         }),
+        create: vi.fn().mockResolvedValue({ id: "user-answer" }),
         update: vi.fn().mockResolvedValue({ id: "message-1" }),
       },
       run: {
-        findFirst: vi.fn().mockResolvedValue({
-          botId: "bot-2",
-          userId: "user-1",
-          checkpoint: JSON.stringify({
-            kind: "choice_ask_v1",
-            actions: [
-              { id: "choice-1", label: `use ${secret}` },
-              { id: "choice-2", label: "use plain" },
-            ],
-          }),
-        }),
+        findFirst: vi.fn().mockResolvedValue({ botId: "bot-2", userId: "user-1" }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         findUnique: vi.fn().mockResolvedValue({
           status: "queued",
-          createdAt: new Date("2026-08-16T12:00:00.000Z"),
+          startedAt: new Date("2026-08-16T12:00:00.000Z"),
           threadId: "thread-1",
         }),
       },
       task: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
-      thread: { update: vi.fn().mockResolvedValue({ nextEventSeq: 11 }) },
+      thread: { update: vi.fn().mockResolvedValue({ nextMessageSeq: 3, nextEventSeq: 5 }) },
       event: {
-        create: vi.fn(async ({ data }: { data: { seq: number; type: string } }) => ({
-          ...event(data.seq),
-          type: data.type,
-        })),
-        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn(
+          async ({ data }: { data: { seq: number; type: string; payload: unknown } }) => ({
+            ...event(data.seq),
+            type: data.type,
+            payload: data.payload,
+          }),
+        ),
       },
     };
     const prisma = {
@@ -1098,39 +1155,143 @@ describe("answerRunInput", () => {
           runId: "run-1",
           messageId: "message-1",
           answeredByUserId: "user-1",
-          answer: "choice-1",
+          answer: "Toronto",
+          clientNonce: "call:call-1:answer-1",
         },
         fanout,
       ),
     ).resolves.toBe(true);
 
-    expect(tx.task.updateMany).toHaveBeenCalledWith({
-      where: { runs: { some: { id: "run-1" } } },
-      data: { prompt: `Selected choice choice-1: use ${secret}` },
+    expect(tx.message.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        threadId: "thread-1",
+        role: "user",
+        botId: "bot-2",
+        runId: "run-1",
+        clientNonce: "call:call-1:answer-1",
+        blocks: [{ kind: "text", text: "Toronto" }],
+      }),
     });
-    expect(tx.message.update).toHaveBeenCalledWith({
-      where: { id: "message-1" },
-      data: {
-        blocks: [
-          {
-            kind: "ask",
-            text: "Which token?",
-            status: "answered",
-            answer: "choice-1",
-            actions: [
-              { id: "choice-1", label: "use [redacted]" },
-              { id: "choice-2", label: "use plain" },
-            ],
-          },
-        ],
-      },
-    });
-    expect(tx.run.updateMany).toHaveBeenCalledWith(
+    expect(tx.event.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { status: "queued", checkpoint: null },
+        data: expect.objectContaining({
+          type: "thread.message.created",
+          payload: expect.objectContaining({
+            messageId: "user-answer",
+            role: "user",
+            callId: "call-1",
+          }),
+        }),
       }),
     );
+    expect(tx.task.updateMany).toHaveBeenCalledWith({
+      where: { runs: { some: { id: "run-1" } } },
+      data: { prompt: "Toronto" },
+    });
   });
+
+  it.each([undefined, "call:call-1:choice-1"])(
+    "resumes with the full offered choice label (call nonce: %s)",
+    async (clientNonce) => {
+      const fanout = new TestFanout();
+      const secret = "sk-live-choice-secret";
+      const tx = {
+        $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
+        message: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: "message-1",
+            blocks: [
+              {
+                kind: "ask",
+                text: "Which token?",
+                status: "pending",
+                actions: [
+                  { id: "choice-1", label: `use [redacted]` },
+                  { id: "choice-2", label: "use plain" },
+                ],
+              },
+            ],
+          }),
+          create: vi.fn().mockResolvedValue({ id: "spoken-choice" }),
+          update: vi.fn().mockResolvedValue({ id: "message-1" }),
+        },
+        run: {
+          findFirst: vi.fn().mockResolvedValue({
+            botId: "bot-2",
+            userId: "user-1",
+            checkpoint: JSON.stringify({
+              kind: "choice_ask_v1",
+              actions: [
+                { id: "choice-1", label: `use ${secret}` },
+                { id: "choice-2", label: "use plain" },
+              ],
+            }),
+          }),
+          updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+          findUnique: vi.fn().mockResolvedValue({
+            status: "queued",
+            createdAt: new Date("2026-08-16T12:00:00.000Z"),
+            threadId: "thread-1",
+          }),
+        },
+        task: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+        thread: { update: vi.fn().mockResolvedValue({ nextEventSeq: 11 }) },
+        event: {
+          create: vi.fn(async ({ data }: { data: { seq: number; type: string } }) => ({
+            ...event(data.seq),
+            type: data.type,
+          })),
+          findFirst: vi.fn().mockResolvedValue(null),
+        },
+      };
+      const prisma = {
+        $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
+      } as unknown as PrismaClient;
+
+      await expect(
+        answerRunInput(
+          prisma,
+          {
+            spaceId: "workspace-1",
+            threadId: "thread-1",
+            runId: "run-1",
+            messageId: "message-1",
+            answeredByUserId: "user-1",
+            answer: "choice-1",
+            clientNonce,
+          },
+          fanout,
+        ),
+      ).resolves.toBe(true);
+
+      expect(tx.task.updateMany).toHaveBeenCalledWith({
+        where: { runs: { some: { id: "run-1" } } },
+        data: { prompt: `Selected choice choice-1: use ${secret}` },
+      });
+      expect(tx.message.update).toHaveBeenCalledWith({
+        where: { id: "message-1" },
+        data: {
+          blocks: [
+            {
+              kind: "ask",
+              text: "Which token?",
+              status: "answered",
+              answer: "choice-1",
+              actions: [
+                { id: "choice-1", label: "use [redacted]" },
+                { id: "choice-2", label: "use plain" },
+              ],
+            },
+          ],
+        },
+      });
+      expect(tx.run.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { status: "queued", checkpoint: null },
+        }),
+      );
+    },
+  );
 
   it("answers a custom free-text reply that is not an offered choice", async () => {
     const fanout = new TestFanout();
