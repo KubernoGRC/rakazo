@@ -13,9 +13,10 @@ import {
 } from "./access-identity.js";
 import { assertAccessIdentityConfig, createAuth } from "./index.js";
 
-// The memory adapter stands in for Postgres, with the two unique indexes the
-// access-identity mode relies on: user email, and the fork's partial index on
-// access-identity links (packages/db/prisma/migrations, fork_access_identity_*).
+// The memory adapter stands in for Postgres, with the unique indexes the
+// access-identity mode relies on: user email, and the fork's partial indexes on
+// access-identity links, one per subject and one per user
+// (packages/db/prisma/migrations, fork_access_identity_*).
 vi.mock("better-auth/adapters/prisma", async () => {
   const { memoryAdapter } = await import("better-auth/adapters/memory");
   return {
@@ -36,7 +37,9 @@ vi.mock("better-auth/adapters/prisma", async () => {
               (args.model === "account" &&
                 data.providerId === "access-identity" &&
                 rows.some(
-                  (row) => row.providerId === "access-identity" && row.accountId === data.accountId,
+                  (row) =>
+                    row.providerId === "access-identity" &&
+                    (row.accountId === data.accountId || row.userId === data.userId),
                 ));
             if (taken) {
               (prisma as { conflicts?: number }).conflicts =
@@ -515,6 +518,36 @@ describe("access identity subject binding", () => {
     expect(f.data.user).toHaveLength(1);
     expect(accessLinks(f)).toHaveLength(1);
     expect(accessLinks(f)[0]).toMatchObject({ userId: f.data.user?.[0]?.id });
+  });
+
+  it("gives an account to only one of two subjects racing for its email", async () => {
+    const f = fixture();
+    f.data.user?.push({
+      id: "existing",
+      email: "person@example.test",
+      name: "Person",
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    // Subject 1 pauses at its link insert while subject 2 links the same account.
+    let second: Response | undefined;
+    let paused = false;
+    (f.prisma as { beforeCreate?: (model: string) => Promise<void> }).beforeCreate = async (
+      model,
+    ) => {
+      if (model !== "account" || paused) return;
+      paused = true;
+      second = await signIn(f, token({ sub: "subject-2" }));
+    };
+    const first = await signIn(f, token({ sub: "subject-1" }));
+    expect(second?.status).toBe(200);
+    expect(first.status).toBe(403);
+    expect(await first.json()).toMatchObject({ code: "ACCESS_IDENTITY_SUBJECT_MISMATCH" });
+    expect(accessLinks(f)).toEqual([
+      expect.objectContaining({ userId: "existing", accountId: `${ISSUER} subject-2` }),
+    ]);
+    expect(f.data.user).toHaveLength(1);
   });
 
   it("does not hold a database connection while resolving a sign-in", async () => {
