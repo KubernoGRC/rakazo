@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { signInWithAccessIdentity } from "../lib/access-identity";
 import { authClient } from "../lib/auth";
 import type { AuthCapabilities } from "../lib/auth-capabilities";
 import { fetchAuthCapabilities } from "../lib/auth-capabilities";
@@ -37,6 +38,7 @@ vi.mock("@rakazo/ui-web", () => ({
 vi.mock("../lib/auth-capabilities", () => ({ fetchAuthCapabilities: vi.fn() }));
 vi.mock("../lib/auth", () => ({ authClient: { signIn: { social: vi.fn(async () => ({})) } } }));
 vi.mock("../lib/rpc", () => ({ clearSpaceSelection: vi.fn() }));
+vi.mock("../lib/access-identity", () => ({ signInWithAccessIdentity: vi.fn() }));
 const capabilities: AuthCapabilities = {
   passwordAuth: false,
   sso: { name: "Example", availability: "unavailable" },
@@ -152,4 +154,32 @@ it("keeps SSO available for retry while an authorization request is pending", as
   expect(button.disabled).toBe(false);
   await act(async () => button.click());
   expect(authClient.signIn.social).toHaveBeenCalledTimes(2);
+});
+
+// Fork: access identity (docs/fork-access-identity.md).
+const accessCapabilities: AuthCapabilities = {
+  passwordAuth: false,
+  sso: null,
+  passwordReset: false,
+  resetUrl: null,
+  accessIdentity: true,
+};
+it("signs in through the access proxy without showing a form", async () => {
+  const notify = vi.fn();
+  Object.assign(authClient, { $store: { notify } });
+  vi.mocked(fetchAuthCapabilities).mockResolvedValue(accessCapabilities);
+  vi.mocked(signInWithAccessIdentity).mockResolvedValue({ created: false });
+  await render();
+  expect(signInWithAccessIdentity).toHaveBeenCalledTimes(1);
+  expect(notify).toHaveBeenCalledWith("$sessionSignal");
+  expect(host.querySelector("input")).toBeNull();
+  expect(host.textContent).not.toContain("Continue with");
+});
+it("points at the organisation's portal when the access sign-in is refused", async () => {
+  vi.mocked(fetchAuthCapabilities).mockResolvedValue(accessCapabilities);
+  vi.mocked(signInWithAccessIdentity).mockResolvedValue(null);
+  await render();
+  expect(host.textContent).toContain("Sign in through your organisation's portal");
+  expect(host.querySelector("input")).toBeNull();
+  expect(host.querySelector("button")).toBeNull();
 });

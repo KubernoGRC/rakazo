@@ -307,4 +307,65 @@ describe("OIDC environment", () => {
       expect(() => loadEnv({ ...sso, ...overrides })).toThrow(message);
     });
   });
+
+  // Fork: ACCESS_IDENTITY_ENABLED (docs/fork-access-identity.md).
+  describe("ACCESS_IDENTITY_ENABLED", () => {
+    const access = {
+      ...base,
+      ACCESS_IDENTITY_ENABLED: "true",
+      ACCESS_IDENTITY_ISSUER: "https://team.access.example.test/",
+      ACCESS_IDENTITY_AUDIENCE: " app-audience ",
+      ACCESS_IDENTITY_CERTS_FILE: "/run/access/certs.json",
+    };
+    it("is off unless enabled", () => {
+      expect(loadEnv(base).accessIdentity).toBeUndefined();
+      expect(
+        loadEnv({ ...access, ACCESS_IDENTITY_ENABLED: "false" }).accessIdentity,
+      ).toBeUndefined();
+    });
+    it("loads the issuer origin, audience and certs file, with password auth off", () => {
+      const env = loadEnv(access);
+      expect(env.accessIdentity).toEqual({
+        issuer: "https://team.access.example.test",
+        audience: "app-audience",
+        certsFile: "/run/access/certs.json",
+      });
+      expect(env.passwordAuth).toBe(false);
+      expect(env.oidc).toBeUndefined();
+    });
+    it.each([
+      ["a non-boolean flag", { ACCESS_IDENTITY_ENABLED: "yes" }, /true or false/],
+      ["no issuer", { ACCESS_IDENTITY_ISSUER: "" }, /requires ACCESS_IDENTITY_ISSUER/],
+      ["no audience", { ACCESS_IDENTITY_AUDIENCE: " " }, /requires ACCESS_IDENTITY_ISSUER/],
+      [
+        "no certs file",
+        { ACCESS_IDENTITY_CERTS_FILE: undefined },
+        /requires ACCESS_IDENTITY_ISSUER/,
+      ],
+      ["an HTTP issuer", { ACCESS_IDENTITY_ISSUER: "http://team.example.test" }, /HTTPS origin/],
+      [
+        "an issuer with a path",
+        { ACCESS_IDENTITY_ISSUER: "https://team.example.test/x" },
+        /HTTPS origin/,
+      ],
+      ["password auth on", { AUTH_PASSWORD_ENABLED: "true" }, /AUTH_PASSWORD_ENABLED/],
+      [
+        "OIDC configured",
+        {
+          OIDC_ISSUER: "https://identity.example.test/tenant/v2.0",
+          OIDC_CLIENT_ID: "client",
+          OIDC_CLIENT_SECRET: "secret",
+        },
+        /cannot be combined with OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET/,
+      ],
+      ["any OIDC setting", { OIDC_NAME: "SSO" }, /cannot be combined with OIDC_NAME/],
+      ["the OIDC group gate", { OIDC_REQUIRED_GROUP: "group" }, /cannot be combined/],
+      ["messaging open signup", { MESSAGING_OPEN_SIGNUP: "true" }, /MESSAGING_OPEN_SIGNUP/],
+    ])("fails closed at startup with %s", (_label, overrides, message) => {
+      expect(() => loadEnv({ ...access, ...overrides })).toThrow(message);
+    });
+    it("ignores blank OIDC settings", () => {
+      expect(loadEnv({ ...access, OIDC_ISSUER: "", OIDC_NAME: " " }).accessIdentity).toBeDefined();
+    });
+  });
 });

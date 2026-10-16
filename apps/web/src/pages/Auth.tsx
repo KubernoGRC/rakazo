@@ -2,8 +2,9 @@ import { Trans, useLingui } from "@lingui/react/macro";
 import { credentialIssue, signupRequiresEmailVerification } from "@rakazo/core";
 import { Button, Input, Label } from "@rakazo/ui-web";
 import { Eye, EyeOff } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { signInWithAccessIdentity } from "../lib/access-identity";
 import { authClient } from "../lib/auth";
 import type { AuthCapabilities } from "../lib/auth-capabilities";
 import { fetchAuthCapabilities } from "../lib/auth-capabilities";
@@ -36,6 +37,11 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const [reset, setReset] = useState<AuthCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState(false);
   const [capabilityAttempt, setCapabilityAttempt] = useState(0);
+  const [accessFailed, setAccessFailed] = useState(false);
+  const accessIdentity = reset?.accessIdentity === true;
+  const next = searchParams.get("next");
+  // One exchange per mount; navigating re-renders before this page unmounts.
+  const accessStarted = useRef(false);
   const passwordFieldId = mode === "in" ? "current-password" : "new-password";
   const title = sent ? (
     <Trans>Check your email</Trans>
@@ -66,6 +72,28 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
       active = false;
     };
   }, [mode, capabilityAttempt]);
+
+  // Fork: the access proxy already authenticated this visitor; exchange it for a session.
+  useEffect(() => {
+    if (!accessIdentity || accessStarted.current) return;
+    accessStarted.current = true;
+    // Not cancelled on re-render: the guard means no later run would retry it.
+    void signInWithAccessIdentity().then((result) => {
+      if (!result) {
+        setAccessFailed(true);
+        return;
+      }
+      clearSpaceSelection();
+      authClient.$store.notify("$sessionSignal");
+      navigate(
+        result.created
+          ? "/onboarding"
+          : next === "/integrations/setup"
+            ? "/integrations/setup"
+            : "/app",
+      );
+    });
+  }, [accessIdentity, navigate, next]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -171,9 +199,13 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                 <Trans>Retry</Trans>
               </Button>
             </div>
-          ) : !reset ? (
+          ) : !reset || (accessIdentity && !accessFailed) ? (
             <p role="status">
               <Trans>Loading…</Trans>
+            </p>
+          ) : accessIdentity ? (
+            <p role="alert" className="w-full text-center">
+              <Trans>Sign in through your organisation's portal</Trans>
             </p>
           ) : null}
           {reset?.sso && !reset.passwordAuth && mode !== "forgot" ? (

@@ -72,7 +72,12 @@ import {
   toTeamChatInbound,
   withSecretPersistence,
 } from "@rakazo/adapters";
-import { createAuth, isBlockedAuthPath, loopbackTwinOrigins } from "@rakazo/auth";
+import {
+  createAccessVerifier,
+  createAuth,
+  isBlockedAuthPath,
+  loopbackTwinOrigins,
+} from "@rakazo/auth";
 import type { Actor, AuthCapabilities } from "@rakazo/contracts";
 import { signupAllowlistBootUpdate, signupPolicyFromEnv } from "@rakazo/core";
 import type { Pool, PrismaClient } from "@rakazo/db";
@@ -99,6 +104,7 @@ import { requestLogging } from "@rakazo/logging/hono";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { accessIdentityGate, createAccessSessionBinding } from "./access-identity.js";
 import { createBillingService } from "./billing.js";
 import { mountBillingRoutes } from "./billing-webhook.js";
 import type { AppEnv } from "./env.js";
@@ -399,9 +405,12 @@ export async function createApp(
   const notifications = new ExpoPushProvider(env.dataDir, (sessionId) =>
     pushSessionExpiresAt(prisma, sessionId),
   );
+  // Fork: trusted access-proxy identity; see docs/fork-access-identity.md.
+  const accessVerifier = env.accessIdentity ? createAccessVerifier(env.accessIdentity) : undefined;
   const auth = createAuth(prisma, {
     passwordAuth: env.passwordAuth,
     oidc: env.oidc,
+    accessIdentity: accessVerifier,
     secret: env.authSecret,
     baseURL: env.authUrl,
     webOrigin: env.webOrigin,
@@ -451,6 +460,14 @@ export async function createApp(
       );
     },
   });
+  const accessSessionBound = accessVerifier
+    ? createAccessSessionBinding(accessVerifier, async (session) => {
+        await prisma.session.deleteMany({ where: { id: session.id } });
+        await endSessionPushToken(env.dataDir, session.userId, session.id).catch((error) =>
+          getLogger().error("push token removal failed", error),
+        );
+      })
+    : undefined;
   // One provider instance so emulator launches and polls share the same Map.
   const cloudAgent = createCloudAgentConnection({
     CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
@@ -610,12 +627,15 @@ export async function createApp(
       c.header("cache-control", "no-store");
     });
   }
+  // Fork: under access identity every other route needs a verified assertion.
+  if (accessVerifier) app.use("*", accessIdentityGate(accessVerifier));
   app.get("/api/auth/capabilities", (c) => {
     return c.json({
       sso: env.oidc
         ? { name: env.oidc.name, availability: auth.ssoAvailability() ?? "checking" }
         : null,
       passwordAuth: env.passwordAuth !== false,
+      ...(accessVerifier ? { accessIdentity: true } : {}),
       passwordReset: env.passwordAuth !== false && Boolean(email),
       resetUrl:
         env.passwordAuth !== false && email ? new URL("/reset-password", env.webOrigin).href : null,
@@ -638,12 +658,18 @@ export async function createApp(
     if (isBlockedAuthPath(path)) {
       return c.json({ error: "Not available in version 1" }, 404);
     }
+    if (accessSessionBound) {
+      // End a session bound to another identity before Better Auth reads it.
+      const session = await auth.api.getSession({ headers: sessionHeaders(c.req.raw) });
+      if (session?.user) await accessSessionBound(c.req.raw, session);
+    }
     return auth.handler(emptyAuthBodyAsJson(c.req.raw));
   });
   mountLocalSettings(app, { token: env.desktopStackToken, prisma, rpc });
   const requestSession = async (request: Request) => {
     const session = await auth.api.getSession({ headers: sessionHeaders(request) });
     if (!session?.user) return null;
+    if (accessSessionBound && !(await accessSessionBound(request, session))) return null;
     const actor = await actorFromMembership(
       requireMembership(prisma, session.user.id, request.headers.get("x-rakazo-space-id")),
     );

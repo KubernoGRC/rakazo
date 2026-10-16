@@ -66,3 +66,10 @@ upstream.
 
 Every app image is started once with networking off before it's pushed. Deploy
 images **by digest** from the job summary, never by tag.
+
+## Fork patch sets
+
+- [Deployment connectors](fork-deployment-connectors.md)
+- [OIDC group gate](fork-oidc-group-gate.md)
+- [Trusted access identity](fork-access-identity.md): a verified access-proxy assertion as
+  the only way in. Its fail-closed checks must stay in place.
