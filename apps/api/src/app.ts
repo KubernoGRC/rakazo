@@ -73,6 +73,7 @@ import {
   withSecretPersistence,
 } from "@rakazo/adapters";
 import {
+  ACCESS_PROVIDER_ID,
   createAccessVerifier,
   createAuth,
   isBlockedAuthPath,
@@ -461,11 +462,20 @@ export async function createApp(
     },
   });
   const accessSessionBound = accessVerifier
-    ? createAccessSessionBinding(accessVerifier, async (session) => {
-        await prisma.session.deleteMany({ where: { id: session.id } });
-        await endSessionPushToken(env.dataDir, session.userId, session.id).catch((error) =>
-          getLogger().error("push token removal failed", error),
-        );
+    ? createAccessSessionBinding(accessVerifier, {
+        linkedSubject: async (userId) =>
+          (
+            await prisma.account.findFirst({
+              where: { userId, providerId: ACCESS_PROVIDER_ID },
+              select: { accountId: true },
+            })
+          )?.accountId,
+        endSession: async (session) => {
+          await prisma.session.deleteMany({ where: { id: session.id } });
+          await endSessionPushToken(env.dataDir, session.userId, session.id).catch((error) =>
+            getLogger().error("push token removal failed", error),
+          );
+        },
       })
     : undefined;
   // One provider instance so emulator launches and polls share the same Map.

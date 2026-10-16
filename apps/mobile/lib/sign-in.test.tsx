@@ -160,3 +160,20 @@ it("hides SSO when switching to password recovery", async () => {
     "Send reset link",
   );
 });
+
+// Fork: access identity (docs/fork-access-identity.md).
+it("tells an access-identity server's users to sign in in a web browser", async () => {
+  vi.mocked(passwordResetCapabilities).mockResolvedValue({
+    passwordAuth: false,
+    passwordReset: false,
+    resetUrl: null,
+    sso: null,
+    accessIdentity: true,
+  });
+  await render();
+  expect(host.textContent).toContain(
+    "This server uses your organisation's sign-in in a web browser",
+  );
+  expect(host.querySelector("input")).toBeNull();
+  expect(ssoButtons()).toHaveLength(0);
+});

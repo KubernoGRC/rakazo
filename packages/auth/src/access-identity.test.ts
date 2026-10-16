@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootstrapUserSpace } from "@rakazo/db";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessIdentityConfig, AccessVerifier } from "./access-identity.js";
 import {
   ACCESS_ASSERTION_HEADER,
@@ -58,6 +58,8 @@ function token(
     email: "Person@Example.test",
     exp: NOW / 1_000 + 300,
     nbf: NOW / 1_000 - 10,
+    iat: NOW / 1_000 - 10,
+    sub: "subject-1",
     ...claims,
   });
   const signature = sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), key);
@@ -82,6 +84,8 @@ describe("access assertion verification", () => {
     expect(await verifier.verify(headers(token()))).toEqual({
       ok: true,
       email: "person@example.test",
+      subject: `${ISSUER} subject-1`,
+      issuedAt: NOW / 1_000 - 10,
     });
   });
 
@@ -109,6 +113,9 @@ describe("access assertion verification", () => {
     ["no_email", { email: undefined }],
     ["no_email", { email: "" }],
     ["no_email", { email: "service-token" }],
+    ["no_subject", { sub: undefined }],
+    ["no_subject", { sub: "" }],
+    ["malformed", { iat: "yesterday" }],
   ])("refuses %s", async (reason, claims) => {
     expect(await verifier.verify(headers(token(claims)))).toEqual({ ok: false, reason });
   });
@@ -214,6 +221,7 @@ describe("accessIdentityClosesPath", () => {
     "/set-password",
     "/change-email",
     "/verify-email",
+    "/unlink-account",
   ])("closes %s", (path) => {
     expect(accessIdentityClosesPath(path)).toBe(true);
   });
@@ -279,7 +287,13 @@ function fixture() {
     authData: data,
     $executeRaw: vi.fn(async () => 0),
     $transaction: vi.fn(async (run: (tx: unknown) => Promise<unknown>) => run(prisma)),
-    deploymentSettings: { findUnique: vi.fn(async () => policy) },
+    deploymentSettings: {
+      findUnique: vi.fn(async () => policy),
+      updateMany: vi.fn(async () => ({ count: 0 })),
+    },
+    member: { findMany: vi.fn(async () => []) },
+    messagingIdentity: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+    organization: { deleteMany: vi.fn(async () => ({ count: 0 })) },
     spaceMember: {
       findFirst: vi.fn(async ({ where }: { where: { userId: string } }) =>
         members.has(where.userId) ? { spaceId: "space-1" } : null,
@@ -403,5 +417,122 @@ describe("access identity sign-in", () => {
       expect(response.status, path).toBe(403);
     }
     expect(f.data.user).toHaveLength(0);
+  });
+});
+
+const signIn = (f: ReturnType<typeof fixture>, assertion: string) =>
+  f.request("/access-identity/sign-in", { assertion, body: {} });
+
+const accessLinks = (f: ReturnType<typeof fixture>) =>
+  (f.data.account ?? []).filter((account) => account.providerId === "access-identity");
+
+describe("access identity subject binding", () => {
+  it("links the issuer and subject on first sign-in", async () => {
+    const f = fixture();
+    expect((await signIn(f, token())).status).toBe(200);
+    expect(accessLinks(f)).toEqual([
+      expect.objectContaining({
+        userId: f.data.user?.[0]?.id,
+        accountId: `${ISSUER} subject-1`,
+      }),
+    ]);
+  });
+
+  it("links an existing unlinked account by email exactly once", async () => {
+    const f = fixture();
+    f.data.user?.push({
+      id: "existing",
+      email: "person@example.test",
+      name: "Person",
+      emailVerified: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const first = await signIn(f, token());
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ created: false, user: { id: "existing" } });
+    expect(accessLinks(f)).toHaveLength(1);
+    expect(f.data.user?.[0]).toMatchObject({ emailVerified: true });
+
+    // Once linked, another subject with the same email cannot take it over.
+    const other = await signIn(f, token({ sub: "subject-2" }));
+    expect(other.status).toBe(403);
+    expect(await other.json()).toMatchObject({ code: "ACCESS_IDENTITY_SUBJECT_MISMATCH" });
+    expect(accessLinks(f)).toHaveLength(1);
+  });
+
+  it("refuses a reassigned email instead of merging it into the old account", async () => {
+    const f = fixture();
+    await signIn(f, token());
+    const sessions = f.data.session?.length;
+    const reassigned = await signIn(f, token({ sub: "new-holder" }));
+    expect(reassigned.status).toBe(403);
+    expect(await reassigned.json()).toMatchObject({ code: "ACCESS_IDENTITY_SUBJECT_MISMATCH" });
+    expect(f.data.user).toHaveLength(1);
+    expect(f.data.session?.length).toBe(sessions);
+  });
+
+  it("follows the same subject to a changed email", async () => {
+    const f = fixture();
+    await signIn(f, token());
+    const renamed = await signIn(f, token({ email: "Person.Renamed@example.test" }));
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toMatchObject({
+      created: false,
+      user: { email: "person.renamed@example.test" },
+    });
+    expect(f.data.user).toHaveLength(1);
+    expect(f.data.user?.[0]).toMatchObject({ email: "person.renamed@example.test" });
+  });
+
+  it("refuses a changed email that belongs to another account", async () => {
+    const f = fixture();
+    await signIn(f, token());
+    await signIn(f, token({ sub: "subject-2", email: "colleague@example.test" }));
+    const clash = await signIn(f, token({ email: "colleague@example.test" }));
+    expect(clash.status).toBe(403);
+    expect(await clash.json()).toMatchObject({ code: "ACCESS_IDENTITY_EMAIL_IN_USE" });
+    expect(f.data.user?.map((user) => user.email).sort()).toEqual([
+      "colleague@example.test",
+      "person@example.test",
+    ]);
+  });
+});
+
+describe("access identity re-authentication for account deletion", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  async function signedIn() {
+    const f = fixture();
+    const cookie = sessionCookie(await signIn(f, token()));
+    return { f, cookie };
+  }
+
+  it("reports fresh re-authentication and deletes with a fresh matching assertion", async () => {
+    const { f, cookie } = await signedIn();
+    const security = await f.request("/account-security", { cookie, assertion: token() });
+    expect(await security.json()).toMatchObject({ freshOidcAuth: true });
+    const deleted = await f.request("/delete-user", { cookie, assertion: token(), body: {} });
+    expect(deleted.status).toBe(200);
+    expect(f.data.user).toHaveLength(0);
+  });
+
+  it.each([
+    ["no assertion", undefined],
+    ["a stale assertion", () => token({ iat: NOW / 1_000 - 6 * 60 })],
+    ["an assertion with no iat", () => token({ iat: undefined })],
+    ["another subject", () => token({ sub: "subject-2" })],
+  ])("refuses deletion with %s", async (_label, make) => {
+    const { f, cookie } = await signedIn();
+    const assertion = make?.();
+    const security = await f.request("/account-security", { cookie, assertion });
+    expect(await security.json()).toMatchObject({ freshOidcAuth: false });
+    const deleted = await f.request("/delete-user", { cookie, assertion, body: {} });
+    expect(deleted.status).toBe(403);
+    expect(f.data.user).toHaveLength(1);
   });
 });

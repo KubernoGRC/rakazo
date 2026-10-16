@@ -35,23 +35,27 @@ export function accessIdentityGate(verifier: AccessVerifier): MiddlewareHandler 
   };
 }
 
-type BoundSession = {
-  session: { id: string; userId: string };
-  user: { email: string };
-};
+type BoundSession = { session: { id: string; userId: string } };
 
 /**
- * A session counts only beside a verified assertion for the same email. A
- * mismatch ends the session, so a cookie cannot outlive a change of identity.
+ * A session counts only beside a verified assertion for the subject its user
+ * is linked to. A different subject ends the session, so a cookie cannot
+ * outlive a change of identity, including a reassigned email.
  */
 export function createAccessSessionBinding(
   verifier: AccessVerifier,
-  endSession: (session: { id: string; userId: string }) => Promise<void>,
+  {
+    linkedSubject,
+    endSession,
+  }: {
+    linkedSubject: (userId: string) => Promise<string | undefined>;
+    endSession: (session: { id: string; userId: string }) => Promise<void>;
+  },
 ) {
   return async (request: Request, current: BoundSession): Promise<boolean> => {
     const verdict = await verifier.verify(request.headers);
     if (!verdict.ok) return false;
-    if (verdict.email === current.user.email.trim().toLowerCase()) return true;
+    if ((await linkedSubject(current.session.userId)) === verdict.subject) return true;
     getLogger().warn("access identity changed; ending session", {
       "user.id": current.session.userId,
     });

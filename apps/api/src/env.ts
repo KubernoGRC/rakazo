@@ -319,8 +319,11 @@ function accessIdentityFromEnv(source: NodeJS.ProcessEnv): AccessIdentityConfig 
   }
   if (source.AUTH_PASSWORD_ENABLED === "true")
     throw new Error("ACCESS_IDENTITY_ENABLED=true requires AUTH_PASSWORD_ENABLED to be off");
-  const oidcKeys = Object.keys(source).filter(
-    (key) => key.startsWith("OIDC_") && optional(source[key]),
+  // Only the settings that turn OIDC on conflict. The compose files pass
+  // OIDC_NAME, OIDC_SCOPES and OIDC_ALLOW_SIGNUP_BYPASS through with non-blank
+  // defaults, which configure nothing without an issuer.
+  const oidcKeys = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"].filter((key) =>
+    optional(source[key]),
   );
   if (oidcKeys.length > 0)
     throw new Error(`ACCESS_IDENTITY_ENABLED=true cannot be combined with ${oidcKeys.join(", ")}`);

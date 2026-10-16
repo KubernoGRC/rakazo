@@ -37,11 +37,12 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const [reset, setReset] = useState<AuthCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState(false);
   const [capabilityAttempt, setCapabilityAttempt] = useState(0);
-  const [accessFailed, setAccessFailed] = useState(false);
+  const [accessOutcome, setAccessOutcome] = useState<"refused" | "unavailable" | null>(null);
+  const [accessAttempt, setAccessAttempt] = useState(0);
   const accessIdentity = reset?.accessIdentity === true;
   const next = searchParams.get("next");
-  // One exchange per mount; navigating re-renders before this page unmounts.
-  const accessStarted = useRef(false);
+  // One exchange per attempt; navigating re-renders before this page unmounts.
+  const accessStarted = useRef<number | null>(null);
   const passwordFieldId = mode === "in" ? "current-password" : "new-password";
   const title = sent ? (
     <Trans>Check your email</Trans>
@@ -75,12 +76,13 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
 
   // Fork: the access proxy already authenticated this visitor; exchange it for a session.
   useEffect(() => {
-    if (!accessIdentity || accessStarted.current) return;
-    accessStarted.current = true;
+    if (!accessIdentity || accessStarted.current === accessAttempt) return;
+    accessStarted.current = accessAttempt;
+    setAccessOutcome(null);
     // Not cancelled on re-render: the guard means no later run would retry it.
     void signInWithAccessIdentity().then((result) => {
-      if (!result) {
-        setAccessFailed(true);
+      if (result.kind !== "signed-in") {
+        setAccessOutcome(result.kind);
         return;
       }
       clearSpaceSelection();
@@ -93,7 +95,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
             : "/app",
       );
     });
-  }, [accessIdentity, navigate, next]);
+  }, [accessIdentity, accessAttempt, navigate, next]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -199,11 +201,24 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                 <Trans>Retry</Trans>
               </Button>
             </div>
-          ) : !reset || (accessIdentity && !accessFailed) ? (
+          ) : !reset || (accessIdentity && !accessOutcome) ? (
             <p role="status">
               <Trans>Loading…</Trans>
             </p>
-          ) : accessIdentity ? (
+          ) : accessOutcome === "unavailable" ? (
+            <div role="alert" className="w-full text-center">
+              <p>
+                <Trans>Could not reach the server</Trans>
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setAccessAttempt((attempt) => attempt + 1)}
+              >
+                <Trans>Retry</Trans>
+              </Button>
+            </div>
+          ) : accessOutcome === "refused" ? (
             <p role="alert" className="w-full text-center">
               <Trans>Sign in through your organisation's portal</Trans>
             </p>

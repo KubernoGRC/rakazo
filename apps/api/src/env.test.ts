@@ -358,14 +358,29 @@ describe("OIDC environment", () => {
         },
         /cannot be combined with OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET/,
       ],
-      ["any OIDC setting", { OIDC_NAME: "SSO" }, /cannot be combined with OIDC_NAME/],
-      ["the OIDC group gate", { OIDC_REQUIRED_GROUP: "group" }, /cannot be combined/],
+      ["an OIDC client id alone", { OIDC_CLIENT_ID: "client" }, /configured together/],
+      ["the OIDC group gate", { OIDC_REQUIRED_GROUP: "group" }, /requires OIDC_ISSUER/],
       ["messaging open signup", { MESSAGING_OPEN_SIGNUP: "true" }, /MESSAGING_OPEN_SIGNUP/],
     ])("fails closed at startup with %s", (_label, overrides, message) => {
       expect(() => loadEnv({ ...access, ...overrides })).toThrow(message);
     });
     it("ignores blank OIDC settings", () => {
       expect(loadEnv({ ...access, OIDC_ISSUER: "", OIDC_NAME: " " }).accessIdentity).toBeDefined();
+    });
+    it("starts with the compose files' OIDC passthrough defaults", () => {
+      const env = loadEnv({
+        ...access,
+        OIDC_ISSUER: "",
+        OIDC_CLIENT_ID: "",
+        OIDC_CLIENT_SECRET: "",
+        OIDC_NAME: "SSO",
+        OIDC_SCOPES: "openid email profile",
+        OIDC_ALLOW_SIGNUP_BYPASS: "false",
+        AUTH_PASSWORD_ENABLED: "false",
+      });
+      expect(env.accessIdentity).toBeDefined();
+      expect(env.oidc).toBeUndefined();
+      expect(env.passwordAuth).toBe(false);
     });
   });
 });

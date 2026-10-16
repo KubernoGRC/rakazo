@@ -2,7 +2,7 @@ import type { KeyObject } from "node:crypto";
 import { createPublicKey, verify as verifySignature } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { isMessagingEmail } from "@rakazo/core";
-import type { BetterAuthPlugin } from "better-auth";
+import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import { APIError, createAuthEndpoint } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
 
@@ -25,8 +25,12 @@ export const ACCESS_ASSERTION_HEADER = "cf-access-jwt-assertion";
 export const ACCESS_SIGN_IN_PATH = "/access-identity/sign-in";
 /** The `validateUserInfo` source method for accounts this module creates. */
 export const ACCESS_IDENTITY_METHOD = "access-identity";
+/** The Better Auth `account.providerId` that records an access identity link. */
+export const ACCESS_PROVIDER_ID = "access-identity";
 /** Tolerated clock difference for `exp` and `nbf`, in seconds. */
 export const ACCESS_CLOCK_SKEW_SECONDS = 60;
+/** How recent `iat` must be for an assertion to count as re-authentication. */
+export const ACCESS_FRESH_AGE_SECONDS = 5 * 60;
 
 export type AccessRefusal =
   | "missing"
@@ -39,9 +43,23 @@ export type AccessRefusal =
   | "wrong_audience"
   | "expired"
   | "not_yet_valid"
-  | "no_email";
+  | "no_email"
+  | "no_subject";
 
-export type AccessVerdict = { ok: true; email: string } | { ok: false; reason: AccessRefusal };
+export interface AccessIdentity {
+  email: string;
+  /** `iss` and `sub`: the stable identity, unlike the email, which can be reassigned. */
+  subject: string;
+  /** `iat` in seconds, when the access proxy authenticated the user. */
+  issuedAt: number | undefined;
+}
+
+export type AccessVerdict = ({ ok: true } & AccessIdentity) | { ok: false; reason: AccessRefusal };
+
+/** The stored link key: issuer and subject, which an access proxy never reuses together. */
+export function accessSubjectKey(issuer: string, subject: string): string {
+  return `${issuer} ${subject}`;
+}
 
 export interface AccessVerifier {
   verify(headers: Headers): Promise<AccessVerdict>;
@@ -125,7 +143,14 @@ export function createAccessVerifier(
       }
       const email = typeof payload.email === "string" ? payload.email.trim().toLowerCase() : "";
       if (!email.includes("@")) return refuse("no_email");
-      return { ok: true, email };
+      if (typeof payload.sub !== "string" || !payload.sub.trim()) return refuse("no_subject");
+      if (payload.iat !== undefined && typeof payload.iat !== "number") return refuse("malformed");
+      return {
+        ok: true,
+        email,
+        subject: accessSubjectKey(config.issuer, payload.sub),
+        issuedAt: payload.iat,
+      };
     },
   };
 }
@@ -188,15 +213,89 @@ export function accessIdentityClosesPath(path: string): boolean {
       "/change-password",
       "/set-password",
       "/change-email",
+      "/unlink-account",
       "/verify-email",
       "/send-verification-email",
     ].includes(path)
   );
 }
 
+type Adapter = GenericEndpointContext["context"]["internalAdapter"];
+
+/** The access subject an account is linked to, if any. */
+export async function linkedAccessSubject(
+  adapter: Pick<Adapter, "findAccounts">,
+  userId: string,
+): Promise<string | undefined> {
+  const accounts = await adapter.findAccounts(userId);
+  return accounts.find((account) => account.providerId === ACCESS_PROVIDER_ID)?.accountId;
+}
+
+function refused(code: string): APIError {
+  return new APIError("FORBIDDEN", {
+    code,
+    message: "Sign in through your organisation's portal",
+  });
+}
+
 /**
- * The session bootstrap: verifies the assertion, finds the user by its email
- * or creates one, and issues a normal session cookie.
+ * Finds the account for a verified identity by its linked subject. An account
+ * that has none is linked by email exactly once; an account linked to another
+ * subject is refused, never merged, so a reassigned email cannot inherit it.
+ */
+async function accountForIdentity(adapter: Adapter, identity: AccessIdentity) {
+  const linked = await adapter.findAccountByKey({
+    providerId: ACCESS_PROVIDER_ID,
+    accountId: identity.subject,
+  });
+  if (linked) {
+    const user = await adapter.findUserById(linked.userId);
+    if (!user) throw refused("ACCESS_IDENTITY_UNLINKED");
+    if (user.email.toLowerCase() === identity.email) return { user, created: false };
+    // The same subject under a new email: follow it, unless the email belongs to someone else.
+    const holder = (await adapter.findUserByEmail(identity.email))?.user;
+    if (holder && holder.id !== user.id) throw refused("ACCESS_IDENTITY_EMAIL_IN_USE");
+    return {
+      user: await adapter.updateUser(user.id, { email: identity.email, emailVerified: true }),
+      created: false,
+    };
+  }
+  let user = (await adapter.findUserByEmail(identity.email))?.user;
+  const created = !user;
+  if (user) {
+    if (await linkedAccessSubject(adapter, user.id))
+      throw refused("ACCESS_IDENTITY_SUBJECT_MISMATCH");
+    if (!user.emailVerified) user = await adapter.updateUser(user.id, { emailVerified: true });
+  } else {
+    user = await adapter.createUser(
+      {
+        email: identity.email,
+        name: identity.email.split("@")[0] || identity.email,
+        emailVerified: true,
+      },
+      { method: ACCESS_IDENTITY_METHOD },
+    );
+  }
+  if (!user) throw new APIError("INTERNAL_SERVER_ERROR");
+  const link = await adapter.createAccount({
+    userId: user.id,
+    providerId: ACCESS_PROVIDER_ID,
+    accountId: identity.subject,
+  });
+  // Two first sign-ins can race; only one link per account may stand.
+  const links = (await adapter.findAccounts(user.id)).filter(
+    (account) => account.providerId === ACCESS_PROVIDER_ID,
+  );
+  if (links.some((account) => account.accountId !== identity.subject)) {
+    await adapter.deleteAccount(link.id);
+    throw refused("ACCESS_IDENTITY_SUBJECT_MISMATCH");
+  }
+  return { user, created };
+}
+
+/**
+ * The session bootstrap: verifies the assertion, finds the account linked to
+ * its subject (or links or creates one), and issues a normal session cookie.
  */
 export function accessIdentity(verifier: AccessVerifier): BetterAuthPlugin {
   return {
@@ -215,21 +314,7 @@ export function accessIdentity(verifier: AccessVerifier): BetterAuthPlugin {
           if (isMessagingEmail(verdict.email))
             throw new APIError("FORBIDDEN", { message: "Email is not available" });
           const adapter = ctx.context.internalAdapter;
-          let user = (await adapter.findUserByEmail(verdict.email))?.user;
-          const created = !user;
-          if (!user) {
-            user = await adapter.createUser(
-              {
-                email: verdict.email,
-                name: verdict.email.split("@")[0] || verdict.email,
-                emailVerified: true,
-              },
-              { method: ACCESS_IDENTITY_METHOD },
-            );
-          } else if (!user.emailVerified) {
-            user = await adapter.updateUser(user.id, { emailVerified: true });
-          }
-          if (!user) throw new APIError("INTERNAL_SERVER_ERROR");
+          const { user, created } = await accountForIdentity(adapter, verdict);
           const session = await adapter.createSession(user.id);
           if (!session) throw new APIError("INTERNAL_SERVER_ERROR");
           await setSessionCookie(ctx, { session, user });
@@ -240,5 +325,23 @@ export function accessIdentity(verifier: AccessVerifier): BetterAuthPlugin {
         },
       ),
     },
+  };
+}
+
+/**
+ * Re-authentication for sensitive actions such as account deletion: the
+ * request carries an assertion for the account's own linked subject, issued
+ * within the freshness window.
+ */
+export function accessReauthentication(
+  verifier: AccessVerifier,
+  { now = () => Date.now() }: { now?: () => number } = {},
+) {
+  return async (ctx: GenericEndpointContext, userId: string): Promise<boolean> => {
+    const verdict = await verifier.verify(ctx.headers ?? new Headers());
+    if (!verdict.ok || verdict.issuedAt === undefined) return false;
+    const age = now() / 1_000 - verdict.issuedAt;
+    if (age > ACCESS_FRESH_AGE_SECONDS || age < -ACCESS_CLOCK_SKEW_SECONDS) return false;
+    return (await linkedAccessSubject(ctx.context.internalAdapter, userId)) === verdict.subject;
   };
 }

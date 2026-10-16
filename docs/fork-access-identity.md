@@ -22,13 +22,14 @@ The API refuses to start when the mode is on and any of these hold:
 
 - the issuer, audience or certs file is missing, or the issuer is not an HTTPS origin;
 - `AUTH_PASSWORD_ENABLED=true`. Unset is fine: the mode turns password auth off;
-- any `OIDC_*` variable has a non-blank value, including the OIDC group gate;
+- OIDC is configured: `OIDC_ISSUER`, `OIDC_CLIENT_ID` or `OIDC_CLIENT_SECRET` is non-blank,
+  or `OIDC_REQUIRED_GROUP` is set;
 - `MESSAGING_OPEN_SIGNUP=true`, which provisions accounts for chat senders.
 
-The compose files in this repository default `AUTH_PASSWORD_ENABLED` to `true` and
-`OIDC_NAME`, `OIDC_SCOPES` and `OIDC_ALLOW_SIGNUP_BYPASS` to non-blank values, so a
-compose deployment has to override them to blank (and `AUTH_PASSWORD_ENABLED` to `false`
-or blank) before the mode will start.
+`OIDC_NAME`, `OIDC_SCOPES` and `OIDC_ALLOW_SIGNUP_BYPASS` configure nothing without an
+issuer, so their compose defaults are ignored. The compose files default
+`AUTH_PASSWORD_ENABLED` to `true`, so a compose deployment sets it to `false`. The compose
+files do not pass the `ACCESS_IDENTITY_*` variables through; the deployment adds them.
 
 ## What the mode enforces
 
@@ -39,7 +40,7 @@ or blank) before the mode will start.
   - `aud` containing the audience;
   - `exp` in the future and `nbf`, when present, in the past. Both allow 60 seconds of
     clock skew;
-  - a non-empty `email` claim.
+  - non-empty `email` and `sub` claims.
 
   Anything else gets `401` with code `ACCESS_IDENTITY_REQUIRED`. That covers a missing,
   malformed, expired or wrongly signed assertion, an unknown `kid`, an algorithm other
@@ -58,17 +59,37 @@ or blank) before the mode will start.
   checked on each request. A file that cannot be read or parsed, or that holds no usable
   RSA signing key, keeps the last good set. Until a good set has been loaded once, every
   assertion is refused.
-- **Accounts come only from a verified assertion.** On first sign-in the web app posts to
-  `/api/auth/access-identity/sign-in`. The endpoint verifies the assertion, finds the user
-  by its email (lower-cased), and creates the user if there is none, with the email
-  marked verified. Then it issues Rakazo's normal session cookie. The signup policy
+- **Accounts are linked to the subject, not the email.** On first sign-in the web app
+  posts to `/api/auth/access-identity/sign-in`. The endpoint verifies the assertion and
+  looks up the account linked to its issuer and `sub`. The link is an `account` row with
+  `providerId = 'access-identity'` and `accountId = '<issuer> <sub>'`.
+  - **Linked:** the account signs in. If the assertion's email has changed, the account's
+    email follows it, unless another account already holds that email
+    (`ACCESS_IDENTITY_EMAIL_IN_USE`).
+  - **Not linked:** an existing account with the same email (lower-cased) is linked to the
+    subject, once. If there is none, an account is created with the email marked verified,
+    and linked.
+  - **Refused, never merged:** an account whose email matches but which is already linked
+    to a different subject (`ACCESS_IDENTITY_SUBJECT_MISMATCH`). That is what a reassigned
+    email looks like, since the proxy issues a new `sub` when an identity is removed and
+    re-added. An admin re-links deliberately: delete that account's `access-identity` row,
+    and the next sign-in links by email.
+
+  Then the endpoint issues Rakazo's normal session cookie. The signup policy
   (`SIGNUPS_ENABLED`, the allowlist, a stored policy) does not apply: the access policy is
-  the admission decision. No other path creates an account or a session in this mode.
-- **Sessions are bound to the access identity.** A session counts only beside a valid
-  assertion for the same email. A request whose verified email differs from the session's
-  user ends that session. A session cookie or bearer token with no valid assertion is
-  refused. Because the assertion is re-checked on every request, sessions refresh as they
-  do upstream.
+  the admission decision. No other path creates an account or a session in this mode, and
+  `/unlink-account` is closed.
+- **Sessions are bound to the subject.** A session counts only beside a valid assertion
+  whose subject is the one the session's user is linked to. Any other subject ends that
+  session, and so does a user with no link. A session cookie or bearer token with no valid
+  assertion is refused. Because the assertion is re-checked on every request, sessions
+  refresh as they do upstream.
+- **Account deletion re-authenticates with a fresh assertion.** `/delete-user` accepts an
+  assertion for the account's own linked subject whose `iat` is under five minutes old.
+  `/account-security` then reports `freshOidcAuth: true`, which enables the web app's Delete
+  account control. The proxy sets `iat` when it authenticates the user, so an older Access
+  session has to sign in to the proxy again before deleting. Without a fresh, matching
+  assertion, deletion is refused.
 - **Other ways in are closed.** These auth routes answer `403` with code
   `ACCESS_IDENTITY_ONLY`:
   - password sign-in, sign-up, reset and change;
@@ -76,8 +97,11 @@ or blank) before the mode will start.
   - magic links and email OTP;
   - email change and email verification.
 
-  The sign-in page shows no form. It exchanges the assertion for a session and, if that
-  is refused, shows "Sign in through your organisation's portal".
+  The sign-in page shows no form. It exchanges the assertion for a session. A refusal
+  (401 or 403) shows "Sign in through your organisation's portal". A network failure or
+  server error shows "Could not reach the server" with a Retry control.
+- **The mobile app does not sign in.** Its sign-in screen shows "This server uses your
+  organisation's sign-in in a web browser" instead of a form.
 - **Logout** clears the Rakazo session only. The access proxy's own session continues, so
   the next visit signs straight back in. To end access, remove the user in the access
   policy or end their session at the proxy.
@@ -111,8 +135,13 @@ file is refused.
   `requestSession` and on `/api/auth/*`, and the `accessIdentity` capability.
 - `apps/api/src/env.ts`: `accessIdentityFromEnv` and its fail-closed checks.
 - `packages/contracts/src/auth.ts`: the optional `accessIdentity` capability.
+- `packages/auth/src/account-security.ts`: an optional fresh re-authentication check, used
+  by `/account-security` and the `/delete-user` hook.
 - `apps/web/src/pages/Auth.tsx`: the access branch of the sign-in page.
-- Tests: an `ACCESS_IDENTITY_ENABLED` block appended to `apps/api/src/env.test.ts` and an
-  access block appended to `apps/web/src/pages/Auth.test.tsx`.
+- `apps/mobile/app/sign-in.tsx` and its `de`, `ru` and `zh` catalogs: the browser-only
+  message.
+- Tests: an `ACCESS_IDENTITY_ENABLED` block appended to `apps/api/src/env.test.ts`, and
+  access blocks appended to `apps/web/src/pages/Auth.test.tsx` and
+  `apps/mobile/lib/sign-in.test.tsx`.
 
 Only the `app` image changes.

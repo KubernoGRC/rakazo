@@ -25,6 +25,7 @@ import {
   ACCESS_SIGN_IN_PATH,
   accessIdentity,
   accessIdentityClosesPath,
+  accessReauthentication,
 } from "./access-identity.js";
 import {
   accountSecurity,
@@ -36,6 +37,7 @@ import type { OidcConfig } from "./oidc.js";
 import { oidcDiscovery, oidcGroupRefusal } from "./oidc.js";
 
 export type {
+  AccessIdentity,
   AccessIdentityConfig,
   AccessRefusal,
   AccessVerdict,
@@ -43,6 +45,7 @@ export type {
 } from "./access-identity.js";
 export {
   ACCESS_ASSERTION_HEADER,
+  ACCESS_PROVIDER_ID,
   ACCESS_SIGN_IN_PATH,
   accessIdentityClosesPath,
   createAccessVerifier,
@@ -401,7 +404,13 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     plugins: [
       bearer(),
       expo(),
-      accountSecurity(env.email, env.oidc?.name, env.oidc?.issuer, env.passwordAuth !== false),
+      accountSecurity(
+        env.email,
+        env.oidc?.name,
+        env.oidc?.issuer,
+        env.passwordAuth !== false,
+        env.accessIdentity ? accessReauthentication(env.accessIdentity) : undefined,
+      ),
       ...(discovery ? [discovery.plugin] : []),
       ...(env.accessIdentity ? [accessIdentity(env.accessIdentity)] : []),
       organization({

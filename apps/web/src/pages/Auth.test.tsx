@@ -168,7 +168,7 @@ it("signs in through the access proxy without showing a form", async () => {
   const notify = vi.fn();
   Object.assign(authClient, { $store: { notify } });
   vi.mocked(fetchAuthCapabilities).mockResolvedValue(accessCapabilities);
-  vi.mocked(signInWithAccessIdentity).mockResolvedValue({ created: false });
+  vi.mocked(signInWithAccessIdentity).mockResolvedValue({ kind: "signed-in", created: false });
   await render();
   expect(signInWithAccessIdentity).toHaveBeenCalledTimes(1);
   expect(notify).toHaveBeenCalledWith("$sessionSignal");
@@ -177,9 +177,26 @@ it("signs in through the access proxy without showing a form", async () => {
 });
 it("points at the organisation's portal when the access sign-in is refused", async () => {
   vi.mocked(fetchAuthCapabilities).mockResolvedValue(accessCapabilities);
-  vi.mocked(signInWithAccessIdentity).mockResolvedValue(null);
+  vi.mocked(signInWithAccessIdentity).mockResolvedValue({ kind: "refused" });
   await render();
   expect(host.textContent).toContain("Sign in through your organisation's portal");
   expect(host.querySelector("input")).toBeNull();
   expect(host.querySelector("button")).toBeNull();
+});
+it("offers a retry when the access sign-in fails transiently", async () => {
+  const notify = vi.fn();
+  Object.assign(authClient, { $store: { notify } });
+  vi.mocked(fetchAuthCapabilities).mockResolvedValue(accessCapabilities);
+  vi.mocked(signInWithAccessIdentity)
+    .mockResolvedValueOnce({ kind: "unavailable" })
+    .mockResolvedValueOnce({ kind: "signed-in", created: false });
+  await render();
+  expect(host.textContent).toContain("Could not reach the server");
+  expect(host.textContent).not.toContain("organisation's portal");
+  const retry = [...host.querySelectorAll("button")].find(
+    (button) => button.textContent === "Retry",
+  )!;
+  await act(async () => retry.click());
+  expect(signInWithAccessIdentity).toHaveBeenCalledTimes(2);
+  expect(notify).toHaveBeenCalledWith("$sessionSignal");
 });

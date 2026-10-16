@@ -8,13 +8,18 @@ import {
   createAccessSessionBinding,
 } from "./access-identity.js";
 
-/** Accepts exactly the assertion `valid:<email>`; the real checks are tested in @rakazo/auth. */
+/** Accepts exactly the assertion `valid:<subject>`; the real checks are tested in @rakazo/auth. */
 const verifier: AccessVerifier = {
   verify: async (headers): Promise<AccessVerdict> => {
     const value = headers.get("cf-access-jwt-assertion");
     if (!value) return { ok: false, reason: "missing" };
     return value.startsWith("valid:")
-      ? { ok: true, email: value.slice("valid:".length) }
+      ? {
+          ok: true,
+          email: "person@example.test",
+          subject: value.slice("valid:".length),
+          issuedAt: undefined,
+        }
       : { ok: false, reason: "bad_signature" };
   },
 };
@@ -29,7 +34,7 @@ function gated() {
 describe("access identity gate", () => {
   it("lets a verified request through", async () => {
     const response = await gated().request("/rpc/threads/list", {
-      headers: { "cf-access-jwt-assertion": "valid:person@example.test" },
+      headers: { "cf-access-jwt-assertion": "valid:subject-1" },
     });
     expect(await response.text()).toBe("reached");
   });
@@ -66,37 +71,41 @@ describe("access identity gate", () => {
 });
 
 describe("access session binding", () => {
-  const session = (email: string) => ({
-    session: { id: "session-1", userId: "user-1" },
-    user: { email },
-  });
+  const session = { session: { id: "session-1", userId: "user-1" } };
   const request = (assertion?: string) =>
     new Request("http://api.example.test/rpc/x", {
       headers: assertion ? { "cf-access-jwt-assertion": assertion } : {},
     });
-
-  it("accepts a session whose user matches the verified email", async () => {
+  const binding = (subject: string | undefined) => {
     const endSession = vi.fn(async () => undefined);
-    const bound = createAccessSessionBinding(verifier, endSession);
-    expect(await bound(request("valid:person@example.test"), session("Person@Example.test"))).toBe(
-      true,
-    );
+    const bound = createAccessSessionBinding(verifier, {
+      linkedSubject: async () => subject,
+      endSession,
+    });
+    return { bound, endSession };
+  };
+
+  it("accepts a session whose user is linked to the verified subject", async () => {
+    const { bound, endSession } = binding("subject-1");
+    expect(await bound(request("valid:subject-1"), session)).toBe(true);
     expect(endSession).not.toHaveBeenCalled();
   });
 
-  it("ends a session whose user differs from the verified email", async () => {
-    const endSession = vi.fn(async () => undefined);
-    const bound = createAccessSessionBinding(verifier, endSession);
-    expect(
-      await bound(request("valid:someone-else@example.test"), session("person@example.test")),
-    ).toBe(false);
+  it("ends a session whose user is linked to another subject", async () => {
+    const { bound, endSession } = binding("subject-1");
+    expect(await bound(request("valid:subject-2"), session)).toBe(false);
     expect(endSession).toHaveBeenCalledWith({ id: "session-1", userId: "user-1" });
   });
 
+  it("ends a session whose user has no access link", async () => {
+    const { bound, endSession } = binding(undefined);
+    expect(await bound(request("valid:subject-1"), session)).toBe(false);
+    expect(endSession).toHaveBeenCalled();
+  });
+
   it("refuses a session cookie with no valid assertion", async () => {
-    const endSession = vi.fn(async () => undefined);
-    const bound = createAccessSessionBinding(verifier, endSession);
-    expect(await bound(request(), session("person@example.test"))).toBe(false);
-    expect(await bound(request("forged"), session("person@example.test"))).toBe(false);
+    const { bound } = binding("subject-1");
+    expect(await bound(request(), session)).toBe(false);
+    expect(await bound(request("forged"), session)).toBe(false);
   });
 });

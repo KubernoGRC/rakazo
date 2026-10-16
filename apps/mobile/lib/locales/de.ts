@@ -778,6 +778,8 @@ export const DE_MESSAGES: Record<string, string> = {
   "Privacy policy": "Datenschutzerklärung",
   "Continue with {name}": "Mit {name} fortfahren",
   "Could not load sign-in options": "Anmeldeoptionen konnten nicht geladen werden",
+  "This server uses your organisation's sign-in in a web browser":
+    "Dieser Server nutzt die Anmeldung deiner Organisation in einem Webbrowser",
   "Deletion code": "Löschcode",
   "Email is not allowed to register": "Diese E-Mail-Adresse ist nicht zur Registrierung zugelassen",
   "Email verification required": "E-Mail-Verifizierung erforderlich",
