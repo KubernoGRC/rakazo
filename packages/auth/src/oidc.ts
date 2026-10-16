@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { BetterAuthPlugin } from "better-auth";
 import { APIError } from "better-auth/api";
 import { genericOAuth } from "better-auth/plugins";
+import { oidcProxyFetch, withOidcTransport } from "./oidc-transport.js";
 
 export interface OidcConfig {
   issuer: string;
@@ -17,8 +18,16 @@ export interface OidcConfig {
   requiredGroup?: string;
 }
 
-/** Discovery never gates API startup. Failed attempts share exponential backoff. */
-export function oidcDiscovery(config: OidcConfig) {
+/** Discovery never gates API startup. Failed attempts share exponential backoff.
+ *
+ * Fork: every call that leaves the process for the IdP (discovery, JWKS, token
+ * redemption and refresh) runs on `transport`, which defaults to the
+ * deployment's HTTPS proxy when one is configured (see oidc-transport.ts). */
+export function oidcDiscovery(
+  config: OidcConfig,
+  transport: typeof globalThis.fetch | undefined = oidcProxyFetch(),
+) {
+  const outbound = <T>(operation: () => Promise<T>) => withOidcTransport(transport, operation);
   const generic = genericOAuth({
     config: [
       {
@@ -77,11 +86,13 @@ export function oidcDiscovery(config: OidcConfig) {
           try {
             const result = await Promise.race([
               // The library may log upstream error detail. Keep discovery errors generic.
-              generic.init({
-                ...ctx,
-                socialProviders: ctx.socialProviders.filter((item) => item.id !== "oidc"),
-                logger: { ...ctx.logger, error: () => undefined },
-              }),
+              outbound(() =>
+                generic.init({
+                  ...ctx,
+                  socialProviders: ctx.socialProviders.filter((item) => item.id !== "oidc"),
+                  logger: { ...ctx.logger, error: () => undefined },
+                }),
+              ),
               new Promise<never>((_, reject) => {
                 timeout = setTimeout(() => reject(unavailable()), 8_000);
               }),
@@ -121,10 +132,16 @@ export function oidcDiscovery(config: OidcConfig) {
         issuer: config.issuer,
         requiresIdTokenNonce: true,
         createAuthorizationURL: async (data) => (await getProvider()).createAuthorizationURL(data),
-        validateAuthorizationCode: async (data) =>
-          (await getProvider()).validateAuthorizationCode(data),
-        getUserInfo: async (tokens) =>
-          tokens.idToken ? (await getProvider()).getUserInfo(tokens) : null,
+        validateAuthorizationCode: async (data) => {
+          const resolved = await getProvider();
+          return outbound(() => resolved.validateAuthorizationCode(data));
+        },
+        // Verifying the ID token fetches the IdP's JWKS.
+        getUserInfo: async (tokens) => {
+          if (!tokens.idToken) return null;
+          const resolved = await getProvider();
+          return outbound(() => resolved.getUserInfo(tokens));
+        },
         accountSubject: async (data) => {
           const resolved = await getProvider();
           if (!resolved.accountSubject) throw unavailable();
@@ -132,8 +149,9 @@ export function oidcDiscovery(config: OidcConfig) {
         },
         refreshAccessToken: async (token, context) => {
           const resolved = await getProvider();
-          if (!resolved.refreshAccessToken) throw unavailable();
-          return resolved.refreshAccessToken(token, context);
+          const refresh = resolved.refreshAccessToken;
+          if (!refresh) throw unavailable();
+          return outbound(() => refresh.call(resolved, token, context));
         },
       };
       return { context: { socialProviders: [lazy, ...ctx.socialProviders] } };

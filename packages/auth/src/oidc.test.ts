@@ -5,8 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Auth, AuthEnv } from "./index.js";
 import { createAuth } from "./index.js";
 import { isCurrentOidcAccount, oidcAccountSubject, oidcGroupRefusal } from "./oidc.js";
+import type * as Transport from "./oidc-transport.js";
 
-const state = vi.hoisted(() => ({ db: {} as Record<string, Record<string, unknown>[]> }));
+const state = vi.hoisted(() => ({
+  db: {} as Record<string, Record<string, unknown>[]>,
+  proxy: undefined as typeof fetch | undefined,
+}));
+vi.mock("./oidc-transport.js", async (original) => ({
+  ...(await original<typeof Transport>()),
+  oidcProxyFetch: () => state.proxy,
+}));
 vi.mock("better-auth/adapters/prisma", () => ({ prismaAdapter: () => memoryAdapter(state.db) }));
 vi.mock("@rakazo/db", async (original) => ({
   ...(await original<typeof Db>()),
@@ -180,42 +188,8 @@ beforeEach(() => {
   corruptSignature = false;
   omitIdToken = false;
   codes.clear();
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(input instanceof Request ? input.url : String(input));
-      if (url.origin !== activeIssuer) throw new Error("Unexpected offline request");
-      if (url.pathname.endsWith("openid-configuration"))
-        return discoveryDown
-          ? json({}, 503)
-          : json({
-              issuer: activeIssuer,
-              authorization_endpoint: `${activeIssuer}/authorize`,
-              token_endpoint: `${activeIssuer}/token`,
-              userinfo_endpoint: `${activeIssuer}/userinfo`,
-              jwks_uri: `${activeIssuer}/jwks`,
-              id_token_signing_alg_values_supported: ["RS256"],
-            });
-      if (url.pathname === "/jwks") return json({ keys: [jwk] });
-      if (url.pathname === "/token") {
-        const body = new URLSearchParams(String(init?.body));
-        const code = body.get("code")!;
-        const value = codes.get(code);
-        codes.delete(code);
-        const challenge = createHash("sha256")
-          .update(body.get("code_verifier") ?? "")
-          .digest("base64url");
-        if (!value || value.challenge !== challenge) return json({ error: "invalid_grant" }, 400);
-        return json({
-          access_token: "fake-access-token",
-          token_type: "Bearer",
-          expires_in: 300,
-          ...(omitIdToken ? {} : { id_token: jwt({ ...value.claims, nonce: value.nonce }) }),
-        });
-      }
-      throw new Error("Unexpected OIDC route");
-    }),
-  );
+  state.proxy = undefined;
+  vi.stubGlobal("fetch", vi.fn(identityProvider));
 });
 afterEach(() => {
   auth?.disposeOidcDiscovery();
@@ -223,7 +197,64 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+async function identityProvider(input: string | URL | Request, init?: RequestInit) {
+  const url = new URL(input instanceof Request ? input.url : String(input));
+  if (url.origin !== activeIssuer) throw new Error("Unexpected offline request");
+  if (url.pathname.endsWith("openid-configuration"))
+    return discoveryDown
+      ? json({}, 503)
+      : json({
+          issuer: activeIssuer,
+          authorization_endpoint: `${activeIssuer}/authorize`,
+          token_endpoint: `${activeIssuer}/token`,
+          userinfo_endpoint: `${activeIssuer}/userinfo`,
+          jwks_uri: `${activeIssuer}/jwks`,
+          id_token_signing_alg_values_supported: ["RS256"],
+        });
+  if (url.pathname === "/jwks") return json({ keys: [jwk] });
+  if (url.pathname === "/token") {
+    const body = new URLSearchParams(String(init?.body));
+    const code = body.get("code")!;
+    const value = codes.get(code);
+    codes.delete(code);
+    const challenge = createHash("sha256")
+      .update(body.get("code_verifier") ?? "")
+      .digest("base64url");
+    if (!value || value.challenge !== challenge) return json({ error: "invalid_grant" }, 400);
+    return json({
+      access_token: "fake-access-token",
+      token_type: "Bearer",
+      expires_in: 300,
+      ...(omitIdToken ? {} : { id_token: jwt({ ...value.claims, nonce: value.nonce }) }),
+    });
+  }
+  throw new Error("Unexpected OIDC route");
+}
+
 describe("OIDC callbacks", () => {
+  it("reaches the IdP only through the proxy transport when one is configured", async () => {
+    // The global fetch has no route out, as after an SSRF guard replaces the
+    // env-proxy dispatcher. Discovery, token redemption and JWKS must not use it.
+    const direct = vi.fn(async () => {
+      throw new Error("No direct route");
+    });
+    vi.stubGlobal("fetch", direct);
+    const proxied = vi.fn(identityProvider);
+    state.proxy = proxied as typeof fetch;
+    setup();
+
+    const response = await signIn();
+
+    expect(response.headers.get("location")).toBe(`${origin}/app`);
+    expect(rows("account")).toHaveLength(1);
+    expect(direct).not.toHaveBeenCalled();
+    const paths = proxied.mock.calls.map(
+      ([input]) => new URL(input instanceof Request ? input.url : String(input)).pathname,
+    );
+    expect(paths).toEqual(
+      expect.arrayContaining(["/.well-known/openid-configuration", "/token", "/jwks"]),
+    );
+  });
   it.each([true, false, undefined])(
     "preserves email_verified=%s through the real callback",
     async (verified) => {
