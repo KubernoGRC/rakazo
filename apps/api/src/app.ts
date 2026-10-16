@@ -72,7 +72,13 @@ import {
   toTeamChatInbound,
   withSecretPersistence,
 } from "@rakazo/adapters";
-import { createAuth, isBlockedAuthPath, loopbackTwinOrigins } from "@rakazo/auth";
+import {
+  ACCESS_PROVIDER_ID,
+  createAccessVerifier,
+  createAuth,
+  isBlockedAuthPath,
+  loopbackTwinOrigins,
+} from "@rakazo/auth";
 import type { Actor, AuthCapabilities } from "@rakazo/contracts";
 import { signupAllowlistBootUpdate, signupPolicyFromEnv } from "@rakazo/core";
 import type { Pool, PrismaClient } from "@rakazo/db";
@@ -99,6 +105,7 @@ import { requestLogging } from "@rakazo/logging/hono";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { accessIdentityGate, createAccessSessionBinding } from "./access-identity.js";
 import { createBillingService } from "./billing.js";
 import { mountBillingRoutes } from "./billing-webhook.js";
 import type { AppEnv } from "./env.js";
@@ -399,9 +406,12 @@ export async function createApp(
   const notifications = new ExpoPushProvider(env.dataDir, (sessionId) =>
     pushSessionExpiresAt(prisma, sessionId),
   );
+  // Fork: trusted access-proxy identity; see docs/fork-access-identity.md.
+  const accessVerifier = env.accessIdentity ? createAccessVerifier(env.accessIdentity) : undefined;
   const auth = createAuth(prisma, {
     passwordAuth: env.passwordAuth,
     oidc: env.oidc,
+    accessIdentity: accessVerifier,
     secret: env.authSecret,
     baseURL: env.authUrl,
     webOrigin: env.webOrigin,
@@ -451,6 +461,23 @@ export async function createApp(
       );
     },
   });
+  const accessSessionBound = accessVerifier
+    ? createAccessSessionBinding(accessVerifier, {
+        linkedSubject: async (userId) =>
+          (
+            await prisma.account.findFirst({
+              where: { userId, providerId: ACCESS_PROVIDER_ID },
+              select: { accountId: true },
+            })
+          )?.accountId,
+        endSession: async (session) => {
+          await prisma.session.deleteMany({ where: { id: session.id } });
+          await endSessionPushToken(env.dataDir, session.userId, session.id).catch((error) =>
+            getLogger().error("push token removal failed", error),
+          );
+        },
+      })
+    : undefined;
   // One provider instance so emulator launches and polls share the same Map.
   const cloudAgent = createCloudAgentConnection({
     CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
@@ -610,12 +637,15 @@ export async function createApp(
       c.header("cache-control", "no-store");
     });
   }
+  // Fork: under access identity every other route needs a verified assertion.
+  if (accessVerifier) app.use("*", accessIdentityGate(accessVerifier));
   app.get("/api/auth/capabilities", (c) => {
     return c.json({
       sso: env.oidc
         ? { name: env.oidc.name, availability: auth.ssoAvailability() ?? "checking" }
         : null,
       passwordAuth: env.passwordAuth !== false,
+      ...(accessVerifier ? { accessIdentity: true } : {}),
       passwordReset: env.passwordAuth !== false && Boolean(email),
       resetUrl:
         env.passwordAuth !== false && email ? new URL("/reset-password", env.webOrigin).href : null,
@@ -638,12 +668,18 @@ export async function createApp(
     if (isBlockedAuthPath(path)) {
       return c.json({ error: "Not available in version 1" }, 404);
     }
+    if (accessSessionBound) {
+      // End a session bound to another identity before Better Auth reads it.
+      const session = await auth.api.getSession({ headers: sessionHeaders(c.req.raw) });
+      if (session?.user) await accessSessionBound(c.req.raw, session);
+    }
     return auth.handler(emptyAuthBodyAsJson(c.req.raw));
   });
   mountLocalSettings(app, { token: env.desktopStackToken, prisma, rpc });
   const requestSession = async (request: Request) => {
     const session = await auth.api.getSession({ headers: sessionHeaders(request) });
     if (!session?.user) return null;
+    if (accessSessionBound && !(await accessSessionBound(request, session))) return null;
     const actor = await actorFromMembership(
       requireMembership(prisma, session.user.id, request.headers.get("x-rakazo-space-id")),
     );
@@ -959,20 +995,27 @@ export async function createApp(
 
   app.route(
     "/",
-    healthRoutes(() => ({
-      runtime: env.agentRuntime,
-      sandbox: env.sandboxProvider,
-      composio: Boolean(stack.composio),
-      pipedream: Boolean(pipedream),
-      messaging: Boolean(messaging),
-      email: email?.describe().id ?? null,
-      billing: billingProvider?.describe().id ?? null,
-      jobs: jobKind,
-      realtime: realtime.describe().id,
-      secrets: secrets.describe(),
-      degraded: secrets.describe().capabilities.degraded ?? false,
-      revision: env.gitSha ?? null,
-    })),
+    healthRoutes(
+      () => ({
+        runtime: env.agentRuntime,
+        sandbox: env.sandboxProvider,
+        composio: Boolean(stack.composio),
+        pipedream: Boolean(pipedream),
+        messaging: Boolean(messaging),
+        email: email?.describe().id ?? null,
+        billing: billingProvider?.describe().id ?? null,
+        jobs: jobKind,
+        realtime: realtime.describe().id,
+        secrets: secrets.describe(),
+        degraded: secrets.describe().capabilities.degraded ?? false,
+        revision: env.gitSha ?? null,
+      }),
+      // Fork: without a usable key set every assertion is refused, so do not take traffic.
+      accessVerifier
+        ? async () =>
+            (await accessVerifier.ready()) ? undefined : "access_identity_keys_unavailable"
+        : undefined,
+    ),
   );
 
   return {

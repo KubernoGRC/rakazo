@@ -6,7 +6,7 @@ import {
   resolveSandboxProvider,
   secretStoreOptionsFromEnv,
 } from "@rakazo/adapters";
-import type { OidcConfig } from "@rakazo/auth";
+import type { AccessIdentityConfig, OidcConfig } from "@rakazo/auth";
 import {
   resolveAuthSecret,
   resolveEncryptionKey,
@@ -19,6 +19,8 @@ export { resolveCloudAgentProvider, resolveSandboxProvider } from "@rakazo/adapt
 export interface AppEnv {
   passwordAuth?: boolean;
   oidc?: OidcConfig;
+  /** Fork: trusted access-proxy identity; see docs/fork-access-identity.md. */
+  accessIdentity?: AccessIdentityConfig;
   nodeEnv: string;
   desktopStackToken?: string;
   databaseUrl: string;
@@ -137,8 +139,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     if (value && !["true", "false"].includes(value))
       throw new Error(`${key} must be true or false`);
   }
-  const passwordAuth = source.AUTH_PASSWORD_ENABLED !== "false";
-  if (!passwordAuth && !issuer)
+  const accessIdentity = accessIdentityFromEnv(source);
+  const passwordAuth = accessIdentity ? false : source.AUTH_PASSWORD_ENABLED !== "false";
+  if (!passwordAuth && !issuer && !accessIdentity)
     throw new Error("AUTH_PASSWORD_ENABLED=false requires OIDC configuration");
   const requiredGroup = oidcRequiredGroup(source, { issuer, passwordAuth });
   const oidc =
@@ -164,6 +167,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   return {
     passwordAuth,
     oidc,
+    ...(accessIdentity ? { accessIdentity } : {}),
     nodeEnv: source.NODE_ENV ?? "",
     databaseUrl: required(source, "DATABASE_URL"),
     realtimeDatabaseUrl: source.REALTIME_DATABASE_URL ?? required(source, "DATABASE_URL"),
@@ -278,6 +282,54 @@ function oidcRequiredGroup(
   if (source.MESSAGING_OPEN_SIGNUP === "true")
     throw new Error("OIDC_REQUIRED_GROUP requires MESSAGING_OPEN_SIGNUP to be off");
   return group;
+}
+
+/**
+ * Fork: ACCESS_IDENTITY_ENABLED=true makes a verified access-proxy assertion
+ * the only way in. Every setting it needs is required, and any other login
+ * path configured beside it refuses startup. See docs/fork-access-identity.md.
+ */
+function accessIdentityFromEnv(source: NodeJS.ProcessEnv): AccessIdentityConfig | undefined {
+  const enabled = source.ACCESS_IDENTITY_ENABLED;
+  if (enabled && !["true", "false"].includes(enabled))
+    throw new Error("ACCESS_IDENTITY_ENABLED must be true or false");
+  if (enabled !== "true") return undefined;
+  const rawIssuer = optional(source.ACCESS_IDENTITY_ISSUER);
+  const audience = optional(source.ACCESS_IDENTITY_AUDIENCE);
+  const certsFile = optional(source.ACCESS_IDENTITY_CERTS_FILE);
+  if (!rawIssuer || !audience || !certsFile)
+    throw new Error(
+      "ACCESS_IDENTITY_ENABLED=true requires ACCESS_IDENTITY_ISSUER, ACCESS_IDENTITY_AUDIENCE and ACCESS_IDENTITY_CERTS_FILE",
+    );
+  let issuer: string;
+  try {
+    const url = new URL(rawIssuer);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      url.pathname !== "/"
+    )
+      throw new Error();
+    issuer = url.origin;
+  } catch {
+    throw new Error("ACCESS_IDENTITY_ISSUER must be an HTTPS origin");
+  }
+  if (source.AUTH_PASSWORD_ENABLED === "true")
+    throw new Error("ACCESS_IDENTITY_ENABLED=true requires AUTH_PASSWORD_ENABLED to be off");
+  // Only the settings that turn OIDC on conflict. The compose files pass
+  // OIDC_NAME, OIDC_SCOPES and OIDC_ALLOW_SIGNUP_BYPASS through with non-blank
+  // defaults, which configure nothing without an issuer.
+  const oidcKeys = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"].filter((key) =>
+    optional(source[key]),
+  );
+  if (oidcKeys.length > 0)
+    throw new Error(`ACCESS_IDENTITY_ENABLED=true cannot be combined with ${oidcKeys.join(", ")}`);
+  if (source.MESSAGING_OPEN_SIGNUP === "true")
+    throw new Error("ACCESS_IDENTITY_ENABLED=true requires MESSAGING_OPEN_SIGNUP to be off");
+  return { issuer, audience, certsFile };
 }
 
 function optional(value: string | undefined): string | undefined {
