@@ -995,20 +995,27 @@ export async function createApp(
 
   app.route(
     "/",
-    healthRoutes(() => ({
-      runtime: env.agentRuntime,
-      sandbox: env.sandboxProvider,
-      composio: Boolean(stack.composio),
-      pipedream: Boolean(pipedream),
-      messaging: Boolean(messaging),
-      email: email?.describe().id ?? null,
-      billing: billingProvider?.describe().id ?? null,
-      jobs: jobKind,
-      realtime: realtime.describe().id,
-      secrets: secrets.describe(),
-      degraded: secrets.describe().capabilities.degraded ?? false,
-      revision: env.gitSha ?? null,
-    })),
+    healthRoutes(
+      () => ({
+        runtime: env.agentRuntime,
+        sandbox: env.sandboxProvider,
+        composio: Boolean(stack.composio),
+        pipedream: Boolean(pipedream),
+        messaging: Boolean(messaging),
+        email: email?.describe().id ?? null,
+        billing: billingProvider?.describe().id ?? null,
+        jobs: jobKind,
+        realtime: realtime.describe().id,
+        secrets: secrets.describe(),
+        degraded: secrets.describe().capabilities.degraded ?? false,
+        revision: env.gitSha ?? null,
+      }),
+      // Fork: without a usable key set every assertion is refused, so do not take traffic.
+      accessVerifier
+        ? async () =>
+            (await accessVerifier.ready()) ? undefined : "access_identity_keys_unavailable"
+        : undefined,
+    ),
   );
 
   return {

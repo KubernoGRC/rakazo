@@ -168,6 +168,31 @@ describe("access assertion verification", () => {
 });
 
 describe("access certs file", () => {
+  it.each([
+    ["absent", () => "/nonexistent/certs.json"],
+    [
+      "malformed",
+      () => {
+        const path = certsFile([]);
+        writeFileSync(path, "{ not json");
+        return path;
+      },
+    ],
+    ["without a usable key", () => certsFile([{ kty: "EC", kid: "k1" }])],
+  ])("is not ready while the certs file is %s", async (_label, path) => {
+    expect(await verifierFor(path()).ready()).toBe(false);
+  });
+
+  it("becomes ready once a usable key loads and stays ready on the last good set", async () => {
+    const path = certsFile([{ kty: "EC", kid: "k1" }]);
+    const verifier = verifierFor(path);
+    expect(await verifier.ready()).toBe(false);
+    writeFileSync(path, JSON.stringify({ keys: [jwk(signing.publicKey, "k1")] }));
+    expect(await verifier.ready()).toBe(true);
+    writeFileSync(path, "{ not json");
+    expect(await verifier.ready()).toBe(true);
+  });
+
   it("fails closed when the file has never been readable", async () => {
     const verifier = verifierFor("/nonexistent/certs.json");
     expect(await verifier.verify(headers(token()))).toEqual({
@@ -235,7 +260,10 @@ describe("accessIdentityClosesPath", () => {
 });
 
 describe("access identity startup checks", () => {
-  const verifier: AccessVerifier = { verify: async () => ({ ok: false, reason: "missing" }) };
+  const verifier: AccessVerifier = {
+    verify: async () => ({ ok: false, reason: "missing" }),
+    ready: async () => false,
+  };
 
   it("requires password auth to be off", () => {
     expect(() => assertAccessIdentityConfig({ accessIdentity: verifier })).toThrow(/password/);
@@ -331,7 +359,7 @@ function fixture() {
         body: body === undefined ? undefined : JSON.stringify(body),
       }),
     );
-  return { auth, request, data, members };
+  return { auth, request, data, members, prisma };
 }
 
 function sessionCookie(response: Response) {
@@ -436,6 +464,31 @@ describe("access identity subject binding", () => {
         accountId: `${ISSUER} subject-1`,
       }),
     ]);
+  });
+
+  it("serializes overlapping first sign-ins for one subject into one user and one link", async () => {
+    const f = fixture();
+    // A stand-in for the advisory locks: one transaction at a time.
+    let tail: Promise<unknown> = Promise.resolve();
+    f.prisma.$transaction.mockImplementation(async (run: (tx: unknown) => Promise<unknown>) => {
+      const turn = tail.then(() => run(f.prisma));
+      tail = turn.catch(() => undefined);
+      return turn;
+    });
+    const [first, second] = await Promise.all([
+      signIn(f, token({ email: "old@example.test" })),
+      signIn(f, token({ email: "new@example.test" })),
+    ]);
+    expect([first.status, second.status]).toEqual([200, 200]);
+    expect(f.data.user).toHaveLength(1);
+    expect(accessLinks(f)).toHaveLength(1);
+    const locks = f.prisma.$executeRaw.mock.calls.map((call) => call.slice(1).join(" "));
+    expect(locks).toEqual(
+      expect.arrayContaining([
+        `access-identity email old@example.test`,
+        `access-identity subject ${ISSUER} subject-1`,
+      ]),
+    );
   });
 
   it("links an existing unlinked account by email exactly once", async () => {

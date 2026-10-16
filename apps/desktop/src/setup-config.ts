@@ -177,6 +177,19 @@ export function safeExternalUrl(targetUrl: string): string | null {
   }
 }
 
+/** Fork: desktop cannot complete an access proxy's browser sign-in. */
+export const ACCESS_IDENTITY_DESKTOP_MESSAGE =
+  "This server uses your organisation's sign-in in a web browser";
+
+/** Fork: whether `/api/auth/capabilities` reports the access-identity mode. */
+export function usesAccessIdentity(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { accessIdentity?: unknown }).accessIdentity === true
+  );
+}
+
 export function isRakazoHealth(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
   const json = (value as { json?: unknown }).json;

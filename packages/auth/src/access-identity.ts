@@ -63,7 +63,15 @@ export function accessSubjectKey(issuer: string, subject: string): string {
 
 export interface AccessVerifier {
   verify(headers: Headers): Promise<AccessVerdict>;
+  /** Whether a usable key set is loaded: until then every assertion is refused. */
+  ready(): Promise<boolean>;
 }
+
+/**
+ * Runs `run` while holding a lock on every key, so overlapping first sign-ins
+ * for one subject or one email cannot each create a user or a link.
+ */
+export type AccessLock = <T>(keys: string[], run: () => Promise<T>) => Promise<T>;
 
 type KeySet = Map<string, KeyObject>;
 
@@ -108,6 +116,9 @@ export function createAccessVerifier(
   }
 
   return {
+    async ready() {
+      return (await currentKeys()) !== undefined;
+    },
     async verify(headers) {
       const token = headers.get(ACCESS_ASSERTION_HEADER)?.trim();
       if (!token) return refuse("missing");
@@ -297,7 +308,10 @@ async function accountForIdentity(adapter: Adapter, identity: AccessIdentity) {
  * The session bootstrap: verifies the assertion, finds the account linked to
  * its subject (or links or creates one), and issues a normal session cookie.
  */
-export function accessIdentity(verifier: AccessVerifier): BetterAuthPlugin {
+export function accessIdentity(
+  verifier: AccessVerifier,
+  lock: AccessLock = (_keys, run) => run(),
+): BetterAuthPlugin {
   return {
     id: "access-identity",
     endpoints: {
@@ -314,7 +328,12 @@ export function accessIdentity(verifier: AccessVerifier): BetterAuthPlugin {
           if (isMessagingEmail(verdict.email))
             throw new APIError("FORBIDDEN", { message: "Email is not available" });
           const adapter = ctx.context.internalAdapter;
-          const { user, created } = await accountForIdentity(adapter, verdict);
+          // Lookup and linking run under one lock per subject and per email, so
+          // a concurrent first sign-in re-reads the link the winner just wrote.
+          const { user, created } = await lock(
+            [`subject ${verdict.subject}`, `email ${verdict.email}`],
+            () => accountForIdentity(adapter, verdict),
+          );
           const session = await adapter.createSession(user.id);
           if (!session) throw new APIError("INTERNAL_SERVER_ERROR");
           await setSessionCookie(ctx, { session, user });

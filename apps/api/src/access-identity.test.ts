@@ -10,6 +10,7 @@ import {
 
 /** Accepts exactly the assertion `valid:<subject>`; the real checks are tested in @rakazo/auth. */
 const verifier: AccessVerifier = {
+  ready: async () => true,
   verify: async (headers): Promise<AccessVerdict> => {
     const value = headers.get("cf-access-jwt-assertion");
     if (!value) return { ok: false, reason: "missing" };
