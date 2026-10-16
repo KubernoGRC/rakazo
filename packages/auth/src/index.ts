@@ -19,7 +19,7 @@ import {
   getOAuthState,
 } from "better-auth/api";
 import { bearer, organization } from "better-auth/plugins";
-import type { AccessLock, AccessVerifier } from "./access-identity.js";
+import type { AccessVerifier } from "./access-identity.js";
 import {
   ACCESS_IDENTITY_METHOD,
   ACCESS_SIGN_IN_PATH,
@@ -102,23 +102,6 @@ let signupGateTail: Promise<void> = Promise.resolve();
  * insert a user until the first one is visible.
  */
 const FIRST_ACCOUNT_ADMISSION_LOCK = 872014;
-
-/**
- * Fork: serializes access-identity first sign-ins. One transaction holds an
- * advisory lock per key (sorted, so two requests cannot deadlock) while the
- * lookup and linking run, and commits once they finish.
- */
-function accessIdentityLock(prisma: PrismaClient): AccessLock {
-  return (keys, run) =>
-    prisma.$transaction(
-      async (tx) => {
-        for (const key of [...new Set(keys)].sort())
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`access-identity ${key}`}, 0))`;
-        return run();
-      },
-      { timeout: 20_000, maxWait: 10_000 },
-    );
-}
 
 function enqueueSignupGate(): { wait: Promise<void>; done: () => void } {
   let settle: () => void = () => undefined;
@@ -429,9 +412,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
         env.accessIdentity ? accessReauthentication(env.accessIdentity) : undefined,
       ),
       ...(discovery ? [discovery.plugin] : []),
-      ...(env.accessIdentity
-        ? [accessIdentity(env.accessIdentity, accessIdentityLock(prisma))]
-        : []),
+      ...(env.accessIdentity ? [accessIdentity(env.accessIdentity)] : []),
       organization({
         allowUserToCreateOrganization: false,
         disableOrganizationDeletion: true,

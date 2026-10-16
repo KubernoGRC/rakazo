@@ -67,12 +67,6 @@ export interface AccessVerifier {
   ready(): Promise<boolean>;
 }
 
-/**
- * Runs `run` while holding a lock on every key, so overlapping first sign-ins
- * for one subject or one email cannot each create a user or a link.
- */
-export type AccessLock = <T>(keys: string[], run: () => Promise<T>) => Promise<T>;
-
 type KeySet = Map<string, KeyObject>;
 
 /**
@@ -249,12 +243,50 @@ function refused(code: string): APIError {
   });
 }
 
+/** A unique-constraint violation from the database, however the adapter surfaces it. */
+function isUniqueViolation(error: unknown): boolean {
+  for (let current = error; current instanceof Error; current = current.cause) {
+    if ((current as { code?: unknown }).code === "P2002") return true;
+    if (/unique constraint/i.test(current.message)) return true;
+  }
+  return false;
+}
+
 /**
  * Finds the account for a verified identity by its linked subject. An account
  * that has none is linked by email exactly once; an account linked to another
  * subject is refused, never merged, so a reassigned email cannot inherit it.
+ *
+ * Overlapping first sign-ins are settled by the database, not a held lock: the
+ * fork's migration makes an access-identity link unique per subject, and user
+ * emails are unique. The request that loses an insert removes the user it just
+ * created (it has no session or space yet) and resolves again, which finds the
+ * winner's link.
  */
-async function accountForIdentity(adapter: Adapter, identity: AccessIdentity) {
+async function accountForIdentity(
+  adapter: Adapter,
+  identity: AccessIdentity,
+  retried = false,
+): ReturnType<typeof resolveAccount> {
+  try {
+    return await resolveAccount(adapter, identity);
+  } catch (error) {
+    if (retried || !(error instanceof LostInsert) || !isUniqueViolation(error.cause)) throw error;
+    if (error.createdUserId) await adapter.deleteUser(error.createdUserId);
+    return accountForIdentity(adapter, identity, true);
+  }
+}
+
+class LostInsert extends Error {
+  constructor(
+    cause: unknown,
+    readonly createdUserId?: string,
+  ) {
+    super("access identity insert lost a race", { cause });
+  }
+}
+
+async function resolveAccount(adapter: Adapter, identity: AccessIdentity) {
   const linked = await adapter.findAccountByKey({
     providerId: ACCESS_PROVIDER_ID,
     accountId: identity.subject,
@@ -278,22 +310,31 @@ async function accountForIdentity(adapter: Adapter, identity: AccessIdentity) {
       throw refused("ACCESS_IDENTITY_SUBJECT_MISMATCH");
     if (!user.emailVerified) user = await adapter.updateUser(user.id, { emailVerified: true });
   } else {
-    user = await adapter.createUser(
-      {
-        email: identity.email,
-        name: identity.email.split("@")[0] || identity.email,
-        emailVerified: true,
-      },
-      { method: ACCESS_IDENTITY_METHOD },
-    );
+    try {
+      user = await adapter.createUser(
+        {
+          email: identity.email,
+          name: identity.email.split("@")[0] || identity.email,
+          emailVerified: true,
+        },
+        { method: ACCESS_IDENTITY_METHOD },
+      );
+    } catch (error) {
+      throw new LostInsert(error);
+    }
   }
   if (!user) throw new APIError("INTERNAL_SERVER_ERROR");
-  const link = await adapter.createAccount({
-    userId: user.id,
-    providerId: ACCESS_PROVIDER_ID,
-    accountId: identity.subject,
-  });
-  // Two first sign-ins can race; only one link per account may stand.
+  let link: Awaited<ReturnType<Adapter["createAccount"]>>;
+  try {
+    link = await adapter.createAccount({
+      userId: user.id,
+      providerId: ACCESS_PROVIDER_ID,
+      accountId: identity.subject,
+    });
+  } catch (error) {
+    throw new LostInsert(error, created ? user.id : undefined);
+  }
+  // Backstop: an account carries at most one access-identity link.
   const links = (await adapter.findAccounts(user.id)).filter(
     (account) => account.providerId === ACCESS_PROVIDER_ID,
   );
@@ -308,10 +349,7 @@ async function accountForIdentity(adapter: Adapter, identity: AccessIdentity) {
  * The session bootstrap: verifies the assertion, finds the account linked to
  * its subject (or links or creates one), and issues a normal session cookie.
  */
-export function accessIdentity(
-  verifier: AccessVerifier,
-  lock: AccessLock = (_keys, run) => run(),
-): BetterAuthPlugin {
+export function accessIdentity(verifier: AccessVerifier): BetterAuthPlugin {
   return {
     id: "access-identity",
     endpoints: {
@@ -328,12 +366,7 @@ export function accessIdentity(
           if (isMessagingEmail(verdict.email))
             throw new APIError("FORBIDDEN", { message: "Email is not available" });
           const adapter = ctx.context.internalAdapter;
-          // Lookup and linking run under one lock per subject and per email, so
-          // a concurrent first sign-in re-reads the link the winner just wrote.
-          const { user, created } = await lock(
-            [`subject ${verdict.subject}`, `email ${verdict.email}`],
-            () => accountForIdentity(adapter, verdict),
-          );
+          const { user, created } = await accountForIdentity(adapter, verdict);
           const session = await adapter.createSession(user.id);
           if (!session) throw new APIError("INTERNAL_SERVER_ERROR");
           await setSessionCookie(ctx, { session, user });

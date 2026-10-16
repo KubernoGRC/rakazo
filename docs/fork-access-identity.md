@@ -125,6 +125,11 @@ file is refused.
   - `packages/auth/src/access-identity.ts`, the verifier and the sign-in endpoint;
   - `apps/api/src/access-identity.ts`, the request gate and the session binding;
   - `apps/web/src/lib/access-identity.ts`;
+  - `packages/db/prisma/migrations/20261016120000_fork_access_identity_subject_unique`, a
+    partial unique index on access-identity links. Overlapping first sign-ins for one
+    subject are settled by it: the request that loses the insert removes the user it just
+    created and resolves to the winner's link, so no lock holds a database connection. It
+    is deliberately absent from `schema.prisma`, so `prisma migrate dev` reports it as drift;
   - the matching `*.test.ts` files.
 - `packages/auth/src/index.ts`:
   - the `accessIdentity` option and `assertAccessIdentityConfig`;
@@ -140,8 +145,12 @@ file is refused.
 - `apps/web/src/pages/Auth.tsx`: the access branch of the sign-in page.
 - `apps/mobile/app/sign-in.tsx` and its `de`, `ru` and `zh` catalogs: the browser-only
   message.
+- `apps/desktop/src/setup-config.ts` and `main.ts`: setup refuses an access-identity server
+  with the same browser-only message.
+- `apps/api/src/health.ts`: an optional readiness check; `/ready` is 503 until a usable
+  key set has loaded.
 - Tests: an `ACCESS_IDENTITY_ENABLED` block appended to `apps/api/src/env.test.ts`, and
   access blocks appended to `apps/web/src/pages/Auth.test.tsx` and
   `apps/mobile/lib/sign-in.test.tsx`.
 
-Only the `app` image changes.
+Only the `app` image changes, plus the one migration it runs at startup.

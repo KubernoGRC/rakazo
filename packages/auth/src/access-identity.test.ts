@@ -13,11 +13,41 @@ import {
 } from "./access-identity.js";
 import { assertAccessIdentityConfig, createAuth } from "./index.js";
 
+// The memory adapter stands in for Postgres, with the two unique indexes the
+// access-identity mode relies on: user email, and the fork's partial index on
+// access-identity links (packages/db/prisma/migrations, fork_access_identity_*).
 vi.mock("better-auth/adapters/prisma", async () => {
   const { memoryAdapter } = await import("better-auth/adapters/memory");
   return {
-    prismaAdapter: (prisma: { authData: Record<string, unknown[]> }) =>
-      memoryAdapter(prisma.authData),
+    prismaAdapter: (prisma: { authData: Record<string, Record<string, unknown>[]> }) => {
+      const base = memoryAdapter(prisma.authData);
+      return (options: Parameters<typeof base>[0]) => {
+        const adapter = base(options);
+        return {
+          ...adapter,
+          create: async (args: Parameters<typeof adapter.create>[0]) => {
+            const data = args.data as Record<string, unknown>;
+            await (prisma as { beforeCreate?: (model: string) => Promise<void> }).beforeCreate?.(
+              args.model,
+            );
+            const rows = prisma.authData[args.model] ?? [];
+            const taken =
+              (args.model === "user" && rows.some((row) => row.email === data.email)) ||
+              (args.model === "account" &&
+                data.providerId === "access-identity" &&
+                rows.some(
+                  (row) => row.providerId === "access-identity" && row.accountId === data.accountId,
+                ));
+            if (taken) {
+              (prisma as { conflicts?: number }).conflicts =
+                ((prisma as { conflicts?: number }).conflicts ?? 0) + 1;
+              throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
+            }
+            return adapter.create(args);
+          },
+        };
+      };
+    },
   };
 });
 vi.mock("@rakazo/db", () => ({ bootstrapUserSpace: vi.fn(async () => ({ spaceId: "space-1" })) }));
@@ -466,29 +496,31 @@ describe("access identity subject binding", () => {
     ]);
   });
 
-  it("serializes overlapping first sign-ins for one subject into one user and one link", async () => {
+  it("settles overlapping first sign-ins for one subject on the unique link", async () => {
     const f = fixture();
-    // A stand-in for the advisory locks: one transaction at a time.
-    let tail: Promise<unknown> = Promise.resolve();
-    f.prisma.$transaction.mockImplementation(async (run: (tx: unknown) => Promise<unknown>) => {
-      const turn = tail.then(() => run(f.prisma));
-      tail = turn.catch(() => undefined);
-      return turn;
-    });
-    const [first, second] = await Promise.all([
-      signIn(f, token({ email: "old@example.test" })),
-      signIn(f, token({ email: "new@example.test" })),
-    ]);
-    expect([first.status, second.status]).toEqual([200, 200]);
+    // The first request pauses at its link insert while the second completes.
+    let second: Response | undefined;
+    let paused = false;
+    (f.prisma as { beforeCreate?: (model: string) => Promise<void> }).beforeCreate = async (
+      model,
+    ) => {
+      if (model !== "account" || paused) return;
+      paused = true;
+      second = await signIn(f, token({ email: "new@example.test" }));
+    };
+    const first = await signIn(f, token({ email: "old@example.test" }));
+    expect([first.status, second?.status]).toEqual([200, 200]);
+    // The loser's insert hit the unique link and its user was removed.
+    expect((f.prisma as { conflicts?: number }).conflicts).toBeGreaterThan(0);
     expect(f.data.user).toHaveLength(1);
     expect(accessLinks(f)).toHaveLength(1);
-    const locks = f.prisma.$executeRaw.mock.calls.map((call) => call.slice(1).join(" "));
-    expect(locks).toEqual(
-      expect.arrayContaining([
-        `access-identity email old@example.test`,
-        `access-identity subject ${ISSUER} subject-1`,
-      ]),
-    );
+    expect(accessLinks(f)[0]).toMatchObject({ userId: f.data.user?.[0]?.id });
+  });
+
+  it("does not hold a database connection while resolving a sign-in", async () => {
+    const f = fixture();
+    expect((await signIn(f, token())).status).toBe(200);
+    expect(f.prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it("links an existing unlinked account by email exactly once", async () => {
