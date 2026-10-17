@@ -20,11 +20,13 @@ Upstream moves fast (more than a hundred commits a week), so take it on a
 **weekly** cadence, and take security and auth fixes the same day.
 `kgrc-upstream-sync.yml` automates the mechanical part:
 
-- **Daily:** it fast-forwards `main` to upstream `main`. It refuses, and fails
-  the run, if `main` holds a commit upstream lacks, and it never creates a merge
-  commit on `main`.
-- **Mondays:** it opens one pull request from `main` into `kgrc` when `kgrc` is
-  behind and no sync PR is open. CI and review run on it like any other change.
+- **Daily:** it fast-forwards `main` to upstream `main` with a fast-forward-only
+  ref update, so `main` can never gain a merge commit. It refuses, and fails
+  the run, if `main` holds a commit upstream lacks.
+- **Mondays:** it opens one pull request into `kgrc` from a disposable
+  `upstream-sync/<date>` branch cut at the synced `main`, when `kgrc` is behind
+  and no sync PR is open. Resolve any conflicts **on that branch**, never on
+  `main`. CI and review run on it like any other change.
   Read the upstream range, especially migrations, the compose file and anything
   touching the fork's patch sets (below).
 - **Merge it with a merge commit.** Never squash or rebase it: the next sync
@@ -33,14 +35,24 @@ Upstream moves fast (more than a hundred commits a week), so take it on a
 - After the merge, `kgrc-publish-images` builds new images, and the
   deployment's pins are updated separately.
 
-To take a specific upstream commit or tag out of cycle, run the workflow by
-hand (`open_pr: true`), or open a pull request into `kgrc` from a branch that
-merges it.
+Running the workflow by hand with `open_pr: true` proposes upstream's **current
+tip**, not a chosen commit. To take one specific upstream commit or tag out of
+cycle, for a security fix say, open a pull request into `kgrc` from a branch
+that merges just that commit or tag.
 
 The workflow uses a GitHub App token, because `GITHUB_TOKEN` can't push upstream
 commits that change `.github/workflows`, and pull requests it opens don't
-trigger CI. The app needs Contents, Pull requests and **Workflows** write on
-this repository.
+trigger CI. An app-token push **does** trigger workflows, though, so upstream
+workflows run on `main` as soon as it syncs. The app's credentials must
+therefore be unreachable from `main`:
+
+- Use a dedicated app installed **only on this repository**, with Contents,
+  Pull requests and Workflows write.
+- Keep its id and key as `FORK_SYNC_APP_ID` and `FORK_SYNC_APP_PRIVATE_KEY`,
+  **secrets of the `upstream-sync` environment**, whose deployment branches are
+  `kgrc` only.
+- Make no organisation secret visible to this repository.
+- Set the repository's default workflow permissions to read-only.
 
 ## Keep upstream files untouched
 
