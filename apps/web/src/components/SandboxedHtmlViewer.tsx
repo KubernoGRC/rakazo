@@ -1,3 +1,6 @@
+import { EMBEDDED_FRAMES_ENABLED } from "../lib/browser-controls";
+import { EmbeddedContentDisabled } from "./EmbeddedContentDisabled";
+
 const PREVIEW_CSP =
   "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'";
 
@@ -37,6 +40,13 @@ function shellDocument(innerHtml: string): string {
 }
 
 export function SandboxedHtmlViewer({ html, title }: { html: string; title: string }) {
+  // Fork: see docs/fork-browser-controls.md.
+  if (!EMBEDDED_FRAMES_ENABLED) return <EmbeddedContentDisabled />;
+  return <SandboxedHtmlFrame html={html} title={title} />;
+}
+
+/** Upstream's viewer, unchanged; unreachable while embedded frames are off. */
+export function SandboxedHtmlFrame({ html, title }: { html: string; title: string }) {
   return (
     <iframe
       title={title}

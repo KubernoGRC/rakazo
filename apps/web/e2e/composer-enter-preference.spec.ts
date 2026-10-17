@@ -47,7 +47,10 @@ for (const touch of [false, true]) {
       await settings.getByRole("button", { name: "Close user settings" }).click();
       await expect(composer).toHaveValue("saved draft");
       await page.reload();
-      await expect(composer).toHaveValue("saved draft");
+      // Fork: a draft is chat content, so it lives in page memory only and a reload drops it
+      // (docs/fork-browser-controls.md). The preference itself persists.
+      await expect(composer).toHaveValue("");
+      await composer.fill("saved draft");
       await composer.press("End");
       await composer.press("Enter");
       if (touch) {

@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
+import { SCREEN_EMBED_DISABLED } from "./fork-screen-disabled";
 import { activeBotId, captureScreenshot, completeOnboarding, rpc, signup } from "./helpers";
 
 test("screen connection failures stay visible and can be retried", async ({ page }, testInfo) => {
+  test.skip(true, SCREEN_EMBED_DISABLED);
   await signup(page, `screen-error-${Date.now()}@rakazo.test`, "password12", "Screen Error");
   await completeOnboarding(page);
   const botId = activeBotId(page);
