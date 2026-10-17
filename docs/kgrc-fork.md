@@ -16,13 +16,31 @@ request, then reset `main` to upstream.
 
 ## Taking upstream changes
 
-Upstream doesn't tag every change, so take it deliberately:
+Upstream moves fast (more than a hundred commits a week), so take it on a
+**weekly** cadence, and take security and auth fixes the same day.
+`kgrc-upstream-sync.yml` automates the mechanical part:
 
-1. Sync `main` (fast-forward).
-2. Open a pull request into `kgrc` from a branch that merges the chosen upstream
-   commit or tag. **Merge, don't rebase,** so `kgrc` never needs a force-push.
-3. Review the upstream range like any other change, especially migrations and
-   the compose file, then merge.
+- **Daily:** it fast-forwards `main` to upstream `main`. It refuses, and fails
+  the run, if `main` holds a commit upstream lacks, and it never creates a merge
+  commit on `main`.
+- **Mondays:** it opens one pull request from `main` into `kgrc` when `kgrc` is
+  behind and no sync PR is open. CI and review run on it like any other change.
+  Read the upstream range, especially migrations, the compose file and anything
+  touching the fork's patch sets (below).
+- **Merge it with a merge commit.** Never squash or rebase it: the next sync
+  depends on `kgrc` sharing `main`'s history, and `kgrc` must never need a
+  force-push.
+- After the merge, `kgrc-publish-images` builds new images, and the
+  deployment's pins are updated separately.
+
+To take a specific upstream commit or tag out of cycle, run the workflow by
+hand (`open_pr: true`), or open a pull request into `kgrc` from a branch that
+merges it.
+
+The workflow uses a GitHub App token, because `GITHUB_TOKEN` can't push upstream
+commits that change `.github/workflows`, and pull requests it opens don't
+trigger CI. The app needs Contents, Pull requests and **Workflows** write on
+this repository.
 
 ## Keep upstream files untouched
 

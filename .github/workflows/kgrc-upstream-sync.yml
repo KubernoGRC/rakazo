@@ -1,0 +1,114 @@
+# Fork-owned (see docs/kgrc-fork.md). Keeps `main` a pure mirror of upstream and
+# proposes upstream into `kgrc` once a week. Nothing here deploys anything.
+#
+# - Daily: fast-forward `main` to upstream `main`. Refuses if `main` carries a
+#   commit upstream lacks (it must stay a pure mirror), and never merges.
+# - Weekly (Monday): open one PR `main` -> `kgrc` when `kgrc` is behind and no
+#   sync PR is open. Merge it with a MERGE COMMIT, never squash: squashing breaks
+#   the shared history the next sync relies on.
+#
+# A GitHub App token is used, not GITHUB_TOKEN: GITHUB_TOKEN cannot push upstream
+# commits that touch .github/workflows, and PRs it opens do not trigger CI. The
+# app needs Contents, Pull requests and Workflows write on this repository.
+name: kgrc-upstream-sync
+
+on:
+  schedule:
+    - cron: "17 10 * * *"   # daily main sync
+    - cron: "23 13 * * 1"   # Monday: sync, then the main -> kgrc PR
+  workflow_dispatch:
+    inputs:
+      open_pr:
+        description: "Also open the main -> kgrc PR"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kgrc-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: elie222/rakazo
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.KGRC_CI_APP_ID }}
+          private-key: ${{ secrets.KGRC_CI_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Fast-forward main to upstream
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # `main` must hold nothing upstream lacks; otherwise it is no longer a mirror.
+          extra=$(gh api "repos/${UPSTREAM}/compare/main...${OWNER}:${REPO#*/}:main" --jq .ahead_by)
+          if [ "$extra" != 0 ]; then
+            echo "::error::main carries ${extra} commit(s) upstream does not have; it must stay a pure mirror. Not syncing."
+            exit 1
+          fi
+          result=$(gh api -X POST "repos/${REPO}/merge-upstream" -f branch=main)
+          type=$(jq -r .merge_type <<<"$result")
+          echo "merge-upstream: $(jq -r .message <<<"$result") (${type})"
+          if [ "$type" = merge ]; then
+            echo "::error::upstream sync produced a merge commit on main; it should only ever fast-forward."
+            exit 1
+          fi
+          {
+            echo "### main synced from ${UPSTREAM}"
+            echo "Result: \`${type}\`, $(jq -r .message <<<"$result")"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  propose:
+    needs: sync
+    if: github.event.schedule == '23 13 * * 1' || inputs.open_pr
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.KGRC_CI_APP_ID }}
+          private-key: ${{ secrets.KGRC_CI_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Open the weekly main -> kgrc PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          behind=$(gh api "repos/${REPO}/compare/kgrc...main" --jq .ahead_by)
+          if [ "$behind" = 0 ]; then
+            echo "kgrc already includes main; nothing to propose." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          open=$(gh pr list --repo "$REPO" --base kgrc --head main --state open --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            echo "Sync PR #${open} is already open (kgrc is ${behind} commit(s) behind)." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          body=$(cat <<BODY
+          Weekly upstream sync: \`main\` (a pure mirror of ${UPSTREAM}) into \`kgrc\`, ${behind} commit(s).
+
+          - **Merge with a merge commit. Do not squash or rebase.** The next sync depends on the shared history.
+          - Resolve conflicts on this PR's branch only. Fork-owned files are listed in \`docs/kgrc-fork.md\`.
+          - After merge, \`kgrc-publish-images\` builds new images, and the deployment's image pins are updated separately.
+          BODY
+          )
+          gh pr create --repo "$REPO" --base kgrc --head main \
+            --title "chore(sync): merge upstream main into kgrc ($(date -u +%Y-%m-%d))" \
+            --body "$body" | tee -a "$GITHUB_STEP_SUMMARY"
