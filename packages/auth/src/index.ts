@@ -19,15 +19,39 @@ import {
   getOAuthState,
 } from "better-auth/api";
 import { bearer, organization } from "better-auth/plugins";
+import type { AccessVerifier } from "./access-identity.js";
+import {
+  ACCESS_IDENTITY_METHOD,
+  ACCESS_SIGN_IN_PATH,
+  accessIdentity,
+  accessIdentityClosesPath,
+  accessReauthentication,
+} from "./access-identity.js";
 import { accountSecurity, oidcProofKey, sessionForAuthHook } from "./account-security.js";
 import type { OidcConfig } from "./oidc.js";
-import { isCurrentOidcAccount, oidcDiscovery } from "./oidc.js";
+import { isCurrentOidcAccount, oidcDiscovery, oidcGroupRefusal } from "./oidc.js";
 
+export type {
+  AccessIdentity,
+  AccessIdentityConfig,
+  AccessRefusal,
+  AccessVerdict,
+  AccessVerifier,
+} from "./access-identity.js";
+export {
+  ACCESS_ASSERTION_HEADER,
+  ACCESS_PROVIDER_ID,
+  ACCESS_SIGN_IN_PATH,
+  accessIdentityClosesPath,
+  createAccessVerifier,
+} from "./access-identity.js";
 export type { OidcConfig } from "./oidc.js";
 
 export interface AuthEnv {
   passwordAuth?: boolean;
   oidc?: OidcConfig;
+  /** Fork: trusted access-proxy identity. The only way in when set. */
+  accessIdentity?: AccessVerifier;
   secret: string;
   baseURL: string;
   webOrigin: string;
@@ -240,8 +264,12 @@ export function authRateLimitOptions(nodeEnv = process.env.NODE_ENV) {
 }
 
 export function createAuth(prisma: PrismaClient, env: AuthEnv) {
-  if (env.passwordAuth === false && !env.oidc)
+  if (env.passwordAuth === false && !env.oidc && !env.accessIdentity)
     throw new Error("Password auth requires OIDC when disabled");
+  assertGroupGateConfig(env);
+  assertAccessIdentityConfig(env);
+  const accessMode = Boolean(env.accessIdentity);
+  const requiredGroup = env.oidc?.requiredGroup;
   const discovery = env.oidc ? oidcDiscovery(env.oidc) : undefined;
   const auth = betterAuth({
     appName: "Rakazo",
@@ -252,6 +280,9 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
       accountLinking: { enabled: true, disableImplicitLinking: true, trustedProviders: [] },
     },
     rateLimit: authRateLimitOptions(),
+    // Fork: under the group gate a session never extends itself, so the group
+    // is re-checked at a fresh sign-in at least once per session lifetime.
+    ...(requiredGroup ? { session: { disableSessionRefresh: true } } : {}),
     database: prismaAdapter(prisma, { provider: "postgresql" }),
     emailAndPassword: {
       enabled: env.passwordAuth !== false,
@@ -286,6 +317,20 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     },
     user: {
       validateUserInfo: async ({ user, source }, ctx) => {
+        // Fork: under access identity no other provisioning source is accepted.
+        if (accessMode) {
+          return source.method === ACCESS_IDENTITY_METHOD
+            ? undefined
+            : { error: "REGISTRATION_CLOSED" };
+        }
+        if (requiredGroup) {
+          // Fork: under the group gate an account exists only through a
+          // group-carrying OIDC sign-in, and every sign-in re-checks the group.
+          if (source.method !== "oauth" || source.oauth?.providerId !== "oidc")
+            return { error: "REGISTRATION_CLOSED" };
+          const refusal = oidcGroupRefusal(source.oauth.profile, requiredGroup);
+          if (refusal) return { error: refusal };
+        }
         if (source.method !== "oauth" || source.oauth?.providerId !== "oidc") return;
         const expectedUser = (await getOAuthState())?.serverContext?.reauthUserId;
         if (typeof expectedUser === "string" && user.id !== expectedUser)
@@ -354,8 +399,15 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     plugins: [
       bearer(),
       expo(),
-      accountSecurity(env.email, env.oidc?.name, env.oidc?.issuer, env.passwordAuth !== false),
+      accountSecurity(
+        env.email,
+        env.oidc?.name,
+        env.oidc?.issuer,
+        env.passwordAuth !== false,
+        env.accessIdentity ? accessReauthentication(env.accessIdentity) : undefined,
+      ),
       ...(discovery ? [discovery.plugin] : []),
+      ...(env.accessIdentity ? [accessIdentity(env.accessIdentity)] : []),
       organization({
         allowUserToCreateOrganization: false,
         disableOrganizationDeletion: true,
@@ -364,6 +416,13 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     ],
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
+        // Fork: under access identity the verified assertion is the only way in.
+        if (accessMode && accessIdentityClosesPath(ctx.path)) {
+          throw new APIError("FORBIDDEN", {
+            code: "ACCESS_IDENTITY_ONLY",
+            message: "Sign in through your organisation's portal",
+          });
+        }
         if (
           ctx.path === "/sign-in/social" &&
           ctx.body?.provider === "oidc" &&
@@ -484,7 +543,16 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
             const user = await ctx?.context.internalAdapter.findUserById(session.userId);
             const policy = await resolveSignupPolicy(prisma, env);
             const oidcSignIn = isOidcCallback(ctx);
-            const bypassAllowlist = oidcSignIn && env.oidc?.allowSignupBypass;
+            // Fork: the access policy is the admission decision, so the signup
+            // policy cannot refuse a verified identity, and nothing else may
+            // create a session in that mode.
+            const accessSignIn = accessMode && ctx?.path === ACCESS_SIGN_IN_PATH;
+            if (accessMode && !accessSignIn) {
+              throw new APIError("FORBIDDEN", {
+                message: "Sign in through your organisation's portal",
+              });
+            }
+            const bypassAllowlist = (oidcSignIn && env.oidc?.allowSignupBypass) || accessSignIn;
             if (!user || isMessagingEmail(user.email)) {
               throw new APIError("FORBIDDEN", { message: "Email verification required" });
             }
@@ -510,8 +578,9 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
             const membership = await prisma.spaceMember.findFirst({ where: { userId: user.id } });
             if (!membership) {
               if (
-                !policy.enabled ||
-                (!bypassAllowlist && !emailAllowed(user.email, policy.allowlist))
+                !accessSignIn &&
+                (!policy.enabled ||
+                  (!bypassAllowlist && !emailAllowed(user.email, policy.allowlist)))
               ) {
                 throw new APIError("FORBIDDEN", { message: "Registration is closed" });
               }
@@ -546,9 +615,13 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
       },
       user: {
         create: {
-          before: async (user) => {
+          before: async (user, ctx) => {
             if (isMessagingEmail(user.email)) {
               throw new APIError("BAD_REQUEST", { message: "Email is not available" });
+            }
+            // Fork: under access identity only the verified bootstrap creates accounts.
+            if (accessMode && ctx?.path !== ACCESS_SIGN_IN_PATH) {
+              throw new APIError("FORBIDDEN", { message: "Registration is closed" });
             }
           },
         },
@@ -566,6 +639,31 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     ssoAvailability: () => discovery?.availability(),
     disposeOidcDiscovery: () => discovery?.dispose(),
   });
+}
+
+/**
+ * Fork: the group gate only means something when OIDC is the sole way in, so a
+ * gate that is set but blank, or set beside password auth, fails at startup.
+ */
+export function assertGroupGateConfig(env: Pick<AuthEnv, "oidc" | "passwordAuth">) {
+  const group = env.oidc?.requiredGroup;
+  if (group === undefined) return;
+  if (!group.trim()) throw new Error("The OIDC group gate requires a group");
+  if (env.passwordAuth !== false)
+    throw new Error("The OIDC group gate requires password authentication to be disabled");
+}
+
+/**
+ * Fork: access identity only means something when it is the sole way in, so it
+ * fails at startup beside password auth or OIDC.
+ */
+export function assertAccessIdentityConfig(
+  env: Pick<AuthEnv, "accessIdentity" | "oidc" | "passwordAuth">,
+) {
+  if (!env.accessIdentity) return;
+  if (env.passwordAuth !== false)
+    throw new Error("Access identity requires password authentication to be disabled");
+  if (env.oidc) throw new Error("Access identity cannot be combined with OIDC");
 }
 
 export function verificationEmail(email: string, url: string): TransactionalEmail {

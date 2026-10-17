@@ -13,6 +13,11 @@ export interface OidcConfig {
   name: string;
   scopes: string[];
   allowSignupBypass: boolean;
+  /**
+   * Fork: the group every OIDC sign-in must carry in the ID token's `groups`
+   * claim. Unset keeps upstream behaviour. See docs/fork-oidc-group-gate.md.
+   */
+  requiredGroup?: string;
 }
 
 /** Discovery never gates API startup. Failed attempts share exponential backoff. */
@@ -34,6 +39,9 @@ export function oidcDiscovery(config: OidcConfig) {
         },
         requireIdTokenVerification: true,
         mapProfileToUser: (profile) => ({ emailVerified: profile.email_verified === true }),
+        // The group gate reads the verified ID token and nothing else: the
+        // default falls back to the userinfo endpoint, which carries no groups.
+        ...(config.requiredGroup ? { getUserInfo: idTokenProfile } : {}),
       },
     ],
   });
@@ -238,4 +246,51 @@ export function isCurrentOidcAccount(
   } catch {
     return false;
   }
+}
+
+/**
+ * Fork: the profile is the ID token's own claims, which the generic provider has
+ * already verified (signature, issuer, audience, nonce) before calling this.
+ */
+async function idTokenProfile(tokens: { idToken?: string }) {
+  if (!tokens.idToken) return null;
+  let claims: Record<string, unknown>;
+  try {
+    claims = JSON.parse(
+      Buffer.from(tokens.idToken.split(".")[1] ?? "", "base64url").toString(),
+    ) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (!claims || typeof claims !== "object" || typeof claims.sub !== "string" || !claims.sub)
+    return null;
+  return {
+    ...claims,
+    id: claims.sub,
+    email: typeof claims.email === "string" ? claims.email : "",
+    emailVerified: claims.email_verified === true,
+    name: typeof claims.name === "string" ? claims.name : "",
+    image: typeof claims.picture === "string" ? claims.picture : undefined,
+  };
+}
+
+/**
+ * Fork: why an OIDC profile may not sign in under the group gate, or undefined
+ * when it carries `group` in its `groups` claim. A token that reports a group
+ * overage (`_claim_names.groups`, or `hasgroups`) names no groups and is
+ * refused: resolving it would need Microsoft Graph, which this gate never calls.
+ */
+export function oidcGroupRefusal(profile: unknown, group: string): string | undefined {
+  if (!profile || typeof profile !== "object") return "GROUP_CLAIM_MISSING";
+  const claims = profile as Record<string, unknown>;
+  const claimNames = claims._claim_names;
+  if (
+    claims.hasgroups === true ||
+    claims.hasgroups === "true" ||
+    (claimNames && typeof claimNames === "object" && "groups" in claimNames)
+  )
+    return "GROUP_CLAIM_OVERAGE";
+  const groups = claims.groups;
+  if (!Array.isArray(groups)) return "GROUP_CLAIM_MISSING";
+  return groups.some((value) => value === group) ? undefined : "GROUP_NOT_ALLOWED";
 }

@@ -814,6 +814,8 @@ export const RU_MESSAGES: Record<string, string> = {
   "Privacy policy": "Политика конфиденциальности",
   "Continue with {name}": "Продолжить с {name}",
   "Could not load sign-in options": "Не удалось загрузить способы входа",
+  "This server uses your organisation's sign-in in a web browser":
+    "Этот сервер использует вход через вашу организацию в веб-браузере",
   "Deletion code": "Код удаления",
   "Email is not allowed to register": "Регистрация с этим адресом электронной почты запрещена",
   "Email verification required": "Требуется подтверждение электронной почты",

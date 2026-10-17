@@ -1,10 +1,12 @@
+import type { DeploymentConnectorConfig } from "@rakazo/adapters";
 import {
+  deploymentConnectorConfigFromEnv,
   resolveCloudAgentProvider,
   resolveDeploymentModel,
   resolveSandboxProvider,
   secretStoreOptionsFromEnv,
 } from "@rakazo/adapters";
-import type { OidcConfig } from "@rakazo/auth";
+import type { AccessIdentityConfig, OidcConfig } from "@rakazo/auth";
 import {
   resolveAuthSecret,
   resolveEncryptionKey,
@@ -18,6 +20,8 @@ export { resolveCloudAgentProvider, resolveSandboxProvider } from "@rakazo/adapt
 export interface AppEnv {
   passwordAuth?: boolean;
   oidc?: OidcConfig;
+  /** Fork: trusted access-proxy identity; see docs/fork-access-identity.md. */
+  accessIdentity?: AccessIdentityConfig;
   nodeEnv: string;
   desktopStackToken?: string;
   databaseUrl: string;
@@ -100,6 +104,8 @@ export interface AppEnv {
   mcpStdioAllowedCommands: string[];
   /** Deployment-owner escape for remote MCP on RFC1918 / Docker-network hosts. */
   mcpAllowPrivateEndpoint: boolean;
+  /** Deployment-owned MCP server, offered beside user-added connectors. */
+  deploymentConnectors: DeploymentConnectorConfig;
   port: number;
   gitSha: string | undefined;
   /** Private Compose control-network URL for the opt-in updater sidecar. */
@@ -135,9 +141,11 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     if (value && !["true", "false"].includes(value))
       throw new Error(`${key} must be true or false`);
   }
-  const passwordAuth = source.AUTH_PASSWORD_ENABLED !== "false";
-  if (!passwordAuth && !issuer)
+  const accessIdentity = accessIdentityFromEnv(source);
+  const passwordAuth = accessIdentity ? false : source.AUTH_PASSWORD_ENABLED !== "false";
+  if (!passwordAuth && !issuer && !accessIdentity)
     throw new Error("AUTH_PASSWORD_ENABLED=false requires OIDC configuration");
+  const requiredGroup = oidcRequiredGroup(source, { issuer, passwordAuth });
   const oidc =
     issuer && clientId && clientSecret
       ? {
@@ -149,6 +157,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
             .split(/[\s,]+/)
             .filter(Boolean),
           allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS === "true",
+          ...(requiredGroup ? { requiredGroup } : {}),
         }
       : undefined;
   const authSecret = resolveAuthSecret(source);
@@ -160,6 +169,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   return {
     passwordAuth,
     oidc,
+    ...(accessIdentity ? { accessIdentity } : {}),
     nodeEnv: source.NODE_ENV ?? "",
     databaseUrl: required(source, "DATABASE_URL"),
     realtimeDatabaseUrl: source.REALTIME_DATABASE_URL ?? required(source, "DATABASE_URL"),
@@ -239,6 +249,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
       .map((value) => value.trim())
       .filter(Boolean),
     mcpAllowPrivateEndpoint: source.MCP_ALLOW_PRIVATE_ENDPOINT === "true",
+    deploymentConnectors: deploymentConnectorConfigFromEnv(source),
     port: Number(source.API_PORT ?? 3100),
     gitSha: optional(source.GIT_SHA) ?? optional(source.RAKAZO_GIT_SHA),
     updaterUrl,
@@ -251,6 +262,77 @@ function required(source: NodeJS.ProcessEnv, key: string): string {
   const value = source[key];
   if (!value) throw new Error(`Missing ${key}`);
   return value;
+}
+
+/**
+ * Fork: OIDC_REQUIRED_GROUP restricts sign-in to one IdP group. Once the
+ * variable is present at all, every setting the gate depends on is required,
+ * so a deployment that asked for it cannot start with it silently off.
+ * See docs/fork-oidc-group-gate.md.
+ */
+function oidcRequiredGroup(
+  source: NodeJS.ProcessEnv,
+  { issuer, passwordAuth }: { issuer: string | undefined; passwordAuth: boolean },
+): string | undefined {
+  if (source.OIDC_REQUIRED_GROUP === undefined) return undefined;
+  const group = optional(source.OIDC_REQUIRED_GROUP);
+  if (!group) throw new Error("OIDC_REQUIRED_GROUP must not be empty");
+  if (!issuer)
+    throw new Error(
+      "OIDC_REQUIRED_GROUP requires OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET",
+    );
+  if (passwordAuth) throw new Error("OIDC_REQUIRED_GROUP requires AUTH_PASSWORD_ENABLED=false");
+  if (source.MESSAGING_OPEN_SIGNUP === "true")
+    throw new Error("OIDC_REQUIRED_GROUP requires MESSAGING_OPEN_SIGNUP to be off");
+  return group;
+}
+
+/**
+ * Fork: ACCESS_IDENTITY_ENABLED=true makes a verified access-proxy assertion
+ * the only way in. Every setting it needs is required, and any other login
+ * path configured beside it refuses startup. See docs/fork-access-identity.md.
+ */
+function accessIdentityFromEnv(source: NodeJS.ProcessEnv): AccessIdentityConfig | undefined {
+  const enabled = source.ACCESS_IDENTITY_ENABLED;
+  if (enabled && !["true", "false"].includes(enabled))
+    throw new Error("ACCESS_IDENTITY_ENABLED must be true or false");
+  if (enabled !== "true") return undefined;
+  const rawIssuer = optional(source.ACCESS_IDENTITY_ISSUER);
+  const audience = optional(source.ACCESS_IDENTITY_AUDIENCE);
+  const certsFile = optional(source.ACCESS_IDENTITY_CERTS_FILE);
+  if (!rawIssuer || !audience || !certsFile)
+    throw new Error(
+      "ACCESS_IDENTITY_ENABLED=true requires ACCESS_IDENTITY_ISSUER, ACCESS_IDENTITY_AUDIENCE and ACCESS_IDENTITY_CERTS_FILE",
+    );
+  let issuer: string;
+  try {
+    const url = new URL(rawIssuer);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      url.pathname !== "/"
+    )
+      throw new Error();
+    issuer = url.origin;
+  } catch {
+    throw new Error("ACCESS_IDENTITY_ISSUER must be an HTTPS origin");
+  }
+  if (source.AUTH_PASSWORD_ENABLED === "true")
+    throw new Error("ACCESS_IDENTITY_ENABLED=true requires AUTH_PASSWORD_ENABLED to be off");
+  // Only the settings that turn OIDC on conflict. The compose files pass
+  // OIDC_NAME, OIDC_SCOPES and OIDC_ALLOW_SIGNUP_BYPASS through with non-blank
+  // defaults, which configure nothing without an issuer.
+  const oidcKeys = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"].filter((key) =>
+    optional(source[key]),
+  );
+  if (oidcKeys.length > 0)
+    throw new Error(`ACCESS_IDENTITY_ENABLED=true cannot be combined with ${oidcKeys.join(", ")}`);
+  if (source.MESSAGING_OPEN_SIGNUP === "true")
+    throw new Error("ACCESS_IDENTITY_ENABLED=true requires MESSAGING_OPEN_SIGNUP to be off");
+  return { issuer, audience, certsFile };
 }
 
 function optional(value: string | undefined): string | undefined {
