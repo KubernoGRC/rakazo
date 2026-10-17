@@ -14,6 +14,7 @@ import {
 } from "react";
 import { Navigate, Outlet, Route, Routes, useSearchParams } from "react-router-dom";
 import { LoadingState } from "./components/ai/primitives";
+import { DataNoticeFrame } from "./components/DataNotice";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { SubscriptionGate } from "./components/SubscriptionGate";
 import { authClient } from "./lib/auth";
@@ -73,15 +74,18 @@ export function App() {
   return (
     <RemoteImagesContext.Provider value={loadRemoteImages}>
       <LinkFaviconsContext.Provider value={linkFavicons}>
-        <ErrorBoundary fallback={<AppFailed />}>
-          {window.location.pathname === SSO_CALLBACK_PATH ? (
-            <SsoCallbackPage />
-          ) : window.location.pathname === LOCAL_SETTINGS_PAGE ? (
-            <LocalSettingsPage />
-          ) : (
-            <SessionApp />
-          )}
-        </ErrorBoundary>
+        {/* Fork: data-handling banner on every page, the error page included (docs/fork-data-notice.md). */}
+        <DataNoticeFrame>
+          <ErrorBoundary fallback={<AppFailed />}>
+            {window.location.pathname === SSO_CALLBACK_PATH ? (
+              <SsoCallbackPage />
+            ) : window.location.pathname === LOCAL_SETTINGS_PAGE ? (
+              <LocalSettingsPage />
+            ) : (
+              <SessionApp />
+            )}
+          </ErrorBoundary>
+        </DataNoticeFrame>
       </LinkFaviconsContext.Provider>
     </RemoteImagesContext.Provider>
   );

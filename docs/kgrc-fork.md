@@ -103,3 +103,5 @@ images **by digest** from the job summary, never by tag.
 - [OIDC group gate](fork-oidc-group-gate.md)
 - [Trusted access identity](fork-access-identity.md): a verified access-proxy assertion as
   the only way in. Its fail-closed checks must stay in place.
+- [Data-handling banner](fork-data-notice.md): the deployment's chat-data rule on every
+  page of the web UI.

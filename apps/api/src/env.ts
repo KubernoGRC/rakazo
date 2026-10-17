@@ -22,6 +22,8 @@ export interface AppEnv {
   oidc?: OidcConfig;
   /** Fork: trusted access-proxy identity; see docs/fork-access-identity.md. */
   accessIdentity?: AccessIdentityConfig;
+  /** Fork: persistent data-handling banner in the web UI; see docs/fork-data-notice.md. */
+  dataNotice?: boolean;
   nodeEnv: string;
   desktopStackToken?: string;
   databaseUrl: string;
@@ -142,6 +144,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
       throw new Error(`${key} must be true or false`);
   }
   const accessIdentity = accessIdentityFromEnv(source);
+  const dataNotice = dataNoticeFromEnv(source);
   const passwordAuth = accessIdentity ? false : source.AUTH_PASSWORD_ENABLED !== "false";
   if (!passwordAuth && !issuer && !accessIdentity)
     throw new Error("AUTH_PASSWORD_ENABLED=false requires OIDC configuration");
@@ -170,6 +173,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     passwordAuth,
     oidc,
     ...(accessIdentity ? { accessIdentity } : {}),
+    ...(dataNotice ? { dataNotice } : {}),
     nodeEnv: source.NODE_ENV ?? "",
     databaseUrl: required(source, "DATABASE_URL"),
     realtimeDatabaseUrl: source.REALTIME_DATABASE_URL ?? required(source, "DATABASE_URL"),
@@ -285,6 +289,18 @@ function oidcRequiredGroup(
   if (source.MESSAGING_OPEN_SIGNUP === "true")
     throw new Error("OIDC_REQUIRED_GROUP requires MESSAGING_OPEN_SIGNUP to be off");
   return group;
+}
+
+/**
+ * Fork: DATA_NOTICE_ENABLED=true shows the data-handling banner on every page.
+ * A value that is neither true nor false refuses startup rather than silently
+ * hiding the banner. See docs/fork-data-notice.md.
+ */
+function dataNoticeFromEnv(source: NodeJS.ProcessEnv): boolean {
+  const enabled = source.DATA_NOTICE_ENABLED;
+  if (enabled && !["true", "false"].includes(enabled))
+    throw new Error("DATA_NOTICE_ENABLED must be true or false");
+  return enabled === "true";
 }
 
 /**

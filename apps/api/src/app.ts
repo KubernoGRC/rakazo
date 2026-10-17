@@ -647,6 +647,7 @@ export async function createApp(
         : null,
       passwordAuth: env.passwordAuth !== false,
       ...(accessVerifier ? { accessIdentity: true } : {}),
+      ...(env.dataNotice ? { dataNotice: true } : {}),
       passwordReset: env.passwordAuth !== false && Boolean(email),
       resetUrl:
         env.passwordAuth !== false && email ? new URL("/reset-password", env.webOrigin).href : null,

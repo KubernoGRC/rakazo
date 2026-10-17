@@ -397,4 +397,17 @@ describe("OIDC environment", () => {
       expect(env.passwordAuth).toBe(false);
     });
   });
+
+  // Fork: DATA_NOTICE_ENABLED (docs/fork-data-notice.md).
+  describe("DATA_NOTICE_ENABLED", () => {
+    it("is off unless enabled", () => {
+      expect(loadEnv(base).dataNotice).toBeUndefined();
+      for (const value of ["false", ""])
+        expect(loadEnv({ ...base, DATA_NOTICE_ENABLED: value }).dataNotice).toBeUndefined();
+      expect(loadEnv({ ...base, DATA_NOTICE_ENABLED: "true" }).dataNotice).toBe(true);
+    });
+    it.each(["1", "yes", "TRUE"])("refuses startup with %s", (value) => {
+      expect(() => loadEnv({ ...base, DATA_NOTICE_ENABLED: value })).toThrow(/true or false/);
+    });
+  });
 });

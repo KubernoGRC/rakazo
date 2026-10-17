@@ -13,6 +13,8 @@ export const authCapabilitiesSchema = z.object({
   billing: z.boolean().optional(),
   /** Fork: sign-in happens only through a trusted access proxy in front of the server. */
   accessIdentity: z.boolean().optional(),
+  /** Fork: the web UI shows the data-handling banner on every page. */
+  dataNotice: z.boolean().optional(),
 });
 export type AuthCapabilities = z.infer<typeof authCapabilitiesSchema>;
 
