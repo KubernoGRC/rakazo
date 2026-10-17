@@ -14,6 +14,7 @@ import {
   createJobReconciler,
   createMessagingContextLoader,
   createPostgresReconciliationLeadership,
+  createRoutineRetryNoticeReconciler,
   createRunExecutor,
   createRunSandbox,
   createRunSecretWriter,
@@ -48,9 +49,10 @@ import {
   ScriptedAgentRuntime,
   SpaceMemoryProviderResolver,
   sandboxProviderOptionsFromEnv,
+  shutdownPiTelemetry,
   withSecretPersistence,
 } from "@rakazo/adapters";
-import { resolveEncryptionKey, resolveSupervisorToken } from "@rakazo/core";
+import { resolveEncryptionKey, resolveSupervisorToken, uploadSizeFromEnv } from "@rakazo/core";
 import {
   createBoardEvents,
   createDb,
@@ -180,11 +182,6 @@ async function main() {
     prisma,
     ticketBoardEnabled,
   });
-  const jobHost: JobWorkerHost =
-    inMemoryJobs ??
-    new GraphileJobWorkerHost(pool, {
-      concurrency: parsePositiveInteger(process.env.GRAPHILE_WORKER_CONCURRENCY, 4),
-    });
   // One provider instance so emulator launches and polls share the same Map.
   const cloudAgent = createCloudAgentConnection();
   // Shared with the reconciler so a stuck wait uses the same push path as a finish notice.
@@ -192,6 +189,7 @@ async function main() {
     pushSessionExpiresAt(prisma, sessionId),
   );
   const executor = createRunExecutor({
+    maxUploadSizeBytes: uploadSizeFromEnv(process.env),
     prisma,
     runtime,
     // Live per-account Codex catalog; never refreshes or writes credentials.
@@ -236,6 +234,12 @@ async function main() {
     cloudAgent,
   });
 
+  const jobHost: JobWorkerHost =
+    inMemoryJobs ??
+    new GraphileJobWorkerHost(pool, {
+      concurrency: parsePositiveInteger(process.env.GRAPHILE_WORKER_CONCURRENCY, 4),
+    });
+
   const jobHandlers = createBackgroundJobHandlers({
     executor,
     prisma,
@@ -279,6 +283,11 @@ async function main() {
     leadership: createPostgresReconciliationLeadership(pool),
     reconcileCloudAgents: () => reconcileCloudAgents({ prisma, jobs, cloudAgent }),
     reconcileComputerUpdates: () => reconcileComputerUpdates({ prisma, jobs }),
+    reconcileRoutineRetryNotices: inMemoryJobs
+      ? undefined
+      : createRoutineRetryNoticeReconciler(pool, (runId) =>
+          executor.notifyRoutineRetryAttemptsExhausted(runId),
+        ),
   });
   reconciler.start();
 
@@ -297,6 +306,7 @@ async function main() {
       await prisma.$disconnect().catch(() => undefined);
       await pool.end().catch(() => undefined);
     } finally {
+      await shutdownPiTelemetry();
       await logger.flush({ timeoutMs: 2_000 });
     }
   };

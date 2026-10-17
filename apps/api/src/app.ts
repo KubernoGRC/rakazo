@@ -489,6 +489,7 @@ export async function createApp(
   // resolution alike, so a list call warms the run path in this process.
   const codexCatalog = new CodexCatalogCache();
   const executor = createRunExecutor({
+    maxUploadSizeBytes: env.maxUploadSizeBytes,
     contextStrategy,
     prisma,
     runtime,
@@ -661,7 +662,7 @@ export async function createApp(
         }),
     );
   }
-  mountApiRequestBodyLimits(app);
+  mountApiRequestBodyLimits(app, env.maxUploadSizeBytes);
   mountScreenTarget(app, prisma, env.screenProxySecret);
   app.on(["GET", "POST"], "/api/auth/*", async (c) => {
     const path = new URL(c.req.url).pathname.replace("/api/auth", "");
