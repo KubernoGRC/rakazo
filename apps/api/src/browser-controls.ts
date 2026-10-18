@@ -36,7 +36,13 @@ function applyHeaders(headers: Headers) {
 export function browserControlHeaders(): MiddlewareHandler {
   return async (c, next) => {
     await next();
-    const signOut = new URL(c.req.url).pathname === SIGN_OUT_PATH;
+    // Only a sign-out that happened: a failed POST, or a cross-site GET of this URL, must not
+    // clear a still-signed-in browser's storage.
+    const signOut =
+      c.req.method === "POST" &&
+      c.res.status >= 200 &&
+      c.res.status < 300 &&
+      new URL(c.req.url).pathname === SIGN_OUT_PATH;
     const apply = (headers: Headers) => {
       applyHeaders(headers);
       if (signOut) headers.set("clear-site-data", SIGN_OUT_CLEAR_SITE_DATA);

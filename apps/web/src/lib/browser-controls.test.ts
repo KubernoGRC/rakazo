@@ -99,7 +99,11 @@ describe("purge", () => {
   });
 
   it("deletes IndexedDB databases, caches and service workers", async () => {
-    const deleteDatabase = vi.fn();
+    const deleteDatabase = vi.fn(() => {
+      const request = {} as IDBOpenDBRequest;
+      queueMicrotask(() => request.onsuccess?.(new Event("success")));
+      return request;
+    });
     const deleteCache = vi.fn(async () => true);
     const unregister = vi.fn(async () => true);
     vi.stubGlobal("indexedDB", {
@@ -119,6 +123,43 @@ describe("purge", () => {
     } finally {
       vi.unstubAllGlobals();
       Reflect.deleteProperty(navigator, "serviceWorker");
+    }
+  });
+
+  it("waits for an IndexedDB delete to finish before resolving", async () => {
+    let finish: () => void = () => {};
+    vi.stubGlobal("indexedDB", {
+      databases: async () => [{ name: "legacy-chat" }],
+      deleteDatabase: () => {
+        const request = {} as IDBOpenDBRequest;
+        finish = () => request.onsuccess?.(new Event("success"));
+        return request;
+      },
+    });
+    try {
+      let settled = false;
+      const purge = purgeBrowserState({ preferences: false, indexedDbWaitMs: 60_000 }).then(() => {
+        settled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(settled).toBe(false);
+      finish();
+      await purge;
+      expect(settled).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("stops waiting on a delete another tab blocks", async () => {
+    vi.stubGlobal("indexedDB", {
+      databases: async () => [{ name: "legacy-chat" }],
+      deleteDatabase: () => ({}) as IDBOpenDBRequest,
+    });
+    try {
+      await purgeBrowserState({ preferences: false, indexedDbWaitMs: 10 });
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

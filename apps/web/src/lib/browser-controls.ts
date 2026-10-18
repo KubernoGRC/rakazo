@@ -110,7 +110,44 @@ function storageOrNull(kind: StorageKind): Storage | null {
  * Storage and any service worker. Run at every page load, which is also the cutover
  * invalidation for a profile that ran an older build, and at the end of every session.
  */
-export async function purgeBrowserState({ preferences }: { preferences: boolean }): Promise<void> {
+/**
+ * How long a purge waits for an IndexedDB delete that another tab is blocking. The delete stays
+ * queued and completes when that tab closes or reloads; on sign-out the server's Clear-Site-Data
+ * covers it too. Bounded so a session end can never hang on another tab.
+ */
+export const INDEXED_DB_DELETE_WAIT_MS = 3_000;
+
+/** Resolves once the delete succeeded or failed, or after the bound while it is blocked. */
+function deleteDatabase(name: string, waitMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    let request: IDBOpenDBRequest | undefined;
+    try {
+      request = indexedDB.deleteDatabase(name);
+    } catch {
+      resolve();
+      return;
+    }
+    if (!request) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, waitMs);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    request.onsuccess = done;
+    request.onerror = done;
+  });
+}
+
+export async function purgeBrowserState({
+  preferences,
+  indexedDbWaitMs = INDEXED_DB_DELETE_WAIT_MS,
+}: {
+  preferences: boolean;
+  indexedDbWaitMs?: number;
+}): Promise<void> {
   memory.local.clear();
   memory.session.clear();
   try {
@@ -122,9 +159,8 @@ export async function purgeBrowserState({ preferences }: { preferences: boolean 
   await Promise.allSettled([
     (async () => {
       if (typeof indexedDB === "undefined" || typeof indexedDB.databases !== "function") return;
-      for (const { name } of await indexedDB.databases()) {
-        if (name) indexedDB.deleteDatabase(name);
-      }
+      const names = (await indexedDB.databases()).flatMap(({ name }) => (name ? [name] : []));
+      await Promise.all(names.map((name) => deleteDatabase(name, indexedDbWaitMs)));
     })(),
     (async () => {
       if (typeof caches === "undefined") return;

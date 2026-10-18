@@ -47,6 +47,18 @@ describe("browser control headers", () => {
     expect(other.headers.get("clear-site-data")).toBeNull();
   });
 
+  it("does not clear site data for a failed or non-POST sign-out", async () => {
+    const app = new Hono();
+    app.use("*", browserControlHeaders());
+    app.post("/api/auth/sign-out", (c) => c.json({ error: "forbidden" }, 403));
+    app.get("/api/auth/sign-out", (c) => c.json({ success: true }));
+    const failed = await app.request("/api/auth/sign-out", { method: "POST" });
+    expect(failed.headers.get("clear-site-data")).toBeNull();
+    const crossSite = await app.request("/api/auth/sign-out");
+    expect(crossSite.headers.get("clear-site-data")).toBeNull();
+    expect(crossSite.headers.get("cache-control")).toBe("no-store");
+  });
+
   it("covers a response whose headers are immutable", async () => {
     const app = new Hono();
     app.use("*", browserControlHeaders());
