@@ -307,7 +307,41 @@ function accessIdentityFromEnv(source: NodeJS.ProcessEnv): AccessIdentityConfig 
     throw new Error(`ACCESS_IDENTITY_ENABLED=true cannot be combined with ${oidcKeys.join(", ")}`);
   if (source.MESSAGING_OPEN_SIGNUP === "true")
     throw new Error("ACCESS_IDENTITY_ENABLED=true requires MESSAGING_OPEN_SIGNUP to be off");
-  return { issuer, audience, certsFile };
+  const logoutUrl = accessLogoutUrl(optional(source.ACCESS_IDENTITY_LOGOUT_URL), issuer);
+  return { issuer, audience, certsFile, ...(logoutUrl ? { logoutUrl } : {}) };
+}
+
+/**
+ * Fork: the sign-out redirect may only leave for the access proxy itself, so it
+ * can't become an open redirect: a path on this server, or an https URL on the
+ * issuer's origin (the proxy's team domain).
+ */
+function accessLogoutUrl(value: string | undefined, issuer: string): string | undefined {
+  if (!value) return undefined;
+  const invalid = () =>
+    new Error(
+      "ACCESS_IDENTITY_LOGOUT_URL must be a path on this server or an https URL on the ACCESS_IDENTITY_ISSUER origin",
+    );
+  if (value.startsWith("/")) {
+    const local = "https://origin.invalid";
+    let url: URL;
+    try {
+      url = new URL(value, local);
+    } catch {
+      throw invalid();
+    }
+    if (url.origin !== local || value.startsWith("//") || value.includes("\\")) throw invalid();
+    return value;
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw invalid();
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.origin !== issuer)
+    throw invalid();
+  return url.href;
 }
 
 function optional(value: string | undefined): string | undefined {

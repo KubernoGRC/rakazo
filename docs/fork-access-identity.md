@@ -17,6 +17,7 @@ Set these on the API. The worker does not authenticate users and does not read t
 | `ACCESS_IDENTITY_ISSUER` | The assertion's `iss`: the access team's HTTPS origin, for example `https://<team>.cloudflareaccess.com`. A trailing `/` is dropped; a path, query or credentials are refused. |
 | `ACCESS_IDENTITY_AUDIENCE` | The access application's audience (AUD) tag. The assertion's `aud` must contain it. |
 | `ACCESS_IDENTITY_CERTS_FILE` | A path to the signing keys, written by the host: a JWKS, or the proxy's `certs` document, which has the same `keys` array. |
+| `ACCESS_IDENTITY_LOGOUT_URL` | Optional. Where the browser goes after signing out, to end the proxy's session too. A path on this server, or an https URL on the issuer's origin, for example `https://<team>.cloudflareaccess.com/cdn-cgi/access/logout`. Anything else refuses startup, so it can't become an open redirect. |
 
 The API refuses to start when the mode is on and any of these hold:
 
@@ -101,9 +102,12 @@ files do not pass the `ACCESS_IDENTITY_*` variables through; the deployment adds
   server error shows "Could not reach the server" with a Retry control.
 - **The mobile app does not sign in.** Its sign-in screen shows "This server uses your
   organisation's sign-in in a web browser" instead of a form.
-- **Logout** clears the Rakazo session only. The access proxy's own session continues, so
-  the next visit signs straight back in. To end access, remove the user in the access
-  policy or end their session at the proxy.
+- **Logout** clears the Rakazo session. With `ACCESS_IDENTITY_LOGOUT_URL` set, the web app
+  then sends the browser there, so the proxy's session ends too; it does so only after a
+  successful sign-out. Without it, the proxy's session continues and the next visit signs
+  straight back in. Either way, an identity provider session that is still active can sign
+  the user in again at the proxy without a prompt. To end access, remove the user in the
+  access policy.
 
 ## Deployment requirement
 
@@ -136,9 +140,13 @@ file is refused.
   - the `validateUserInfo` and `user.create` refusals;
   - the session `create` hook's access branch.
 - `apps/api/src/app.ts`: building the verifier, mounting the gate, binding sessions in
-  `requestSession` and on `/api/auth/*`, and the `accessIdentity` capability.
+  `requestSession` and on `/api/auth/*`, and the `accessIdentity` and `accessLogoutUrl`
+  capabilities.
 - `apps/api/src/env.ts`: `accessIdentityFromEnv` and its fail-closed checks.
-- `packages/contracts/src/auth.ts`: the optional `accessIdentity` capability.
+- `packages/contracts/src/auth.ts`: the optional `accessIdentity` and `accessLogoutUrl`
+  capabilities.
+- `apps/web/src/pages/Shell.tsx` and `Paywall.tsx`: the Log out buttons continue to the
+  proxy's logout after a successful sign-out.
 - `packages/auth/src/account-security.ts`: an optional fresh re-authentication check, used
   by `/account-security` and the `/delete-user` hook.
 - `apps/web/src/pages/Auth.tsx`: the access branch of the sign-in page.

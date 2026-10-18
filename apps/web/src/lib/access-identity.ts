@@ -1,3 +1,5 @@
+import { fetchAuthCapabilities } from "./auth-capabilities";
+
 /**
  * Fork: under access identity the access proxy has already authenticated the
  * visitor, so the sign-in page exchanges its verified assertion for a session.
@@ -27,4 +29,23 @@ export async function signInWithAccessIdentity(): Promise<AccessSignIn> {
   const created =
     typeof body === "object" && body !== null && (body as { created?: unknown }).created === true;
   return { kind: "signed-in", created };
+}
+
+/**
+ * Fork: ending only the Rakazo session lets the access proxy sign the visitor
+ * straight back in. After a successful sign-out, continue to the proxy's logout
+ * when the deployment names one. Returns true when the browser is leaving.
+ */
+export async function leaveThroughAccessLogout(signedOut: boolean): Promise<boolean> {
+  if (!signedOut) return false;
+  let url: string | undefined;
+  try {
+    const capabilities = await fetchAuthCapabilities();
+    url = capabilities.accessIdentity ? capabilities.accessLogoutUrl : undefined;
+  } catch {
+    return false;
+  }
+  if (!url) return false;
+  window.location.assign(url);
+  return true;
 }

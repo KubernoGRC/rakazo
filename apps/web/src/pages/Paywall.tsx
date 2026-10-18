@@ -4,6 +4,7 @@ import { Button } from "@rakazo/ui-web";
 import { Check } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { leaveThroughAccessLogout } from "../lib/access-identity";
 import { authClient } from "../lib/auth";
 import { formatBillingPrice } from "../lib/billing";
 import { clearSpaceSelection, rpc } from "../lib/rpc";
@@ -96,8 +97,9 @@ export function PaywallPage({ status }: { status: BillingStatus }) {
           variant="ghost"
           className="mt-6 text-muted-foreground"
           onClick={() =>
-            void authClient.signOut().then(() => {
+            void authClient.signOut().then(async (result) => {
               clearSpaceSelection();
+              if (await leaveThroughAccessLogout(!result.error)) return;
               navigate("/");
             })
           }
