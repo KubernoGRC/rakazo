@@ -108,7 +108,6 @@ import { cors } from "hono/cors";
 import { accessIdentityGate, createAccessSessionBinding } from "./access-identity.js";
 import { createBillingService } from "./billing.js";
 import { mountBillingRoutes } from "./billing-webhook.js";
-import { browserControlHeaders, noLinkFavicons } from "./browser-controls.js";
 import type { AppEnv } from "./env.js";
 import { loadEnv } from "./env.js";
 import { healthRoutes } from "./health.js";
@@ -569,8 +568,6 @@ export async function createApp(
   reconciler?.start();
 
   const router = createRouter({
-    // Fork: no server-side fetch of linked sites; see docs/fork-browser-controls.md.
-    favicons: noLinkFavicons,
     cloudAgent,
     codexCatalog,
     prisma,
@@ -623,8 +620,6 @@ export async function createApp(
     clientInterceptors: [onError((error, { path }) => logUnexpectedRpcError(error, path))],
   });
   const app = new Hono();
-  // Fork: every response is no-store, errors included; see docs/fork-browser-controls.md.
-  app.use("*", browserControlHeaders());
   app.use("*", requestLogging(logger));
   app.use(
     "*",

@@ -8,7 +8,6 @@ import { expect, test } from "@playwright/test";
 import { openScreenCapability } from "@rakazo/core/node/screen-capability";
 import { createServer, type Plugin, preview, type ViteDevServer } from "vite";
 import { addScreenProxyCapability } from "../../api/src/screen-proxy";
-import { SCREEN_EMBED_DISABLED } from "./fork-screen-disabled";
 
 const scope = {
   botId: "bot",
@@ -104,15 +103,8 @@ for (const mode of ["development", "preview"] as const) {
         server.middlewares.use((req, res, next) => {
           if (req.url === "/app") {
             res.setHeader("Content-Type", "text/html");
-            // Fork: a same-origin script file, not an inline one, which the served page's CSP
-            // refuses (docs/fork-browser-controls.md).
             res.end(
-              '<!doctype html><title>Fake app</title><body><script src="/app.js"></script></body>',
-            );
-          } else if (req.url === "/app.js") {
-            res.setHeader("Content-Type", "text/javascript");
-            res.end(
-              'localStorage.setItem("app-data", "private-app-data"); document.cookie = "app-session=fake-session; Path=/";',
+              '<!doctype html><title>Fake app</title><body><script>localStorage.setItem("app-data", "private-app-data"); document.cookie = "app-session=fake-session; Path=/";</script></body>',
             );
           } else if (req.url === "/session") {
             res.setHeader("Content-Type", "application/json");
@@ -231,8 +223,6 @@ for (const mode of ["development", "preview"] as const) {
       test(`iframe remains isolated with sandbox attribute ${sandbox ?? "absent"}`, async ({
         page,
       }) => {
-        // Fork: the served page's CSP has frame-src 'none', so in preview nothing is framed.
-        test.skip(mode === "preview", SCREEN_EMBED_DISABLED);
         await page.goto(`${origin}/app`);
         await page.evaluate(
           ({ url, sandbox }) => {

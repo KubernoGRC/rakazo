@@ -150,7 +150,6 @@ import { ComputerUpdateProgress } from "../components/ComputerUpdateProgress";
 import { CallCard } from "../components/call/CallCard";
 import { VoiceChatCard } from "../components/call/VoiceChatCard";
 import { ComputerWorkspace } from "../components/computer/ComputerWorkspace";
-import { EmbeddedContentDisabled } from "../components/EmbeddedContentDisabled";
 import { lazyOverlay } from "../components/ErrorBoundary";
 import { MessageHoverMetadata } from "../components/MessageHoverMetadata";
 import {
@@ -177,7 +176,6 @@ import {
   readBotsSidebarCollapsed,
   writeBotsSidebarCollapsed,
 } from "../lib/bots-sidebar-pref";
-import { EMBEDDED_FRAMES_ENABLED } from "../lib/browser-controls";
 import {
   deliverBrowserNotification as deliverNativeBrowserNotification,
   requestBrowserNotificationPermission,
@@ -3948,9 +3946,6 @@ export function ShellPage() {
                     </div>
                   ) : computer?.kind === "desktop" ? (
                     <DesktopKindEmptyState className="grid h-full place-items-center px-6 text-center text-sm text-muted-foreground/80" />
-                  ) : !EMBEDDED_FRAMES_ENABLED && computer?.state === "running" ? (
-                    // Fork: frame-src 'none' (docs/fork-browser-controls.md).
-                    <EmbeddedContentDisabled />
                   ) : computer?.state === "running" && embeddedScreenUrl && !computerScreenError ? (
                     <iframe
                       title={t`Bot screen preview`}
@@ -4885,9 +4880,6 @@ export function ShellPage() {
               >
                 {computer?.kind === "desktop" ? (
                   <DesktopKindEmptyState className="grid h-full place-items-center px-8 text-center text-sm text-muted-foreground/80" />
-                ) : !EMBEDDED_FRAMES_ENABLED && computer?.state === "running" ? (
-                  // Fork: frame-src 'none' (docs/fork-browser-controls.md).
-                  <EmbeddedContentDisabled />
                 ) : computer?.state === "running" && embeddedScreenUrl && !computerScreenError ? (
                   <>
                     <iframe

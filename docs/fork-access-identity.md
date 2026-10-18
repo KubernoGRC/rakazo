@@ -22,8 +22,7 @@ The API refuses to start when the mode is on and any of these hold:
 
 - the issuer, audience or certs file is missing, or the issuer is not an HTTPS origin;
 - `AUTH_PASSWORD_ENABLED=true`. Unset is fine: the mode turns password auth off;
-- OIDC is configured: `OIDC_ISSUER`, `OIDC_CLIENT_ID` or `OIDC_CLIENT_SECRET` is non-blank,
-  or `OIDC_REQUIRED_GROUP` is set;
+- OIDC is configured: `OIDC_ISSUER`, `OIDC_CLIENT_ID` or `OIDC_CLIENT_SECRET` is non-blank;
 - `MESSAGING_OPEN_SIGNUP=true`, which provisions accounts for chat senders.
 
 `OIDC_NAME`, `OIDC_SCOPES` and `OIDC_ALLOW_SIGNUP_BYPASS` configure nothing without an

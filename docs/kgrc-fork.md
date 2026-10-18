@@ -100,10 +100,5 @@ images **by digest** from the job summary, never by tag.
 ## Fork patch sets
 
 - [Deployment connectors](fork-deployment-connectors.md)
-- [OIDC group gate](fork-oidc-group-gate.md)
 - [Trusted access identity](fork-access-identity.md): a verified access-proxy assertion as
   the only way in. Its fail-closed checks must stay in place.
-- [Browser controls](fork-browser-controls.md): no-store on every response, an origin CSP,
-  inert remote images, no link icons or embedded frames, and no chat content in browser
-  storage. When upstream adds a `localStorage` key, it stays in page memory until it is listed
-  as a preference.

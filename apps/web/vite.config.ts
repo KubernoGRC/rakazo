@@ -18,7 +18,6 @@ import type { PreviewServer, ViteDevServer } from "vite";
 import { defineConfig, loadEnv } from "vite";
 import { resolveScreenProxySecret } from "../../packages/core/src/secrets-guard.ts";
 import { createServiceLogger } from "../../packages/logging/src/env.ts";
-import { builtScriptHashes, forceBrowserControlHeaders } from "./src/browser-controls-server.js";
 import { collectNovncHtml, MAX_NOVNC_HTML_BYTES } from "./src/novnc-html.js";
 import {
   resolveNovncTarget,
@@ -427,19 +426,6 @@ export default defineConfig(({ mode }) => {
       babel({ plugins: ["@lingui/babel-plugin-lingui-macro"] }),
       lingui(),
       tailwindcss(),
-      {
-        // Fork: CSP, no-store and no-referrer on everything the served UI answers, including the
-        // /api and /rpc proxies. First, so it wraps every later middleware. The inline script
-        // hashes come from the built index.html, so editing that script cannot silently break
-        // the page or need a hand-kept hash. See docs/fork-browser-controls.md.
-        name: "kgrc-browser-controls",
-        configurePreviewServer(server) {
-          const hashes = builtScriptHashes(
-            path.resolve(server.config.root, server.config.build.outDir, "index.html"),
-          );
-          server.middlewares.use(forceBrowserControlHeaders(() => hashes));
-        },
-      },
       {
         name: "rakazo-desktop-stack-probe",
         configureServer: (server) => attachDesktopStackProbe(server, desktopStackToken, imageTag),

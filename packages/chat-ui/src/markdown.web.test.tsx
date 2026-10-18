@@ -14,9 +14,7 @@ import {
 } from "./markdown.web";
 
 describe("web markdown remote images", () => {
-  // Fork: remote images are inert text; neither a tap nor the reader's setting loads one.
-  // See docs/fork-browser-controls.md.
-  it("renders a remote image as inert text with nothing to press", async () => {
+  it("loads a remote image in place only after the reader asks", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const markdown = "![chart](https://images.example.test/tap.png)";
     const container = document.createElement("div");
@@ -26,36 +24,58 @@ describe("web markdown remote images", () => {
       root.render(<ChatMarkdown>{markdown}</ChatMarkdown>);
     });
     expect(container.querySelector("img")).toBeNull();
-    expect(container.querySelector("button")).toBeNull();
-    const placeholder = container.querySelector('[data-remote-image="inert"]');
-    expect(placeholder?.textContent).toBe("chartimages.example.test");
+
+    const button = container.querySelector("button");
+    expect(button?.textContent).toBe("chartimages.example.test");
     await act(async () => {
-      (placeholder as HTMLElement | null)?.click();
+      button?.click();
+    });
+    const image = container.querySelector("img");
+    expect(image?.getAttribute("src")).toBe("https://images.example.test/tap.png");
+    expect(image?.getAttribute("referrerpolicy")).toBe("no-referrer");
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+
+    // The reader's choice holds for the session, so a remounted bubble keeps the image.
+    expect(renderToStaticMarkup(<ChatMarkdown>{markdown}</ChatMarkdown>)).toContain(
+      'src="https://images.example.test/tap.png"',
+    );
+  });
+
+  it("shows a placeholder when a tapped image is replaced with another url", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (src: string) => {
+      root.render(<ChatMarkdown>{`![chart](${src})`}</ChatMarkdown>);
+    };
+    await act(async () => {
+      render("https://images.example.test/first.png");
+    });
+    await act(async () => {
+      container.querySelector("button")?.click();
+    });
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "https://images.example.test/first.png",
+    );
+
+    await act(async () => {
+      render("https://images.example.test/second.png");
     });
     expect(container.querySelector("img")).toBeNull();
-    expect(container.innerHTML).not.toContain("tap.png");
+    expect(container.querySelector("button")?.textContent).toContain("images.example.test");
+
     await act(async () => {
       root.unmount();
     });
     container.remove();
   });
 
-  it("does not load remote images when the reader turned automatic loading on", () => {
-    const html = renderToStaticMarkup(
-      <RemoteImagesContext.Provider value={true}>
-        <ChatMarkdown>
-          {
-            "![a](https://images.example.test/a.png) [![b](https://badge.example.test/b.svg)](https://ci.example.test/b)"
-          }
-        </ChatMarkdown>
-      </RemoteImagesContext.Provider>,
-    );
-    expect(html).not.toContain("<img");
-    expect(html).not.toContain("a.png");
-    expect(html).not.toContain("b.svg");
-  });
-
-  it("keeps a linked remote image as text beside its link", async () => {
+  it("loads a linked image from a placeholder that is not inside the anchor", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const markdown =
       "See [![build](https://badge.example.test/tap-linked.svg)](https://ci.example.test/tap-linked) now";
@@ -67,14 +87,26 @@ describe("web markdown remote images", () => {
     });
     expect(container.querySelector("img")).toBeNull();
     expect(container.innerHTML).not.toContain("tap-linked.svg");
-    expect(container.querySelector("button")).toBeNull();
-    const placeholder = container.querySelector('[data-remote-image="inert"]');
+    expect(container.querySelector("a button")).toBeNull();
+
+    const button = container.querySelector("button");
     const link = container.querySelector("a");
-    expect(placeholder?.closest("a")).toBeNull();
-    expect(placeholder?.textContent).toContain("build");
+    expect(button?.closest("a")).toBeNull();
+    expect(button?.textContent).toContain("build");
+    expect(button?.textContent).toContain("badge.example.test");
     expect(link?.getAttribute("href")).toBe("https://ci.example.test/tap-linked");
-    expect(link?.getAttribute("rel")).toContain("noreferrer");
+    expect(link?.textContent).toBe("ci.example.test");
     expect(container.querySelectorAll("a")).toHaveLength(1);
+
+    await act(async () => {
+      button?.click();
+    });
+    const image = container.querySelector("a img");
+    expect(image?.getAttribute("src")).toBe("https://badge.example.test/tap-linked.svg");
+    expect(image?.getAttribute("referrerpolicy")).toBe("no-referrer");
+    expect(container.querySelector("a button")).toBeNull();
+    expect(container.querySelector("button")).toBeNull();
+
     await act(async () => {
       root.unmount();
     });

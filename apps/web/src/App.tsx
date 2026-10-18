@@ -18,8 +18,9 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { SubscriptionGate } from "./components/SubscriptionGate";
 import { authClient } from "./lib/auth";
 import { getTicketBoardEnabled, subscribeTicketBoardEnabled } from "./lib/bootstrap";
-import { watchSessionEnd } from "./lib/browser-controls";
 import { markAfterPaint, markOnce } from "./lib/performance";
+import { getRemoteImagesEnabled, subscribeRemoteImages } from "./lib/remote-images-preference";
+import { rpc } from "./lib/rpc";
 import {
   holdUnreachableGate,
   sessionGate,
@@ -58,13 +59,17 @@ function SsoCallbackPage() {
   return null;
 }
 
-// Fork: no link icons and no remote images. An icon is a server-side fetch of a site a message
-// chose, and a remote image a browser fetch of one; chat rendering makes neither. See
-// docs/fork-browser-controls.md.
-const linkFavicons: LinkFavicons | null = null;
+// Link icons come from our API, which fetches and caches them; the browser never asks the site.
+const linkFavicons: LinkFavicons = {
+  load: (origin) => rpc.links.favicon({ origin }),
+};
 
 export function App() {
-  const loadRemoteImages = false;
+  const loadRemoteImages = useSyncExternalStore(
+    subscribeRemoteImages,
+    getRemoteImagesEnabled,
+    () => false,
+  );
   return (
     <RemoteImagesContext.Provider value={loadRemoteImages}>
       <LinkFaviconsContext.Provider value={linkFavicons}>
@@ -93,9 +98,6 @@ function SessionApp() {
   );
   const session = authClient.useSession();
   const gate = sessionGate(session);
-  // Fork: signed in → signed out (logout, expiry) clears storage and replaces the page.
-  const [onSessionGate] = useState(watchSessionEnd);
-  useEffect(() => onSessionGate(gate), [gate, onSessionGate]);
   const [holdingUnreachable, setHoldingUnreachable] = useState(false);
   const nextHolding = holdUnreachableGate(gate, holdingUnreachable);
   if (nextHolding !== holdingUnreachable) setHoldingUnreachable(nextHolding);
