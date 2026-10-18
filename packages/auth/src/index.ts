@@ -29,7 +29,7 @@ import {
 } from "./access-identity.js";
 import { accountSecurity, oidcProofKey, sessionForAuthHook } from "./account-security.js";
 import type { OidcConfig } from "./oidc.js";
-import { isCurrentOidcAccount, oidcDiscovery, oidcGroupRefusal } from "./oidc.js";
+import { isCurrentOidcAccount, oidcDiscovery } from "./oidc.js";
 
 export type {
   AccessIdentity,
@@ -266,10 +266,8 @@ export function authRateLimitOptions(nodeEnv = process.env.NODE_ENV) {
 export function createAuth(prisma: PrismaClient, env: AuthEnv) {
   if (env.passwordAuth === false && !env.oidc && !env.accessIdentity)
     throw new Error("Password auth requires OIDC when disabled");
-  assertGroupGateConfig(env);
   assertAccessIdentityConfig(env);
   const accessMode = Boolean(env.accessIdentity);
-  const requiredGroup = env.oidc?.requiredGroup;
   const discovery = env.oidc ? oidcDiscovery(env.oidc) : undefined;
   const auth = betterAuth({
     appName: "Rakazo",
@@ -280,9 +278,6 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
       accountLinking: { enabled: true, disableImplicitLinking: true, trustedProviders: [] },
     },
     rateLimit: authRateLimitOptions(),
-    // Fork: under the group gate a session never extends itself, so the group
-    // is re-checked at a fresh sign-in at least once per session lifetime.
-    ...(requiredGroup ? { session: { disableSessionRefresh: true } } : {}),
     database: prismaAdapter(prisma, { provider: "postgresql" }),
     emailAndPassword: {
       enabled: env.passwordAuth !== false,
@@ -322,14 +317,6 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
           return source.method === ACCESS_IDENTITY_METHOD
             ? undefined
             : { error: "REGISTRATION_CLOSED" };
-        }
-        if (requiredGroup) {
-          // Fork: under the group gate an account exists only through a
-          // group-carrying OIDC sign-in, and every sign-in re-checks the group.
-          if (source.method !== "oauth" || source.oauth?.providerId !== "oidc")
-            return { error: "REGISTRATION_CLOSED" };
-          const refusal = oidcGroupRefusal(source.oauth.profile, requiredGroup);
-          if (refusal) return { error: refusal };
         }
         if (source.method !== "oauth" || source.oauth?.providerId !== "oidc") return;
         const expectedUser = (await getOAuthState())?.serverContext?.reauthUserId;
@@ -639,18 +626,6 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     ssoAvailability: () => discovery?.availability(),
     disposeOidcDiscovery: () => discovery?.dispose(),
   });
-}
-
-/**
- * Fork: the group gate only means something when OIDC is the sole way in, so a
- * gate that is set but blank, or set beside password auth, fails at startup.
- */
-export function assertGroupGateConfig(env: Pick<AuthEnv, "oidc" | "passwordAuth">) {
-  const group = env.oidc?.requiredGroup;
-  if (group === undefined) return;
-  if (!group.trim()) throw new Error("The OIDC group gate requires a group");
-  if (env.passwordAuth !== false)
-    throw new Error("The OIDC group gate requires password authentication to be disabled");
 }
 
 /**

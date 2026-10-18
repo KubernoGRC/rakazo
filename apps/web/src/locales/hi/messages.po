@@ -2184,10 +2184,6 @@ msgstr "इस ईमेल को पंजीकरण की अनुमत�
 msgid "Email verification required"
 msgstr "ईमेल सत्यापन आवश्यक है"
 
-#: src/components/EmbeddedContentDisabled.tsx
-msgid "Embedded previews are turned off in this deployment."
-msgstr ""
-
 #: src/pages/BillingSettingsPanel.tsx
 msgid "Ends {day}"
 msgstr ""

@@ -26,7 +26,10 @@ import {
   linkLabel,
   markdownLinkDisplayParts,
   markdownLinkRequiresConfirmation,
+  markRemoteImageLoaded,
   plainTextLinkParts,
+  RemoteImagesContext,
+  remoteImageRenders,
   remoteMarkdownImage,
   sanitizeMarkdownUrl,
   useLinkFavicon,
@@ -83,15 +86,6 @@ function CodeBlock(props: React.ComponentPropsWithoutRef<"pre">) {
       </button>
     </div>
   );
-}
-
-/**
- * Fork: no remote markdown image renders, whatever the reader's setting or a tap. Upstream let
- * either load one; this deployment's CSP blocks the load anyway, and rendering a broken image
- * would still tell the reader nothing. See docs/fork-browser-controls.md.
- */
-function remoteImageRenders(): boolean {
-  return false;
 }
 
 type EnclosingLink = false | "open" | "rejected";
@@ -224,16 +218,11 @@ function soleRemoteImage(node: MarkdownHast | undefined):
   };
 }
 
-/**
- * Fork: a remote image is inert text. Upstream drew a button that loaded it on a tap; here no
- * markdown image ever leaves the origin (the page's CSP has `img-src 'self'` as well), so the
- * placeholder names what was not loaded and offers nothing to press. `onLoad` is kept for the
- * call sites' shape. See docs/fork-browser-controls.md.
- */
 function RemoteImageButton({
   image,
   alt,
   title,
+  onLoad,
 }: {
   image: { href: string; host: string };
   alt?: string;
@@ -241,23 +230,33 @@ function RemoteImageButton({
   onLoad: () => void;
 }) {
   return (
-    <span className="rk-chat-markdown-image" title={title} data-remote-image="inert">
+    <button
+      type="button"
+      className="rk-chat-markdown-image"
+      title={title}
+      onClick={() => {
+        markRemoteImageLoaded(image.href);
+        onLoad();
+      }}
+    >
       <ImageIcon />
       {alt ? <span>{alt}</span> : null}
       <span className="rk-chat-markdown-image-host">{image.host}</span>
-    </span>
+    </button>
   );
 }
 
 function MarkdownImage({ src = "", alt, title }: { src?: string; alt?: string; title?: string }) {
   const enclosingLink = useContext(InsideLinkContext);
+  const loadRemote = useContext(RemoteImagesContext);
   const remote = remoteMarkdownImage(src);
   // Bumping this redraws after a tap. Whether the image shows is read from the current URL.
   const [, setRevision] = useState(0);
+  const rejectedLink = enclosingLink === "rejected";
   if (inlineMarkdownImageSrc(src)) {
     return <img src={src} alt={alt ?? ""} title={title} loading="lazy" />;
   }
-  if (remote && remoteImageRenders()) {
+  if (remote && remoteImageRenders(remote.href, loadRemote, rejectedLink)) {
     return (
       <img
         src={remote.href}
@@ -290,8 +289,9 @@ function LinkedRemoteImage({
   alt?: string;
   title?: string;
 }) {
+  const loadRemote = useContext(RemoteImagesContext);
   const [, setRevision] = useState(0);
-  if (remoteImageRenders()) {
+  if (remoteImageRenders(image.href, loadRemote, false)) {
     return (
       <ConfirmableAnchor href={href}>
         <img
@@ -373,9 +373,10 @@ function MarkdownAnchor({
   node,
   ...props
 }: React.ComponentPropsWithoutRef<"a"> & { node?: MarkdownHast }) {
+  const loadRemote = useContext(RemoteImagesContext);
   const href = typeof props.href === "string" ? props.href : "";
   const image = href ? soleRemoteImage(node) : undefined;
-  if (image && !remoteImageRenders()) {
+  if (image && !remoteImageRenders(image.href, loadRemote, false)) {
     return <LinkedRemoteImage href={href} image={image} alt={image.alt} title={image.title} />;
   }
   // urlTransform blanks unsafe URLs. Keep their text without a link that opens the app again.

@@ -1,15 +1,9 @@
 // @vitest-environment jsdom
 
-import type { ReactNode } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
-
-vi.mock("@lingui/react/macro", () => ({
-  Trans: ({ children }: { children: ReactNode }) => children,
-}));
-
-import { SandboxedHtmlFrame as SandboxedHtmlViewer } from "./SandboxedHtmlViewer";
+import { SandboxedHtmlViewer } from "./SandboxedHtmlViewer";
 
 async function render(html: string) {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);

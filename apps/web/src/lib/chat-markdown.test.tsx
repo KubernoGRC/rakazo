@@ -36,8 +36,7 @@ describe("ChatMarkdown", () => {
     expect(html).toMatch(/<a[^>]*href="https:\/\/example.test"[^>]*target="_blank"/);
   });
 
-  // Fork: remote images are inert text, not load buttons (docs/fork-browser-controls.md).
-  it("shows remote images as inert text and relative ones as text, without loading them", () => {
+  it("shows remote images as load buttons and relative ones as text, without loading them", () => {
     const html = renderToStaticMarkup(
       <ChatMarkdown>
         {
@@ -48,12 +47,11 @@ describe("ChatMarkdown", () => {
 
     expect(html).not.toContain("<img");
     expect(html).not.toContain("images.example.test/p.gif");
-    expect(html).not.toContain("<button");
     expect(html).toContain(
-      '<span class="rk-chat-markdown-image" title="Q3 revenue" data-remote-image="inert">',
+      '<button type="button" class="rk-chat-markdown-image" title="Q3 revenue">',
     );
     expect(html).toContain(
-      '<span>chart</span><span class="rk-chat-markdown-image-host">images.example.test</span></span>',
+      '<span>chart</span><span class="rk-chat-markdown-image-host">images.example.test</span></button>',
     );
     expect(html).not.toContain('href="/api/v1/p.gif"');
     expect(html).not.toContain('href="./p.gif"');
@@ -61,7 +59,7 @@ describe("ChatMarkdown", () => {
     expect(html).toContain("./p.gif");
   });
 
-  it("does not load remote images even when the reader turned that on", () => {
+  it("loads remote images at once, without a referrer, when the reader turned that on", () => {
     const html = renderToStaticMarkup(
       <RemoteImagesContext.Provider value={true}>
         <ChatMarkdown>
@@ -72,12 +70,13 @@ describe("ChatMarkdown", () => {
       </RemoteImagesContext.Provider>,
     );
 
-    expect(html).not.toContain("<img");
-    expect(html).not.toContain("auto.png");
-    expect(html).not.toContain("auto.svg");
     expect(html).toContain(
-      '<a href="https://ci.example.test/run" target="_blank" rel="noreferrer noopener">',
+      '<img src="https://images.example.test/auto.png" alt="chart" loading="lazy" referrerPolicy="no-referrer"/>',
     );
+    expect(html).toContain(
+      '<a href="https://ci.example.test/run" target="_blank" rel="noreferrer noopener"><img src="https://badge.example.test/auto.svg"',
+    );
+    expect(html).not.toContain("<button");
   });
 
   it("never puts an unsafe image source into an attribute", () => {

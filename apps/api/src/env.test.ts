@@ -278,50 +278,6 @@ describe("OIDC environment", () => {
     ).toBe(true);
   });
 
-  // Fork: OIDC_REQUIRED_GROUP (docs/fork-oidc-group-gate.md).
-  describe("OIDC_REQUIRED_GROUP", () => {
-    const sso = {
-      ...base,
-      OIDC_ISSUER: "https://identity.example.test/tenant/v2.0",
-      OIDC_CLIENT_ID: "client",
-      OIDC_CLIENT_SECRET: "secret",
-      AUTH_PASSWORD_ENABLED: "false",
-      OIDC_REQUIRED_GROUP: " 00000000-0000-4000-8000-0000000000aa ",
-    };
-    it("is off unless the variable is present", () => {
-      const { OIDC_REQUIRED_GROUP: _group, ...unset } = sso;
-      expect(loadEnv(unset).oidc?.requiredGroup).toBeUndefined();
-    });
-    it("loads the trimmed group", () => {
-      expect(loadEnv(sso).oidc?.requiredGroup).toBe("00000000-0000-4000-8000-0000000000aa");
-    });
-    it.each([
-      ["an empty group", { OIDC_REQUIRED_GROUP: "" }, /must not be empty/],
-      ["a blank group", { OIDC_REQUIRED_GROUP: "  " }, /must not be empty/],
-      [
-        "no OIDC issuer",
-        { OIDC_ISSUER: "", OIDC_CLIENT_ID: "", OIDC_CLIENT_SECRET: "" },
-        /requires OIDC/,
-      ],
-      [
-        "no OIDC at all",
-        {
-          OIDC_ISSUER: undefined,
-          OIDC_CLIENT_ID: undefined,
-          OIDC_CLIENT_SECRET: undefined,
-          AUTH_PASSWORD_ENABLED: undefined,
-        },
-        /requires OIDC_ISSUER/,
-      ],
-      ["a missing client secret", { OIDC_CLIENT_SECRET: "" }, /configured together/],
-      ["password auth on", { AUTH_PASSWORD_ENABLED: "true" }, /AUTH_PASSWORD_ENABLED=false/],
-      ["password auth unset", { AUTH_PASSWORD_ENABLED: undefined }, /AUTH_PASSWORD_ENABLED=false/],
-      ["messaging open signup", { MESSAGING_OPEN_SIGNUP: "true" }, /MESSAGING_OPEN_SIGNUP/],
-    ])("fails closed at startup with %s", (_label, overrides, message) => {
-      expect(() => loadEnv({ ...sso, ...overrides })).toThrow(message);
-    });
-  });
-
   // Fork: ACCESS_IDENTITY_ENABLED (docs/fork-access-identity.md).
   describe("ACCESS_IDENTITY_ENABLED", () => {
     const access = {
@@ -373,7 +329,6 @@ describe("OIDC environment", () => {
         /cannot be combined with OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET/,
       ],
       ["an OIDC client id alone", { OIDC_CLIENT_ID: "client" }, /configured together/],
-      ["the OIDC group gate", { OIDC_REQUIRED_GROUP: "group" }, /requires OIDC_ISSUER/],
       ["messaging open signup", { MESSAGING_OPEN_SIGNUP: "true" }, /MESSAGING_OPEN_SIGNUP/],
     ])("fails closed at startup with %s", (_label, overrides, message) => {
       expect(() => loadEnv({ ...access, ...overrides })).toThrow(message);
