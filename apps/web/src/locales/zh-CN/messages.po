@@ -2184,6 +2184,10 @@ msgstr "该邮箱不允许注册"
 msgid "Email verification required"
 msgstr "需要验证邮箱"
 
+#: src/components/EmbeddedContentDisabled.tsx
+msgid "Embedded previews are turned off in this deployment."
+msgstr ""
+
 #: src/pages/BillingSettingsPanel.tsx
 msgid "Ends {day}"
 msgstr ""

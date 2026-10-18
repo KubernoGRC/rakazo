@@ -1,4 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
+import { SCREEN_EMBED_DISABLED } from "./fork-screen-disabled";
 import {
   activeBotId,
   captureScreenshot,
@@ -133,6 +134,7 @@ test("user control leaves another Team bot's screen available", async ({ page },
 test("opening and releasing the computer keep a view-only stream with maintenance available", async ({
   page,
 }, testInfo) => {
+  test.skip(true, SCREEN_EMBED_DISABLED);
   await signup(page, `view-only-${Date.now()}@rakazo.test`, "password12", "Computer");
   await completeOnboarding(page);
   let takeovers = 0;
@@ -179,6 +181,7 @@ test("opening and releasing the computer keep a view-only stream with maintenanc
 });
 
 test("a failed control release keeps the computer open for retry", async ({ page }, testInfo) => {
+  test.skip(true, SCREEN_EMBED_DISABLED);
   await signup(page, `team-release-${Date.now()}@rakazo.test`, "password12", "Team Release");
   await completeOnboarding(page);
   await page.getByTitle("Agent computer").click();

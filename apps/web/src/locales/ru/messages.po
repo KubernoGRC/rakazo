@@ -2184,6 +2184,10 @@ msgstr "Регистрация с этим адресом электронной
 msgid "Email verification required"
 msgstr "Требуется подтверждение электронной почты"
 
+#: src/components/EmbeddedContentDisabled.tsx
+msgid "Embedded previews are turned off in this deployment."
+msgstr ""
+
 #: src/pages/BillingSettingsPanel.tsx
 msgid "Ends {day}"
 msgstr ""

@@ -5,6 +5,7 @@ import { App } from "./App";
 import { DesktopUpdatesProvider } from "./components/DesktopUpdates";
 import { I18nBootstrap } from "./components/I18nBootstrap";
 import { applyUiDirection } from "./lib/apply-ui-direction";
+import { installBrowserControls } from "./lib/browser-controls";
 import { markAfterPaint, markOnce } from "./lib/performance";
 import { installPreloadRecovery } from "./lib/preload-recovery";
 import { applyUiAppearance, watchSystemAppearance } from "./lib/ui-appearance";
@@ -12,6 +13,8 @@ import { resolveUiLocale } from "./lib/ui-locale";
 import "./styles.css";
 
 markOnce("rk:renderer:module-evaluated");
+// Fork: before anything reads or writes storage; see docs/fork-browser-controls.md.
+installBrowserControls();
 installPreloadRecovery();
 applyUiDirection(resolveUiLocale());
 applyUiAppearance();

@@ -2,19 +2,16 @@ import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 import { captureScreenshot, completeOnboarding, signup } from "./helpers";
 
+// Fork: remote markdown images are inert text, whatever the reader's setting or a tap.
+// See docs/fork-browser-controls.md; browser-controls.spec.ts checks the network side.
 const imageHost = "https://images.example.test/";
 const remoteImage = `${imageHost}chart.png?d=conversation-data`;
-// 1×1 transparent PNG served for the fake image host.
-const pixel = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
-  "base64",
-);
 
-async function serveFakeImages(page: Page) {
-  const requests: Array<{ url: string; referer?: string }> = [];
+async function watchImageHost(page: Page) {
+  const requests: string[] = [];
   await page.route(`${imageHost}**`, async (route) => {
-    requests.push({ url: route.request().url(), referer: route.request().headers().referer });
-    await route.fulfill({ status: 200, contentType: "image/png", body: pixel });
+    requests.push(route.request().url());
+    await route.abort();
   });
   return requests;
 }
@@ -30,36 +27,30 @@ async function sendImageReply(page: Page, name: string) {
   return page.getByTestId("message-bot-bubble").last();
 }
 
-test("remote markdown images in bot replies load only after the reader asks", async ({
-  page,
-}, testInfo) => {
-  const requests = await serveFakeImages(page);
+test("a remote markdown image in a bot reply is inert text", async ({ page }, testInfo) => {
+  const requests = await watchImageHost(page);
   const bubble = await sendImageReply(page, "markdown-image");
 
-  const placeholder = bubble.getByRole("button", { name: /Quarterly chart/ });
+  const placeholder = bubble.locator('[data-remote-image="inert"]');
   await expect(placeholder).toBeVisible({ timeout: 20_000 });
+  await expect(placeholder).toContainText("Quarterly chart");
   await expect(placeholder).toContainText("images.example.test");
+  await expect(bubble.getByRole("button", { name: /Quarterly chart/ })).toHaveCount(0);
+  await captureScreenshot(page, testInfo, "markdown-remote-image-inert");
+
+  await placeholder.click();
   await expect(bubble.locator("img")).toHaveCount(0);
   expect(requests).toEqual([]);
-  await captureScreenshot(page, testInfo, "markdown-remote-image-placeholder");
-
-  await placeholder.focus();
-  await page.keyboard.press("Enter");
-  const image = bubble.getByRole("img", { name: "Quarterly chart" });
-  await expect(image).toBeVisible();
-  await expect(image).toHaveAttribute("src", remoteImage);
-  expect(requests.map((request) => request.url)).toEqual([remoteImage]);
-  expect(requests[0]?.referer).toBeUndefined();
 });
 
-test("remote markdown images load at once when the reader turned that on", async ({ page }) => {
+test("a remote markdown image stays inert when a legacy setting asked to load it", async ({
+  page,
+}) => {
   await page.addInitScript(() => localStorage.setItem("rakazo.loadRemoteImages", "on"));
-  const requests = await serveFakeImages(page);
+  const requests = await watchImageHost(page);
   const bubble = await sendImageReply(page, "markdown-image-auto");
 
-  await expect(bubble.getByRole("img", { name: "Quarterly chart" })).toBeVisible({
-    timeout: 20_000,
-  });
-  await expect(bubble.getByRole("button", { name: /Quarterly chart/ })).toHaveCount(0);
-  expect(requests.map((request) => request.url)).toContain(remoteImage);
+  await expect(bubble.locator('[data-remote-image="inert"]')).toBeVisible({ timeout: 20_000 });
+  await expect(bubble.locator("img")).toHaveCount(0);
+  expect(requests).toEqual([]);
 });

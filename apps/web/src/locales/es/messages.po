@@ -2184,6 +2184,10 @@ msgstr "Este correo no está autorizado para registrarse"
 msgid "Email verification required"
 msgstr "Se requiere verificar el correo"
 
+#: src/components/EmbeddedContentDisabled.tsx
+msgid "Embedded previews are turned off in this deployment."
+msgstr ""
+
 #: src/pages/BillingSettingsPanel.tsx
 msgid "Ends {day}"
 msgstr ""
