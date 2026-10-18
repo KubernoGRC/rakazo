@@ -19,6 +19,11 @@ export interface AccessIdentityConfig {
   audience: string;
   /** JWKS (or a `certs` document with a `keys` array) written by the host. */
   certsFile: string;
+  /**
+   * Where the browser goes after signing out, to end the proxy's own session
+   * too: a path on this server, or an https URL on the issuer's origin.
+   */
+  logoutUrl?: string;
 }
 
 export const ACCESS_ASSERTION_HEADER = "cf-access-jwt-assertion";

@@ -330,8 +330,34 @@ describe("OIDC environment", () => {
       ],
       ["an OIDC client id alone", { OIDC_CLIENT_ID: "client" }, /configured together/],
       ["messaging open signup", { MESSAGING_OPEN_SIGNUP: "true" }, /MESSAGING_OPEN_SIGNUP/],
+      ...[
+        "https://elsewhere.example.test/cdn-cgi/access/logout",
+        "http://team.access.example.test/cdn-cgi/access/logout",
+        "https://user@team.access.example.test/logout",
+        "//elsewhere.example.test/logout",
+        "/\\elsewhere.example.test/logout",
+        "javascript:alert(1)",
+        "logout",
+      ].map((url): [string, Record<string, string>, RegExp] => [
+        `a logout URL of ${url}`,
+        { ACCESS_IDENTITY_LOGOUT_URL: url },
+        /ACCESS_IDENTITY_LOGOUT_URL/,
+      ]),
     ])("fails closed at startup with %s", (_label, overrides, message) => {
       expect(() => loadEnv({ ...access, ...overrides })).toThrow(message);
+    });
+    it("accepts a logout URL on this server or on the issuer's origin", () => {
+      expect(loadEnv(access).accessIdentity?.logoutUrl).toBeUndefined();
+      expect(
+        loadEnv({ ...access, ACCESS_IDENTITY_LOGOUT_URL: "/cdn-cgi/access/logout" }).accessIdentity
+          ?.logoutUrl,
+      ).toBe("/cdn-cgi/access/logout");
+      expect(
+        loadEnv({
+          ...access,
+          ACCESS_IDENTITY_LOGOUT_URL: " https://team.access.example.test/cdn-cgi/access/logout ",
+        }).accessIdentity?.logoutUrl,
+      ).toBe("https://team.access.example.test/cdn-cgi/access/logout");
     });
     it("ignores blank OIDC settings", () => {
       expect(loadEnv({ ...access, OIDC_ISSUER: "", OIDC_NAME: " " }).accessIdentity).toBeDefined();
