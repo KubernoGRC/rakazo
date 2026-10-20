@@ -16,7 +16,9 @@ import {
 
 // Fork patch: a computer is resumed only when it matches what create would build.
 
-function expected(input: { networkMode?: string; volume?: boolean; publish?: boolean } = {}) {
+function expected(
+  input: { networkMode?: string; volume?: boolean; publish?: boolean; dns?: string[] } = {},
+) {
   return containerCreateOptions({
     name: containerNameFor("bot"),
     image: COMPUTER_IMAGE,
@@ -26,6 +28,7 @@ function expected(input: { networkMode?: string; volume?: boolean; publish?: boo
     ...(input.volume ? { homeVolume: { name: "rakazo_data", subpath: "homes/bot" } } : {}),
     networkMode: input.networkMode,
     publishControlPort: input.publish,
+    dns: input.dns,
   });
 }
 
@@ -286,7 +289,7 @@ describe("computer spec on resume", () => {
   });
 
   it("checks every field create sets", () => {
-    for (const input of [{}, { volume: true }, { publish: true }]) {
+    for (const input of [{}, { volume: true }, { publish: true }, { dns: ["192.0.2.53"] }]) {
       for (const field of Object.keys(expected(input).HostConfig)) {
         expect(
           field in SPEC_FIELDS || UNCHECKED_CREATE_FIELDS.has(field),

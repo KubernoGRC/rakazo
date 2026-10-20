@@ -185,8 +185,11 @@ export const SPEC_FIELDS: Readonly<Record<string, FieldCheck>> = {
   PortBindings: portBindings,
 };
 
-/** Create fields that grant nothing, so the check does not compare them. */
-export const UNCHECKED_CREATE_FIELDS: ReadonlySet<string> = new Set(["AutoRemove"]);
+/**
+ * Create fields this check does not compare: `AutoRemove` grants nothing, and
+ * `Dns` is compared by upstream's `computerDnsMatches` in the resume predicate.
+ */
+export const UNCHECKED_CREATE_FIELDS: ReadonlySet<string> = new Set(["AutoRemove", "Dns"]);
 
 /** Returns the fields that differ from what create would build; empty means it matches. */
 export function computerSpecMismatches(

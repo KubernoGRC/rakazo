@@ -1,6 +1,12 @@
 import type { Actor, Bot, BotSection, MessageBlock, SpaceBot } from "@rakazo/contracts";
-import { BOT_COLORS, InstructionVersionSchema } from "@rakazo/contracts";
-import { BACKGROUND_RUN_TRIGGERS, isBackgroundRunTrigger, userVisibleMessages } from "@rakazo/core";
+import { BOT_COLORS, canonicalPiProviderId, InstructionVersionSchema } from "@rakazo/contracts";
+import {
+  BACKGROUND_RUN_TRIGGERS,
+  isBackgroundRunTrigger,
+  phoneCallSettings,
+  ringingCall,
+  userVisibleMessages,
+} from "@rakazo/core";
 import type { PrismaClient } from "./client.js";
 import type { ComputerMode } from "./computers.js";
 import { ensureComputerRecord, parseComputerMode } from "./computers.js";
@@ -39,6 +45,12 @@ function rosterRunErrorId(
   return latestRun.id;
 }
 
+// Roster rows show when the chat last moved. Bot.updatedAt also moves on settings, pin,
+// section and reorder writes, so the newest message's time wins when the chat has one.
+function rosterUpdatedAt(newestMessage: { createdAt: Date } | undefined, botUpdatedAt: Date) {
+  return newestMessage?.createdAt ?? botUpdatedAt;
+}
+
 function mapBot(
   bot: {
     id: string;
@@ -67,6 +79,7 @@ function mapBot(
     thinkingLevel?: string | null;
     teamChatAmbientEnabled?: boolean;
     teamChatRules?: string;
+    fleetManagement?: boolean;
     disabledBuiltinTools?: string[];
     webhookSecretId?: string | null;
     spawnKey?: string | null;
@@ -74,6 +87,8 @@ function mapBot(
   preview = "",
   status = "idle",
   runErrorId: string | null = null,
+  updatedAt: Date = bot.updatedAt,
+  incomingCall: Bot["incomingCall"] = null,
 ): Bot {
   if (!bot.thread) {
     throw new IsolationError("Bot is missing its thread");
@@ -101,21 +116,26 @@ function mapBot(
     runErrorId,
     computerMode: bot.computer ? parseComputerMode(bot.computer.scope) : "team",
     createdAt: bot.createdAt.toISOString(),
-    updatedAt: bot.updatedAt.toISOString(),
+    updatedAt: updatedAt.toISOString(),
     voiceId: bot.voiceId ?? null,
     autoSpeak: bot.autoSpeak ?? false,
-    modelProvider: bot.modelProvider ?? null,
+    modelProvider: bot.modelProvider ? canonicalPiProviderId(bot.modelProvider) : null,
     modelId: bot.modelId ?? null,
     thinkingLevel: (bot.thinkingLevel as Bot["thinkingLevel"]) ?? null,
     teamChatAmbientEnabled: bot.teamChatAmbientEnabled ?? false,
     teamChatRules: bot.teamChatRules ?? "",
+    fleetManagement: bot.fleetManagement ?? false,
     disabledBuiltinTools: bot.disabledBuiltinTools ?? [],
     webhookConfigured: Boolean(bot.webhookSecretId),
     spawnKey: bot.spawnKey ?? null,
+    incomingCall,
   };
 }
 
-export function createRepos(prisma: PrismaClient) {
+export function createRepos(
+  prisma: PrismaClient,
+  capabilities: { phoneCallsEnabled?: boolean; phoneCallRingSeconds?: number } = {},
+) {
   async function listBotSectionsForSpaces(
     actor: Actor,
     spaceIds: string[],
@@ -160,7 +180,7 @@ export function createRepos(prisma: PrismaClient) {
             messages: {
               orderBy: { seq: "desc" },
               take: 1,
-              select: { blocks: true },
+              select: { blocks: true, createdAt: true },
             },
             runs: latestBotRunSelection,
           },
@@ -185,7 +205,7 @@ export function createRepos(prisma: PrismaClient) {
         preview: previewFromBlocks(bot.thread.messages[0]?.blocks),
         status: bot.runs[0]?.status ?? "idle",
         runErrorId: rosterRunErrorId(bot.thread.runs[0], bot.runs[0]),
-        updatedAt: bot.updatedAt.toISOString(),
+        updatedAt: rosterUpdatedAt(bot.thread.messages[0], bot.updatedAt).toISOString(),
       };
     });
   }
@@ -300,6 +320,27 @@ export function createRepos(prisma: PrismaClient) {
       }
     },
 
+    /** Delete one of the actor's sections; its bots and groups stay, unsectioned (FK SetNull). */
+    async deleteBotSection(actor: Actor, input: { sectionId: string }) {
+      return prisma.$transaction(async (tx) => {
+        // The row lock blocks concurrent moves into this section until the delete commits.
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id
+          FROM bot_sections
+          WHERE id = ${input.sectionId}
+            AND "spaceId" = ${actor.spaceId}
+            AND "userId" = ${actor.userId}
+          FOR UPDATE
+        `;
+        if (locked.length !== 1) throw new IsolationError();
+        const where = { sectionId: input.sectionId };
+        const releasedBots = await tx.bot.count({ where });
+        const releasedGroups = await tx.chatGroup.count({ where });
+        await tx.botSection.delete({ where: { id: input.sectionId } });
+        return { id: input.sectionId, releasedBots, releasedGroups };
+      });
+    },
+
     async listBots(actor: Actor, options: { archived?: boolean } = {}): Promise<Bot[]> {
       const bots = await prisma.bot.findMany({
         where: {
@@ -319,6 +360,30 @@ export function createRepos(prisma: PrismaClient) {
         },
         orderBy: [{ pinned: "desc" }, { position: "asc" }, { createdAt: "asc" }],
       });
+      const callThreadIds = capabilities.phoneCallsEnabled
+        ? bots.flatMap((bot) => (bot.thread ? [bot.thread.id] : []))
+        : [];
+      const callMessages = callThreadIds.length
+        ? await prisma.message.findMany({
+            where: {
+              threadId: { in: callThreadIds },
+              createdAt: {
+                gt: new Date(
+                  Date.now() -
+                    (capabilities.phoneCallRingSeconds ??
+                      phoneCallSettings().phoneCallRingSeconds) *
+                      1000,
+                ),
+              },
+              role: "bot",
+              clientNonce: { startsWith: "call:", endsWith: ":request" },
+            },
+            orderBy: { seq: "desc" },
+            distinct: ["threadId"],
+            select: { threadId: true, role: true, blocks: true },
+          })
+        : [];
+      const callsByThread = new Map(callMessages.map((message) => [message.threadId, message]));
       const candidateRunIds = [
         ...new Set(
           bots.flatMap((bot) =>
@@ -351,6 +416,7 @@ export function createRepos(prisma: PrismaClient) {
       return Promise.all(
         bots.map(async (bot) => {
           let messages = bot.thread?.messages ?? [];
+          const updatedAt = rosterUpdatedAt(messages[0], bot.updatedAt);
           let preview = "";
           for (let attempt = 0; attempt < 5; attempt++) {
             const windowRunIds = [
@@ -387,6 +453,12 @@ export function createRepos(prisma: PrismaClient) {
             preview,
             bot.runs[0]?.status ?? "idle",
             rosterRunErrorId(bot.thread?.runs[0], bot.runs[0]),
+            updatedAt,
+            ringingCall(
+              bot.thread && callsByThread.has(bot.thread.id)
+                ? [callsByThread.get(bot.thread.id)!]
+                : [],
+            ),
           );
         }),
       );

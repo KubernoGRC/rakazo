@@ -35,10 +35,16 @@ import {
   isTransientModelError,
   TransientModelError,
 } from "@rakazo/adapter-kit";
-import { usableModelId } from "@rakazo/contracts";
+import {
+  BOT_INSTRUCTIONS_MAX_LENGTH,
+  canonicalPiProviderId,
+  FLEET_TOOL_NAMES,
+  usableModelId,
+} from "@rakazo/contracts";
 import { abortableDelay, MISSING_TOOL_FINAL_RESPONSE_ERROR } from "@rakazo/core";
 import { getLogger } from "@rakazo/logging";
 import { isToolPauseResult } from "./approval-effect.js";
+import { automated, withAutomatedLabels } from "./automated-messages.js";
 import { connectionIdArgument, credentialArgument } from "./bot-secrets.js";
 import { DELEGATION_TOOL_NAMES } from "./builtin-tools.js";
 import { withCloudflareGatewayAuth } from "./cloudflare-ai-gateway.js";
@@ -51,9 +57,9 @@ import {
   openAiToolParametersNeedNormalization,
 } from "./openai-tool-parameters.js";
 import { PiRuntimeCredentialStore, toOAuthCredential } from "./pi-credentials.js";
-import { supplementPiModels } from "./pi-current-models.js";
 import { estimatePiImageTokens } from "./pi-image-context.js";
 import { registerLocalProvider } from "./pi-local-provider.js";
+import { applyPiModelCompatibility } from "./pi-model-compat.js";
 import { codexComputeResidency } from "./pi-oauth.js";
 import {
   OPENAI_COMPATIBLE_PROVIDER_ID,
@@ -75,9 +81,12 @@ import { recordPiTelemetryContent, withPiTelemetry, withPiTelemetrySpan } from "
 import { observedPiStream } from "./pi-usage.js";
 import type { RuntimeContextDecision } from "./runtime-context.js";
 import { createRuntimeContextPolicy, VERBATIM_TOOL_RESULTS } from "./runtime-context.js";
+import { SCHEDULE_TOOL_NAMES } from "./schedule-tools.js";
 import type { FinishedShellCommand } from "./shell-command-stream.js";
 import { deliverFinishedShells } from "./shell-command-stream.js";
+import { isThinkingSignatureMismatch, withoutThinkingBlocks } from "./thinking-signatures.js";
 import { textContentArg } from "./tool-text.js";
+import { argumentGiven } from "./update-bot-patch.js";
 
 const running = new Map<string, { controller: AbortController; work: Promise<void> }>();
 interface ToolCallBudget {
@@ -94,7 +103,7 @@ const toolCallBudgetsByRun = new Map<string, ToolCallBudget>();
 let catalogModelsCache: Models | undefined;
 function catalogModels(): Models {
   catalogModelsCache ??= registerOpenAiCompatibleCatalog(
-    registerLocalProvider(supplementPiModels(builtinModels())),
+    registerLocalProvider(applyPiModelCompatibility(builtinModels())),
   );
   return catalogModelsCache;
 }
@@ -104,10 +113,14 @@ const MODEL_PROVIDER_RETRY_DELAYS_MS = [2_000, 8_000, 20_000] as const;
 // instead of taking another assistant turn. A bounded internal follow-up keeps
 // that provider quirk from making a long task look complete after one step.
 const MAX_SILENT_TOOL_CONTINUATIONS = 3;
-const SILENT_TOOL_CONTINUATION_PROMPT =
-  "Continue the original task from the latest tool result. Do not stop after a tool call; use any remaining tools needed, then give the user the final answer.";
-const SILENT_ALLOWED_TOOL_CONTINUATION_PROMPT =
-  "Continue the original task from the latest tool result. If you were instructed to stay silent when there is nothing to report, follow that instruction for the entire final assistant reply. Otherwise use any remaining tools needed, then give the user the final answer.";
+// Sent in the user's role, so marked as automated: models took the old wording for the
+// user telling them never to stop, and kept going instead of asking.
+export const SILENT_TOOL_CONTINUATION_PROMPT = automated(
+  "Your last turn ended right after a tool result, without a reply. Continue the original task from the latest tool result. If you need information or a decision from the user, ask them instead of guessing; otherwise use any remaining tools needed, then give the user the final answer.",
+);
+export const SILENT_ALLOWED_TOOL_CONTINUATION_PROMPT = automated(
+  "Your last turn ended right after a tool result, without a reply. Continue the original task from the latest tool result. If you need information or a decision from the user, ask them instead of guessing, even if you were told to stay silent. Otherwise, if you were instructed to stay silent when there is nothing to report, follow that instruction for the entire final assistant reply; if not, use any remaining tools needed, then give the user the final answer.",
+);
 
 // Shown as a failed-run error, not an assistant message. Asking the user to
 // continue stores that sentence as the reply, and the next "continue" runs
@@ -401,7 +414,8 @@ export class PiAgentRuntime implements AgentRuntime {
         agent = new Agent({
           sessionId: conversationSessionId(request.threadId, request.botId),
           steeringMode: "all",
-          streamFn: (_m, ctx, options) => fallbackAwareModelStream(fallbackState, ctx, options),
+          streamFn: (_m, ctx, options) =>
+            fallbackAwareModelStream(fallbackState, ctx, withAutomatedLabels(options)),
           getApiKey: hasBackups
             ? async () => activeStreamTarget.credentials?.accessToken ?? activeStreamTarget.apiKey
             : async () => apiKey,
@@ -719,7 +733,9 @@ export function resolveRuntimeModel(modelConfig: AgentRunRequest["model"]): {
   /** Live credential store; OAuth refreshes swap the credential mid-run. */
   credentials: PiRuntimeCredentialStore | undefined;
 } {
-  const provider = modelConfig.provider === "scripted" ? "openrouter" : modelConfig.provider;
+  const provider = canonicalPiProviderId(
+    modelConfig.provider === "scripted" ? "openrouter" : modelConfig.provider,
+  );
   const envDefaultModel = process.env.PI_DEFAULT_MODEL?.trim();
   const envDefaultProvider = process.env.PI_DEFAULT_PROVIDER?.trim() || "openrouter";
   const requestedId =
@@ -783,7 +799,7 @@ export function modelsForRequest(
   const store = credentials ?? credentialStoreForRequest(request, provider);
   if (store) {
     return registerOpenAiCompatibleCatalog(
-      registerLocalProvider(supplementPiModels(builtinModels({ credentials: store }))),
+      registerLocalProvider(applyPiModelCompatibility(builtinModels({ credentials: store }))),
     );
   }
   if (
@@ -792,7 +808,7 @@ export function modelsForRequest(
     request.model.id.trim()
   ) {
     const models = registerOpenAiCompatibleCatalog(
-      registerLocalProvider(supplementPiModels(builtinModels())),
+      registerLocalProvider(applyPiModelCompatibility(builtinModels())),
     );
     return registerOpenAiCompatibleRuntime(models, {
       modelId: request.model.id,
@@ -890,6 +906,14 @@ export function describeToolActivity(toolName: string, args: unknown): string {
   if (toolName === "computer_act") return "Operating the computer";
   if (toolName === "run_subagent") return `Delegating to helper: ${detail(record.name)}`;
   if (toolName === "create_space") return `Creating space: ${detail(record.name)}`;
+  if (toolName === "list_fleet") return "Checking the fleet";
+  if (toolName === "create_group") return `Creating group: ${detail(record.name)}`;
+  if (toolName === "update_group")
+    return `Updating group: ${detail(record.group_name ?? record.name)}`;
+  if (toolName === "organize_bot") return "Organizing the sidebar";
+  if (toolName === "set_child_instructions") return "Rewriting a bot's instructions";
+  if (toolName === "set_child_bot_model") return "Setting a bot's model";
+  if (toolName === "create_child_routine") return `Scheduling routine: ${detail(record.name)}`;
   if (toolName === "remember") return "Saving a note to memory";
   if (toolName === "save_shared_memory") return `Saving shared memory: ${detail(record.path)}`;
   if (toolName === "web_search") return `Searching the web: ${detail(record.query)}`;
@@ -1051,6 +1075,11 @@ function toAgentTool(tool: ConnectorTool, host: ToolHost, exposedName: string): 
     name: exposedName,
     label: tool.name,
     description: tool.description,
+    // Pi runs a turn's tool calls concurrently by default, so a batch that
+    // creates a routine and lists routines can read the list before the row
+    // exists. Pi runs the whole batch in order when any call in it is
+    // sequential, which is what the schedule tools need.
+    ...(SCHEDULE_TOOL_NAMES.has(tool.name) ? { executionMode: "sequential" as const } : {}),
     parameters: parametersFor(tool),
     prepareArguments: (args: unknown) => {
       const raw = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
@@ -1125,24 +1154,14 @@ function toAgentTool(tool: ConnectorTool, host: ToolHost, exposedName: string): 
         return {
           name: String(raw.name ?? ""),
           title: raw.title ? String(raw.title) : "",
+          description: raw.description ? String(raw.description) : "",
           instructions: raw.instructions ? String(raw.instructions) : "",
           prompt: raw.prompt ? String(raw.prompt) : "",
           computer_mode: raw.computer_mode ? String(raw.computer_mode) : "",
         };
       }
-      if (tool.name === "update_bot") {
-        const notifyRaw = raw.notifyOnFinish ?? raw.notify_on_finish;
-        return {
-          ...(raw.name !== undefined ? { name: String(raw.name) } : {}),
-          ...(raw.title !== undefined ? { title: String(raw.title) } : {}),
-          ...(raw.description !== undefined ? { description: String(raw.description) } : {}),
-          ...(raw.color !== undefined ? { color: String(raw.color) } : {}),
-          ...(raw.artifact_id !== undefined ? { artifact_id: String(raw.artifact_id) } : {}),
-          ...(raw.use_attached_image !== undefined
-            ? { use_attached_image: raw.use_attached_image }
-            : {}),
-          ...(notifyRaw !== undefined ? { notifyOnFinish: notifyRaw } : {}),
-        };
+      if (tool.name === "update_bot" || FLEET_TOOL_NAMES.some((name) => name === tool.name)) {
+        return prepareFleetArguments(tool.name, raw);
       }
       if (tool.name === "create_space") {
         return { name: String(raw.name ?? "") };
@@ -1497,7 +1516,8 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
       );
     },
     sessionId: conversationSessionId(host.request.threadId, host.request.botId, agentId),
-    streamFn: (_m, ctx, options) => fallbackAwareModelStream(retryState, ctx, options),
+    streamFn: (_m, ctx, options) =>
+      fallbackAwareModelStream(retryState, ctx, withAutomatedLabels(options)),
     getApiKey: async () =>
       hasBackups
         ? (selectedModel.credentials?.accessToken ?? selectedModel.apiKey)
@@ -1512,6 +1532,8 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
         `You are a Rakazo subagent named "${name}".`,
         "You run inside the parent bot's turn — you are not a separate bot chat.",
         "Complete the task and return a concise result. Do not spawn bots or further subagents.",
+        "Your task comes from the parent bot, not from the human user, and you cannot talk to the user: report your result back to the parent bot.",
+        "Messages marked as automated come from Rakazo, not from the user.",
         extra,
       ]
         .filter(Boolean)
@@ -1578,7 +1600,9 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
     const onAbort = () => nested.abort();
     host.signal.addEventListener("abort", onAbort);
     try {
-      await nested.prompt(task || "Complete the delegated task.");
+      await nested.prompt(
+        `Task from the parent bot (not from the user):\n${task || "Complete the delegated task."}`,
+      );
     } finally {
       try {
         await nested.waitForIdle();
@@ -1621,7 +1645,8 @@ async function executeSubagent(host: ToolHost, executionId: string, args: Record
       status: "completed",
       result: clipped,
     });
-    return clipped;
+    // The parent bot reads this as a tool result; say plainly that it is the helper talking.
+    return `Result from your helper "${name}" (not a message from the user):\n${clipped}`;
   } catch (error) {
     const message = sanitizeError(error instanceof Error ? error.message : String(error));
     host.queue.push({
@@ -1735,6 +1760,7 @@ function builtinParameters(tool: ConnectorTool) {
     return Type.Object({
       name: Type.String(),
       title: Type.Optional(Type.String()),
+      description: Type.Optional(Type.String()),
       instructions: Type.Optional(Type.String()),
       prompt: Type.Optional(Type.String()),
       computer_mode: Type.Optional(stringEnum(["team", "dedicated"], {})),
@@ -1749,6 +1775,53 @@ function builtinParameters(tool: ConnectorTool) {
       artifact_id: Type.Optional(Type.String()),
       use_attached_image: Type.Optional(Type.Boolean()),
       notifyOnFinish: Type.Optional(Type.Boolean()),
+      bot_id: Type.Optional(Type.String()),
+    });
+  }
+  if (tool.name === "list_fleet") return Type.Object({ bot_id: Type.Optional(Type.String()) });
+  if (tool.name === "create_group") {
+    return Type.Object({
+      name: Type.String({ minLength: 1 }),
+      bot_ids: Type.Optional(Type.Array(Type.String())),
+      bot_names: Type.Optional(Type.Array(Type.String())),
+    });
+  }
+  if (tool.name === "update_group") {
+    return Type.Object({
+      group_id: Type.Optional(Type.String()),
+      group_name: Type.Optional(Type.String()),
+      name: Type.Optional(Type.String({ minLength: 1 })),
+      add_bot_ids: Type.Optional(Type.Array(Type.String())),
+      remove_bot_ids: Type.Optional(Type.Array(Type.String())),
+    });
+  }
+  if (tool.name === "organize_bot") {
+    return Type.Object({
+      bot_id: Type.Optional(Type.String()),
+      bot_name: Type.Optional(Type.String()),
+      group_id: Type.Optional(Type.String()),
+      group_name: Type.Optional(Type.String()),
+      section: Type.Optional(Type.String({ minLength: 1 })),
+      clear_section: Type.Optional(Type.Boolean()),
+      pinned: Type.Optional(Type.Boolean()),
+    });
+  }
+  if (tool.name === "set_child_instructions") {
+    return Type.Object({
+      bot_id: Type.Optional(Type.String()),
+      bot_name: Type.Optional(Type.String()),
+      instructions: Type.String({ minLength: 1, maxLength: BOT_INSTRUCTIONS_MAX_LENGTH }),
+      expected_version: Type.String(),
+    });
+  }
+  if (tool.name === "set_child_bot_model") {
+    return Type.Object({
+      bot_id: Type.Optional(Type.String()),
+      bot_name: Type.Optional(Type.String()),
+      provider: Type.Optional(Type.String()),
+      model: Type.Optional(Type.String()),
+      thinking_level: Type.Optional(Type.String()),
+      clear: Type.Optional(Type.Boolean()),
     });
   }
   if (tool.name === "create_space") {
@@ -1959,6 +2032,57 @@ function fieldOptions(definition: Record<string, unknown>): FieldOptions {
   return typeof definition.description === "string" && definition.description
     ? { description: definition.description }
     : {};
+}
+
+const FLEET_STRING_ARGS = [
+  "bot_id",
+  "bot_name",
+  "group_id",
+  "group_name",
+  "name",
+  "title",
+  "description",
+  "color",
+  "artifact_id",
+  "provider",
+  "model",
+  "thinking_level",
+  "section",
+  "instructions",
+  "expected_version",
+] as const;
+const FLEET_LIST_ARGS = ["bot_ids", "bot_names", "add_bot_ids", "remove_bot_ids"] as const;
+const FLEET_FLAG_ARGS = ["pinned", "clear_section", "clear", "use_attached_image"] as const;
+
+/**
+ * Keeps only the fleet and `update_bot` arguments a model sent, coerced to their declared types.
+ * Providers send omitted optional fields as null or blank, so those stay absent: `String(null)`
+ * would otherwise become the text "null".
+ */
+export function prepareFleetArguments(
+  toolName: string,
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  // A routine's timing fields are numbers and one-of branches; only the blanks are dropped.
+  if (toolName === "create_child_routine") {
+    return Object.fromEntries(Object.entries(raw).filter(([, value]) => argumentGiven(value)));
+  }
+  const out: Record<string, unknown> = {};
+  for (const key of FLEET_STRING_ARGS) {
+    // update_bot never carries instructions; set_child_instructions does, behind a card.
+    if (toolName === "update_bot" && (key === "instructions" || key === "expected_version"))
+      continue;
+    if (argumentGiven(raw[key])) out[key] = String(raw[key]);
+  }
+  for (const key of FLEET_LIST_ARGS) {
+    if (Array.isArray(raw[key])) out[key] = raw[key].map(String);
+  }
+  for (const key of FLEET_FLAG_ARGS) {
+    if (argumentGiven(raw[key])) out[key] = raw[key];
+  }
+  const notify = raw.notifyOnFinish ?? raw.notify_on_finish;
+  if (argumentGiven(notify)) out.notifyOnFinish = notify;
+  return out;
 }
 
 /** Use a plain string enum: some gateways discard the allowed values from anyOf/const unions. */
@@ -2307,6 +2431,8 @@ interface FallbackStreamState {
   nextIndex: number;
   onSwitch(target: RuntimeModelTarget): Promise<void>;
   isProviderFailure(message: AssistantMessage): boolean;
+  /** Set once a provider rejected replayed thinking signatures; see thinking-signatures.ts. */
+  dropThinkingBlocks?: boolean;
   stream(
     target: RuntimeModelTarget,
     context: TranscriptContext,
@@ -2409,6 +2535,10 @@ function fallbackAwareModelStream(
   const output = new AssistantMessageEventStream();
   let lastPartial: AssistantMessage | undefined;
   const signal = options?.signal ? AbortSignal.any([state.signal, options.signal]) : state.signal;
+  // Once a signature is rejected, requests omit those thinking blocks. Backup fit
+  // must use that same context, or a usable backup can be skipped on discarded text.
+  const requestContext = () =>
+    state.dropThinkingBlocks ? withoutThinkingBlocks(context) : context;
   const signalAborted = () => signal.aborted;
   const finishWithThrownError = (target: RuntimeModelTarget, error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -2480,7 +2610,7 @@ function fallbackAwareModelStream(
         if (
           !fallbackSupportsContext(
             candidate,
-            context,
+            requestContext(),
             options,
             state.request.model.thinkingLevel,
             state.request.tools,
@@ -2518,7 +2648,7 @@ function fallbackAwareModelStream(
         const reasoning = thinkingLevel === "off" ? undefined : thinkingLevel;
         stream = state.stream(
           target,
-          context,
+          requestContext(),
           state.request.fallbackModels?.length ? { ...options, apiKey, reasoning } : options,
         );
       } catch (error) {
@@ -2530,6 +2660,20 @@ function fallbackAwareModelStream(
           if (event.type === "error") {
             let terminalEvent = event;
             const hasTerminalPartialOutput = assistantHasPartialOutput(event.error);
+            if (
+              !sawPartialOutput &&
+              !hasTerminalPartialOutput &&
+              event.reason === "error" &&
+              !signalAborted() &&
+              !state.dropThinkingBlocks &&
+              isThinkingSignatureMismatch(event.error.errorMessage)
+            ) {
+              // Later calls in this run skip the stale thinking up front instead of failing first.
+              state.dropThinkingBlocks = true;
+              buffered = [];
+              restart = true;
+              break;
+            }
             if (
               !sawPartialOutput &&
               !hasTerminalPartialOutput &&

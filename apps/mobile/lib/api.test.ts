@@ -92,6 +92,77 @@ describe("mobile API authentication", () => {
     await restoreSessionToken("");
   });
 
+  describe.each([signIn, signUp])("email auth errors", (authenticate) => {
+    it.each([
+      [429, "", "Too many attempts. Try again in a few minutes."],
+      [
+        500,
+        "<html>Internal Server Error</html>",
+        "The server had a problem. Try again in a moment.",
+      ],
+      [400, "not json", "The server had a problem. Try again in a moment."],
+      [200, "not json", "The server had a problem. Try again in a moment."],
+      [500, "{}", "The server had a problem. Try again in a moment."],
+      [503, "{}", "Could not reach the server"],
+      [502, "<html>Bad gateway</html>", "Could not reach the server"],
+      [504, "{}", "Could not reach the server"],
+      [403, '{"code":"PASSWORD_AUTH_DISABLED"}', "Password sign-in is turned off on this server"],
+      [403, '{"message":"Registration is closed"}', "Registration is closed"],
+      [
+        422,
+        '{"message":"User already exists. Use another email."}',
+        "User already exists. Use another email.",
+      ],
+      [
+        429,
+        '{"message":"Please wait before signing in again"}',
+        "Please wait before signing in again",
+      ],
+      [500, '{"message":"DatabaseException"}', "The server had a problem. Try again in a moment."],
+      [400, "{}", "Could not continue"],
+    ])("maps HTTP %s with body %s", async (status, body, message) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(body, { status })),
+      );
+      await expect(authenticate("new@example.test", "password", "New User")).rejects.toThrow(
+        message,
+      );
+      expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
+    });
+
+    it("maps network failures", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Network request failed")));
+      await expect(authenticate("new@example.test", "password", "New User")).rejects.toThrow(
+        "Could not reach the server",
+      );
+    });
+
+    it.each(["save", "clear"])("explains device storage failures during %s", async (step) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => jsonResponse({ token: "fake-token" })),
+      );
+      const failure = new Error("SecureStoreException: storage unavailable");
+      if (step === "clear") vi.mocked(SecureStore.deleteItemAsync).mockRejectedValue(failure);
+      vi.mocked(SecureStore.setItemAsync).mockRejectedValue(failure);
+      await expect(authenticate("new@example.test", "password", "New User")).rejects.toThrow(
+        "Could not save your sign-in on this device. Try again.",
+      );
+    });
+
+    it("preserves human storage error messages", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => jsonResponse({ token: "fake-token" })),
+      );
+      vi.mocked(SecureStore.setItemAsync).mockRejectedValue(new Error("Device storage is full"));
+      await expect(authenticate("new@example.test", "password", "New User")).rejects.toThrow(
+        "Device storage is full",
+      );
+    });
+  });
+
   it("persists a successful sign-in token and sends the native origin", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ token: "session-token" }));
     vi.stubGlobal("fetch", fetchMock);
@@ -1070,7 +1141,7 @@ describe("mobile API authentication", () => {
     );
 
     await expect(signIn("ada@example.com", "correct horse")).rejects.toThrow(
-      "Could not clear the previous space",
+      "Could not save your sign-in on this device. Try again.",
     );
     expect(SecureStore.setItemAsync).not.toHaveBeenCalledWith(
       "rakazo.session_token",
@@ -2897,6 +2968,60 @@ describe("mobile thread event reduction", () => {
     expect(waiting?.activeRuns?.[0]?.status).toBe("waiting_takeover");
     expect(waiting?.messages.some((message) => message.id.startsWith("progress:"))).toBe(false);
     expect(waiting?.cursor).toBe(10);
+
+    const released = applyMobileThreadEvent(
+      {
+        ...initial,
+        run: { id: "run-1", status: "waiting_takeover" },
+        activeRuns: [
+          { id: "run-1", status: "waiting_takeover" },
+          { id: "run-2", status: "waiting_takeover" },
+        ],
+      },
+      {
+        type: "computer.takeover.released",
+        runId: "run-1",
+        seq: 11,
+      },
+    );
+    expect(released?.run?.status).toBe("queued");
+    expect(released?.activeRuns).toEqual([
+      { id: "run-1", status: "queued" },
+      { id: "run-2", status: "waiting_takeover" },
+    ]);
+    expect(released?.cursor).toBe(11);
+
+    const running = applyMobileThreadEvent(
+      {
+        ...snapshot(),
+        run: { id: "run-1", status: "running" },
+        activeRuns: [{ id: "run-1", status: "running" }],
+      },
+      { type: "computer.takeover.released", runId: "run-1", seq: 12 },
+    );
+    expect(running?.run?.status).toBe("running");
+    expect(running?.activeRuns?.[0]?.status).toBe("running");
+  });
+
+  it("lets a newer refresh replace waiting_takeover with queued", () => {
+    const waiting: MobileSnapshot = {
+      ...snapshot(),
+      cursor: 10,
+      run: { id: "run-1", status: "waiting_takeover" },
+      activeRuns: [{ id: "run-1", status: "waiting_takeover" }],
+    };
+    const refreshed: MobileSnapshot = {
+      ...snapshot(),
+      cursor: 12,
+      run: { id: "run-1", status: "queued" },
+      activeRuns: [{ id: "run-1", status: "queued" }],
+    };
+
+    const next = mergeMobileSnapshot(waiting, refreshed);
+
+    expect(next.cursor).toBe(12);
+    expect(next.run?.status).toBe("queued");
+    expect(next.activeRuns?.[0]?.status).toBe("queued");
   });
 
   it("inserts a peer takeover run that was absent from the open snapshot", () => {

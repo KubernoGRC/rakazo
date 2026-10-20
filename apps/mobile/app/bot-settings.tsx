@@ -1,5 +1,6 @@
 import type { ComputerMode, ThinkingLevel } from "@rakazo/contracts";
 import {
+  BOT_AVATAR_SHAPE_COUNT,
   BOT_COLORS,
   BOT_DESCRIPTION_MAX_LENGTH,
   BOT_INSTRUCTIONS_MAX_LENGTH,
@@ -9,6 +10,7 @@ import {
 } from "@rakazo/contracts";
 import {
   connectedModelChoices,
+  credentialForModel,
   modelOptionKey,
   parseModelOptionKey,
   resolveSelectableModelId,
@@ -26,8 +28,16 @@ import { NativeActionButton } from "../components/native-action-button";
 import { NativeSwitch } from "../components/native-switch";
 import { NativeSymbol } from "../components/native-symbol";
 import { Chevron } from "../components/row-accessories";
+import { SettingsFooter } from "../components/settings-group";
 import type { MobileBot, MobileMe, MobileModel, MobileModelCredential } from "../lib/api";
 import { rpc } from "../lib/api";
+import {
+  avatarColor,
+  avatarShape,
+  isAvatarPhoto,
+  withAvatarColor,
+  withAvatarShape,
+} from "../lib/bot-avatar-edit";
 import { deviceVoices, setVoiceForBot, voiceForBot, voiceLabel } from "../lib/bot-voices";
 import { COMPUTER_LIFECYCLE_TIMEOUT_MS } from "../lib/computer";
 import { loadDeviceVoiceEnabled } from "../lib/device-voice";
@@ -56,6 +66,7 @@ export default function BotSettingsScreen() {
   const [modelKey, setModelKey] = useState("");
   const [thinkingLevel, setThinkingLevel] = useState("");
   const [autoSpeak, setAutoSpeak] = useState(false);
+  const [fleetManagement, setFleetManagement] = useState(false);
   const [credentials, setCredentials] = useState<MobileModelCredential[]>([]);
   const [catalog, setCatalog] = useState<MobileModel[]>([]);
   const [me, setMe] = useState<MobileMe | null>(null);
@@ -88,6 +99,7 @@ export default function BotSettingsScreen() {
         );
         setThinkingLevel(next.thinkingLevel ?? "");
         setAutoSpeak(next.autoSpeak);
+        setFleetManagement(next.fleetManagement);
       })
       .catch((err) => setError(errorText(err, t("Could not load bot"))));
   }, [botId]);
@@ -136,9 +148,7 @@ export default function BotSettingsScreen() {
             resolveSelectableModelId(catalog, entry.provider, entry.id) === effectiveModelId,
         )
       : undefined;
-  const effectiveCredential = credentials.find(
-    (entry) => entry.provider === effectiveProvider && entry.modelId === effectiveModelId,
-  );
+  const effectiveCredential = credentialForModel(credentials, effectiveProvider, effectiveModelId);
   const thinkingOptions = (
     effectiveCredential?.thinkingLevels ??
     effectiveEntry?.thinkingLevels ??
@@ -392,6 +402,17 @@ export default function BotSettingsScreen() {
         {bot ? (
           <View style={{ alignItems: "center", marginBottom: 24 }}>
             <BotAvatar color={color} identity={bot.id} size={64} status={bot.status} />
+            {isAvatarPhoto(color) ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setColor(avatarColor(bot.color))}
+                style={{ marginTop: 12 }}
+              >
+                <Text style={{ color: tokens.mutedForeground, fontSize: 15 }}>
+                  {t("Remove photo")}
+                </Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
         <Text style={{ color: tokens.mutedForeground, fontSize: 14 }}>{t("Name")}</Text>
@@ -460,19 +481,64 @@ export default function BotSettingsScreen() {
               key={option}
               accessibilityRole="radio"
               accessibilityLabel={t("Color {number}", { number: index + 1 })}
-              accessibilityState={{ checked: color === option }}
-              onPress={() => setColor(option)}
+              accessibilityState={{ checked: avatarColor(color) === option }}
+              onPress={() => setColor((current) => withAvatarColor(current, option))}
               style={{
                 width: 36,
                 height: 36,
                 borderRadius: 18,
                 backgroundColor: option,
                 borderWidth: 3,
-                borderColor: color === option ? tokens.foreground : "transparent",
+                borderColor: avatarColor(color) === option ? tokens.foreground : "transparent",
               }}
             />
           ))}
         </ScrollView>
+        {bot && !isAvatarPhoto(color) ? (
+          <>
+            <Text style={{ color: tokens.mutedForeground, marginTop: 16, fontSize: 14 }}>
+              {t("Shape")}
+            </Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ gap: 10, marginTop: 8 }}
+              accessibilityRole="radiogroup"
+            >
+              <Pressable
+                accessibilityRole="radio"
+                accessibilityLabel={t("Default")}
+                accessibilityState={{ checked: avatarShape(color) === null }}
+                onPress={() => setColor((current) => avatarColor(current))}
+                style={{
+                  padding: 4,
+                  borderRadius: 14,
+                  borderWidth: 2,
+                  borderColor: avatarShape(color) === null ? tokens.foreground : "transparent",
+                }}
+              >
+                <BotAvatar color={avatarColor(color)} identity={bot.id} size={36} />
+              </Pressable>
+              {Array.from({ length: BOT_AVATAR_SHAPE_COUNT }, (_, shape) => (
+                <Pressable
+                  key={shape}
+                  accessibilityRole="radio"
+                  accessibilityLabel={t("Shape {number}", { number: shape + 1 })}
+                  accessibilityState={{ checked: avatarShape(color) === shape }}
+                  onPress={() => setColor((current) => withAvatarShape(current, shape))}
+                  style={{
+                    padding: 4,
+                    borderRadius: 14,
+                    borderWidth: 2,
+                    borderColor: avatarShape(color) === shape ? tokens.foreground : "transparent",
+                  }}
+                >
+                  <BotAvatar color={withAvatarShape(color, shape)} identity={bot.id} size={36} />
+                </Pressable>
+              ))}
+            </ScrollView>
+          </>
+        ) : null}
         <ComputerModePicker value={computerMode} onChange={setComputerMode} />
         <View style={[styles.row, { marginTop: 20 }]}>
           <Text style={[styles.rowLabel, { color: tokens.mutedForeground }]}>
@@ -484,6 +550,32 @@ export default function BotSettingsScreen() {
             value={autoSpeak}
           />
         </View>
+        <View style={[styles.row, { marginTop: 20 }]}>
+          <Text style={[styles.rowLabel, { color: tokens.mutedForeground }]}>
+            {t("Fleet management")}
+          </Text>
+          <NativeSwitch
+            accessibilityLabel={t("Fleet management")}
+            disabled={pending}
+            onValueChange={(value) => {
+              if (!botId || pending) return;
+              setFleetManagement(value);
+              setPending(true);
+              void rpc("bots/update", { botId, fleetManagement: value })
+                .catch((err) => {
+                  setFleetManagement(!value);
+                  setError(errorText(err, t("Could not save bot")));
+                })
+                .finally(() => setPending(false));
+            }}
+            value={fleetManagement}
+          />
+        </View>
+        <SettingsFooter>
+          {t(
+            "Lets this bot organize, retune and schedule the bots it creates. You approve each change.",
+          )}
+        </SettingsFooter>
         {deviceVoiceEnabled ? (
           voiceError ? (
             <Pressable

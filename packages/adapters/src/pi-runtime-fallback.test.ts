@@ -50,7 +50,6 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
   },
 }));
 
-vi.mock("./pi-current-models.js", () => ({ supplementPiModels: (models: unknown) => models }));
 vi.mock("./pi-local-provider.js", () => ({ registerLocalProvider: (models: unknown) => models }));
 vi.mock("./pi-openai-compatible-provider.js", () => ({
   OPENAI_COMPATIBLE_PROVIDER_ID: "openai-compatible",
@@ -1121,9 +1120,11 @@ describe("Pi runtime ordered model fallback", () => {
 
       expect(providerState.stream).toHaveBeenCalledTimes(1);
       expect(appendMessage).toHaveBeenCalledWith(
-        emptyTerminal
-          ? { ...targetMessage, content: [{ type: "text", text: "partial" }] }
-          : targetMessage,
+        expect.objectContaining(
+          emptyTerminal
+            ? { ...targetMessage, content: [{ type: "text", text: "partial" }] }
+            : targetMessage,
+        ),
       );
       expect(
         events
@@ -1679,5 +1680,108 @@ describe("Pi runtime ordered model fallback", () => {
     expect(resolveFallbackModel).toHaveBeenNthCalledWith(2, backupB.provider, backupB.id);
     expect(requestKeys).toEqual(["backup-only-key"]);
     expect(JSON.stringify(events)).not.toContain("backup-only-key");
+  });
+});
+
+describe("Pi runtime thinking blocks bound to a different conversation", () => {
+  const mismatch =
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"Upstream request failed: [invalid_request_error] messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation."}}';
+  const thinkingParts = (context: Context) =>
+    context.messages.flatMap((entry) =>
+      entry.role === "assistant" ? entry.content.filter((part) => part.type === "thinking") : [],
+    );
+
+  it("retries once without earlier thinking blocks and keeps dropping them for the run", async () => {
+    providerState.stream
+      .mockImplementationOnce(() =>
+        stream(
+          primary,
+          message(
+            primary,
+            [
+              { type: "thinking", thinking: "Plan the write.", thinkingSignature: "sig" },
+              { type: "toolCall", id: "call-1", name: "write_effect", arguments: { value: "a" } },
+            ],
+            "toolUse",
+          ),
+        ),
+      )
+      .mockImplementationOnce(() => stream(primary, message(primary, [], "error", mismatch)))
+      .mockImplementationOnce(() =>
+        stream(
+          primary,
+          message(
+            primary,
+            [{ type: "toolCall", id: "call-2", name: "write_effect", arguments: { value: "b" } }],
+            "toolUse",
+          ),
+        ),
+      )
+      .mockImplementation(() =>
+        stream(primary, message(primary, [{ type: "text", text: "Done." }], "stop")),
+      );
+    const events = await run(request());
+    expect(events.at(-1)).toEqual({ type: "done", text: "Done." });
+    const contexts = providerState.stream.mock.calls.map(([, context]) => context as Context);
+    expect(contexts).toHaveLength(4);
+    expect(thinkingParts(contexts[1]!)).toHaveLength(1);
+    expect(thinkingParts(contexts[2]!)).toEqual([]);
+    expect(thinkingParts(contexts[3]!)).toEqual([]);
+    expect(
+      contexts[2]!.messages.some(
+        (entry) =>
+          entry.role === "assistant" && entry.content.some((part) => part.type === "toolCall"),
+      ),
+    ).toBe(true);
+    expect(providerState.delay).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the error when the retry without thinking blocks fails the same way", async () => {
+    providerState.stream.mockImplementation(() =>
+      stream(primary, message(primary, [], "error", mismatch)),
+    );
+    await expect(run(request())).rejects.toThrow("bound to a different conversation");
+    expect(providerState.stream).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses a backup that fits only after discarded thinking blocks are omitted", async () => {
+    const thinking = "x".repeat(12_000);
+    const input = request([
+      { provider: backupA.provider, id: backupA.id, apiKey: "small-backup-key", maxTokens: 512 },
+    ]);
+    providerState.stream
+      .mockImplementationOnce(() =>
+        stream(
+          primary,
+          message(
+            primary,
+            [
+              { type: "thinking", thinking, thinkingSignature: "sig" },
+              { type: "toolCall", id: "call-1", name: "write_effect", arguments: { value: "a" } },
+            ],
+            "toolUse",
+          ),
+        ),
+      )
+      .mockImplementationOnce(() => stream(primary, message(primary, [], "error", mismatch)))
+      .mockImplementation((target: Model<"openai-completions">) =>
+        target.provider === primary.provider
+          ? stream(target, message(target, [], "error", "429 rate_limit_error"))
+          : stream(target, message(target, [{ type: "text", text: "backup answer" }], "stop")),
+      );
+
+    const events = await run(input);
+
+    expect(events.at(-1)).toEqual({ type: "done", text: "backup answer" });
+    expect(
+      providerState.stream.mock.calls.map(
+        ([target]) => (target as Model<"openai-completions">).provider,
+      ),
+    ).toEqual([primary.provider, primary.provider, primary.provider, backupA.provider]);
+    const contexts = providerState.stream.mock.calls.map(([, context]) => context as Context);
+    expect(thinkingParts(contexts[1]!)).toHaveLength(1);
+    expect(thinkingParts(contexts[2]!)).toEqual([]);
+    expect(thinkingParts(contexts[3]!)).toEqual([]);
+    expect(providerState.delay).not.toHaveBeenCalled();
   });
 });

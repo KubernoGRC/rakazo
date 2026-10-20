@@ -14,6 +14,7 @@ import {
   isConversationalRun,
   isSecretAskBlock,
   messagingChannelId,
+  releasedTakeoverComputerBlocks,
   resolveAskChoice,
   sanitizeJsonValue,
 } from "@rakazo/core";
@@ -481,7 +482,7 @@ export async function sendUserMessage(
             userId: input.userId,
             // External deliveries retain their origin and never become app follow-ups.
             runId: held ? null : busy.id,
-            ...(held && (input.trigger === "messaging" || input.trigger === "webhook")
+            ...(input.trigger === "messaging" || input.trigger === "webhook"
               ? { originTrigger: input.trigger }
               : {}),
             ...(input.modelPin
@@ -1181,9 +1182,38 @@ export async function finalizeComputerControlRelease(
       select: { thread: { select: { id: true } } },
     });
     if (!bot?.thread) return { threadId: null, seq: null, runId };
+
+    // The card lives on the run thread. A group run is not the bot's own thread.
+    // Computer row is already locked above. Lock the thread after that, before
+    // reading the card. Chat send (#1406) commits its thread lock in
+    // sendUserMessage / sendThreadMessage before it calls release, so it does
+    // not hold the thread while this transaction holds the computer. Keeping
+    // computer-then-thread matches that split and this function's existing order.
+    let runThreadId: string | null = null;
+    if (input.runId) {
+      const waiting = await tx.run.findUnique({
+        where: { id: input.runId },
+        select: { threadId: true, status: true },
+      });
+      runThreadId = waiting?.threadId ?? null;
+      if (runThreadId) {
+        await tx.$queryRaw`SELECT id FROM threads WHERE id = ${runThreadId} FOR UPDATE`;
+      }
+      // A stopped run cannot write history, and the release must still clear the lease.
+      if (runThreadId && waiting?.status !== "cancelled") {
+        await settleReleasedTakeoverCardsInTransaction(tx, {
+          spaceId: input.spaceId,
+          threadId: runThreadId,
+          botId: input.botId,
+          runId: input.runId,
+          reason: input.reason,
+        });
+      }
+    }
+
     const event = await appendEventInTransaction(tx, {
       spaceId: input.spaceId,
-      threadId: bot.thread.id,
+      threadId: runThreadId ?? bot.thread.id,
       botId: input.botId,
       runId: runId ?? undefined,
       type: "computer.takeover.released",
@@ -1201,6 +1231,54 @@ export async function finalizeComputerControlRelease(
     await notifyRealtime(realtime, committed.threadId, committed.seq);
   }
   return { runId: committed.runId };
+}
+
+/**
+ * Clear a pending takeover computer card when the run resumes.
+ * Release already settles the card; this covers a card that is still pending.
+ * No message write and no notify when nothing is pending.
+ */
+export async function settleReleasedTakeoverCards(
+  prisma: PrismaClient,
+  input: { spaceId: string; threadId: string; botId: string; runId: string; reason: unknown },
+  notify?: (threadId: string, seq: number) => Promise<void>,
+): Promise<void> {
+  const seq = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.$queryRaw`SELECT id FROM threads WHERE id = ${input.threadId} FOR UPDATE`;
+    return settleReleasedTakeoverCardsInTransaction(tx, input);
+  });
+  if (seq !== null) await notify?.(input.threadId, seq);
+}
+
+async function settleReleasedTakeoverCardsInTransaction(
+  tx: Prisma.TransactionClient,
+  input: { spaceId: string; threadId: string; botId: string; runId: string; reason: unknown },
+): Promise<number | null> {
+  const messages = await tx.message.findMany({
+    where: { threadId: input.threadId, runId: input.runId, role: "bot" },
+    select: { id: true, blocks: true },
+  });
+  let lastSeq: number | null = null;
+  for (const message of messages) {
+    const parsed = MessageBlockSchema.array().safeParse(message.blocks);
+    if (!parsed.success) continue;
+    const blocks = releasedTakeoverComputerBlocks(parsed.data, input.reason);
+    if (!blocks) continue;
+    await tx.message.update({
+      where: { id: message.id },
+      data: { blocks: blocks as Prisma.InputJsonValue },
+    });
+    const updated = await appendEventInTransaction(tx, {
+      spaceId: input.spaceId,
+      threadId: input.threadId,
+      botId: input.botId,
+      type: "thread.message.updated",
+      runId: input.runId,
+      payload: { messageId: message.id, role: "bot", blocks },
+    });
+    lastSeq = updated.seq;
+  }
+  return lastSeq;
 }
 
 export async function appendEvent(
@@ -1431,7 +1509,8 @@ export async function createPendingSteeringRun(
     orderBy: [{ message: { seq: "asc" } }, { id: "asc" }],
   });
   if (pending.length === 0) return null;
-  // One origin per continuation so a group channel and a direct chat are not answered together.
+  // One origin per continuation so a group channel and the owner's private chat are not answered
+  // together. The app and the owner's direct line are one private conversation.
   const origin = steeringOrigin(pending[0]!);
   const batch = pending.filter((item) => steeringOrigin(item) === origin);
   const source = batch.at(-1)!;
@@ -1457,7 +1536,18 @@ export async function createPendingSteeringRun(
       taskId: task.id,
       userId: batch[0]!.userId,
       status: "queued",
-      trigger: origin === "app" ? "follow_up" : origin === "webhook" ? "webhook" : "messaging",
+      // A private continuation is a follow-up the owner wrote only when every message in it came
+      // from the app; one direct-line delivery keeps it messaging, so it is never owner-started.
+      // Rows queued before origins were recorded are recognized by their channel message.
+      trigger:
+        origin === "webhook"
+          ? "webhook"
+          : origin === "private" &&
+              batch.every(
+                (item) => item.originTrigger === null && !hasChannelMessage(item.message.blocks),
+              )
+            ? "follow_up"
+            : "messaging",
       sourceMessageId: source.message.id,
       ...(modelPin ?? {}),
     },
@@ -1493,14 +1583,18 @@ function continuationModelPin(
   };
 }
 
+function hasChannelMessage(blocks: unknown): boolean {
+  return (blocks as MessageBlock[]).some((block) => block.kind === "channel_message");
+}
+
 function steeringOrigin(item: {
   originTrigger: string | null;
   message: { blocks: unknown };
 }): string {
   if (item.originTrigger === "webhook") return "webhook";
-  if (item.originTrigger !== "messaging") return "app";
+  if (item.originTrigger !== "messaging") return "private";
   const channelId = messagingChannelId(item.message.blocks as MessageBlock[] | undefined);
-  return channelId ? `channel:${channelId}` : "dm";
+  return channelId ? `channel:${channelId}` : "private";
 }
 
 export async function appendEventInTransaction(

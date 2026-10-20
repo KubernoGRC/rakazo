@@ -23,6 +23,7 @@ import {
   assertVolumeSubpathSupport,
   COMPUTER_IMAGE,
   computerBridgeNameFor,
+  computerDnsMatches,
   computerHomeStorage,
   computerNetworkCreateOptions,
   computerNetworkNameFor,
@@ -37,6 +38,7 @@ import {
   parseMemoryBytes,
   publishedLoopbackControlHostPort,
   resolveComputerControlEndpoint,
+  resolveComputerDns,
   resolveComputerEgressMode,
   resolveScreenNetworkMode,
   resolveScreenPublishTarget,
@@ -149,6 +151,40 @@ describe("graphical computer spec", () => {
     expect(resolveComputerEgressMode("restricted")).toBe("restricted");
     for (const value of ["blocked", "RESTRICTED", "0"])
       expect(() => resolveComputerEgressMode(value)).toThrow(/SANDBOX_COMPUTER_EGRESS/);
+  });
+
+  it("parses computer DNS servers, with Docker's default when unset", () => {
+    expect(resolveComputerDns(undefined)).toBeUndefined();
+    expect(resolveComputerDns(" ")).toBeUndefined();
+    expect(resolveComputerDns("1.1.1.1, 2606:4700:4700::1111")).toEqual([
+      "1.1.1.1",
+      "2606:4700:4700::1111",
+    ]);
+    for (const value of ["dns.example.com", "1.1.1.1,resolver", "300.1.1.1"])
+      expect(() => resolveComputerDns(value)).toThrow(/SANDBOX_COMPUTER_DNS/);
+  });
+
+  it("sets DNS servers on computers only when configured", () => {
+    const base = {
+      name: "rakazo-bot-x",
+      image: "img",
+      botId: "x",
+      spaceId: "s",
+      homePath: "/data/x",
+    };
+    expect(containerCreateOptions(base).HostConfig).not.toHaveProperty("Dns");
+    expect(containerCreateOptions({ ...base, dns: ["1.1.1.1"] }).HostConfig).toMatchObject({
+      Dns: ["1.1.1.1"],
+    });
+  });
+
+  it("matches a computer's DNS servers to the configured ones", () => {
+    expect(computerDnsMatches(null, undefined)).toBe(true);
+    expect(computerDnsMatches([], undefined)).toBe(true);
+    expect(computerDnsMatches(["1.1.1.1"], ["1.1.1.1"])).toBe(true);
+    expect(computerDnsMatches(null, ["1.1.1.1"])).toBe(false);
+    expect(computerDnsMatches(["1.1.1.1"], undefined)).toBe(false);
+    expect(computerDnsMatches(["1.0.0.1", "1.1.1.1"], ["1.1.1.1", "1.0.0.1"])).toBe(false);
   });
 
   it("derives deterministic host bridge names within the 15-byte interface limit", () => {

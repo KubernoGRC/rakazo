@@ -28,6 +28,7 @@ import {
   COMPUTER_UID,
   COMPUTER_USER,
   computerBridgeNameFor,
+  computerDnsMatches,
   computerHomeStorage,
   computerNetworkCreateOptions,
   computerNetworkNameFor,
@@ -42,6 +43,7 @@ import {
   legacyNetworkOwnedSolelyBy,
   publishedLoopbackControlHostPort,
   resolveComputerControlEndpoint,
+  resolveComputerDns,
   resolveComputerEgressMode,
   resolveScreenNetworkMode,
   resolveScreenPublishTarget,
@@ -110,6 +112,7 @@ let dockerApiVersion: string | undefined;
 const supervisorToken = resolveSupervisorToken(process.env);
 const screenNetworkMode = resolveScreenNetworkMode(process.env.SANDBOX_SCREEN_NETWORK);
 const computerEgressMode = resolveComputerEgressMode();
+const computerDns = resolveComputerDns();
 const teamScreenLimit = resolveTeamScreenLimit();
 // Host-run supervisors on Docker Desktop (macOS/Windows) cannot reach container
 // IPs, so computer control must use a published loopback port instead.
@@ -233,6 +236,7 @@ app.post("/computers", async (c) => {
         user: computerUser,
         networkMode,
         publishControlPort: controlViaLoopback,
+        dns: computerDns,
       };
       const existing = await findBotContainer(body.botId, body.spaceId);
       if (existing) {
@@ -276,6 +280,8 @@ app.post("/computers", async (c) => {
               (reconnect || Boolean(info.NetworkSettings?.Networks?.[networkMode])))) &&
           restrictedBridgeOk &&
           info.Config.User === computerUser &&
+          // DNS is fixed when a container is created, so a changed setting replaces it.
+          computerDnsMatches(info.HostConfig.Dns, computerDns) &&
           controlPublishOk &&
           // Fork patch: never resume a computer that differs from what create would build.
           computerMatchesCreateSpec(info, containerCreateOptions(createInput)) &&
@@ -504,6 +510,12 @@ app.post("/computers/:id/browser", async (c) => {
             z.discriminatedUnion("kind", [
               z.object({ kind: z.literal("click"), ref: z.string().min(1).max(200) }),
               z.object({
+                kind: z.literal("upload"),
+                ref: z.string().min(1).max(200),
+                paths: z.array(z.string().min(1).max(1024)).min(1).max(10),
+                roots: z.array(z.string().min(1).max(1024)).max(2).optional(),
+              }),
+              z.object({
                 kind: z.enum(["fill", "type"]),
                 ref: z.string().min(1).max(200),
                 text: z.string().max(32_000),
@@ -544,6 +556,9 @@ app.post("/computers/:id/browser", async (c) => {
           "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
           "RAKAZO_BROWSER_WATCH_STDIN=1",
           "RAKAZO_BROWSER_ARGS_STDIN=1",
+          ...(process.env.RAKAZO_BROWSER_UPLOAD_MAX_BYTES !== undefined
+            ? [`RAKAZO_BROWSER_UPLOAD_MAX_BYTES=${process.env.RAKAZO_BROWSER_UPLOAD_MAX_BYTES}`]
+            : []),
         ],
         timeoutMs: 25_000,
         signal,

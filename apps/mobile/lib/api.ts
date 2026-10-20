@@ -30,6 +30,7 @@ import {
   isServerUnreachable,
   isUnreachableStatus,
   mergeThreadHistory,
+  messagingProviderLabel,
   prependThreadHistoryPage,
   progressMessageId,
   readBoundedJsonResponse,
@@ -60,7 +61,12 @@ import {
   tokenFromAuthResponse,
 } from "./session";
 import { clearUnsentSends } from "./thread-feedback";
-import { authErrorText, errorText } from "./user-error";
+import {
+  authErrorText,
+  authResponseErrorText,
+  errorText,
+  sessionSaveErrorText,
+} from "./user-error";
 
 const ENDPOINT_KEY = "rakazo.api_base";
 const SPACE_KEY = "rakazo.space_id";
@@ -491,7 +497,7 @@ async function authenticateWithEmail(
   action: "sign-in" | "sign-up",
   input: { email: string; password: string; name?: string },
 ) {
-  const { response, body } = await fetchMobileJson<unknown>(
+  const { response, body, invalidJson } = await fetchMobileJson<unknown>(
     `${currentApiBase()}/api/auth/${action}/email`,
     {
       method: "POST",
@@ -500,8 +506,8 @@ async function authenticateWithEmail(
     },
     {},
   );
-  if (!response.ok) {
-    throw new Error(authErrorText(body, t("Could not continue")));
+  if (!response.ok || invalidJson) {
+    throw new Error(authResponseErrorText(response.status, body, invalidJson));
   }
   const token = tokenFromAuthResponse(response, body);
   if (action === "sign-up" && signupRequiresEmailVerification(body))
@@ -514,8 +520,13 @@ async function authenticateWithEmail(
           : "Sign-up did not return a session",
       ),
     );
-  if (!(await clearSpace())) throw new Error(t("Could not clear the previous space"));
-  await saveSessionToken(token);
+  try {
+    if (!(await clearSpace()))
+      throw new Error(t("Could not save your sign-in on this device. Try again."));
+    await saveSessionToken(token);
+  } catch (error) {
+    throw new Error(sessionSaveErrorText(error));
+  }
   return { verificationRequired: false };
 }
 
@@ -607,7 +618,7 @@ export async function fetchMobileJson<T>(
   input: Parameters<typeof fetch>[0],
   init: RequestInit,
   invalidJsonFallback?: T,
-): Promise<{ response: Response; body: T }> {
+): Promise<{ response: Response; body: T; invalidJson?: boolean }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error("Request timed out")), RPC_TIMEOUT_MS);
   try {
@@ -626,7 +637,7 @@ export async function fetchMobileJson<T>(
       return { response, body };
     } catch (error) {
       if (invalidJsonFallback !== undefined && error instanceof SyntaxError) {
-        return { response, body: invalidJsonFallback };
+        return { response, body: invalidJsonFallback, invalidJson: true };
       }
       throw requestError(error, controller.signal);
     }
@@ -949,6 +960,7 @@ export type MobileBot = Pick<
   | "modelId"
   | "thinkingLevel"
   | "autoSpeak"
+  | "fleetManagement"
 > &
   Partial<Pick<Bot, "parentBotId" | "spaceId" | "instructions">>;
 
@@ -1079,20 +1091,7 @@ export function prependMobileMessagePage(
   return prependThreadHistoryPage(prev, page);
 }
 
-const MESSAGING_PROVIDER_LABELS: Record<string, string> = {
-  sendblue: "iMessage",
-  slack: "Slack",
-  whatsapp: "WhatsApp",
-  telegram: "Telegram",
-  lark: "Feishu",
-};
-
-export function messagingProviderLabel(provider: string, transport?: string): string {
-  if (provider === "sendblue" && ["iMessage", "SMS", "RCS"].includes(transport ?? "")) {
-    return transport!;
-  }
-  return MESSAGING_PROVIDER_LABELS[provider] ?? provider;
-}
+export { messagingProviderLabel };
 
 /** The message's text exactly as written, for a view that selects part of it. */
 export function selectableMobileMessageText(message: MobileMessage): string {
@@ -1295,6 +1294,38 @@ export function applyMobileThreadEvent(
         )
       : prev.activeRuns;
     return { ...prev, cursor, run, activeRuns, messages, computer };
+  }
+  if (event.type === "computer.takeover.released") {
+    const runId = event.runId;
+    const settle = <T extends { id: string; status: string }>(candidate: T): T =>
+      runId && candidate.id === runId && candidate.status === "waiting_takeover"
+        ? { ...candidate, status: "queued" }
+        : candidate;
+    const nextRun = prev.run ? settle(prev.run) : prev.run;
+    const activeChanged = Boolean(
+      runId &&
+        prev.activeRuns?.some(
+          (candidate) => candidate.id === runId && candidate.status === "waiting_takeover",
+        ),
+    );
+    const cursor = event.seq ?? prev.cursor;
+    if (nextRun === prev.run && !activeChanged) {
+      return cursor === prev.cursor ? prev : { ...prev, cursor };
+    }
+    const members = prev.members?.some(
+      (member) => member.botId === event.botId && member.status === "waiting_takeover",
+    )
+      ? prev.members.map((member) =>
+          member.botId === event.botId ? { ...member, status: "queued" } : member,
+        )
+      : prev.members;
+    return {
+      ...prev,
+      cursor,
+      run: nextRun,
+      activeRuns: activeChanged ? prev.activeRuns?.map(settle) : prev.activeRuns,
+      members,
+    };
   }
   if (isRunTerminalEvent(event)) {
     const activeRuns = prev.activeRuns?.filter((candidate) => candidate.id !== event.runId);

@@ -144,6 +144,7 @@ function fixture(runId = "run-1") {
     ),
   };
   const prisma = {
+    user: { findUnique: vi.fn(async () => null) },
     run: {
       findUnique: vi.fn(async () => run),
       findUniqueOrThrow: vi.fn(async () => run),
@@ -259,6 +260,7 @@ function fixture(runId = "run-1") {
       read: async () => ({ documents: [] }),
       search: async () => [],
       commit: memoryCommit,
+      remove: vi.fn(async () => ({ removed: false })),
       exportMarkdown: async function* () {},
     },
     memoryProviders: { resolve: async () => null },

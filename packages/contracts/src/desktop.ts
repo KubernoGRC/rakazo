@@ -37,6 +37,11 @@ export interface RakazoDesktopOAuthCallback {
 }
 
 export interface RakazoDesktop {
+  computer?: {
+    requestAccess: () => Promise<boolean>;
+    revokeAccess: () => Promise<void>;
+    onConfigure: (listener: () => void) => () => void;
+  };
   /** Only the isolated local settings window is authorized to call this bridge. */
   localSettings?: {
     request: (pathname: string, body: string) => Promise<{ status: number; body: string }>;

@@ -13,6 +13,8 @@ import { NoneSandboxProvider } from "./none-sandbox.js";
 import { RailwaySandboxProvider } from "./railway-sandbox.js";
 
 export interface SandboxProviderOptions {
+  hostComputerUrl?: string;
+  hostComputerToken?: string;
   supervisorUrl?: string;
   supervisorToken?: string;
   e2bApiKey?: string;
@@ -26,6 +28,7 @@ export interface SandboxProviderOptions {
   railwayApiToken?: string;
   railwayEnvironmentId?: string;
   railwayMaxWorkspaceFileBytes?: string;
+  railwaySandboxRegion?: string;
   boxApiKey?: string;
   boxApiUrl?: string;
   dataDir?: string;
@@ -75,6 +78,7 @@ export function createSandboxProvider(kind: string, opts: SandboxProviderOptions
         token: opts.railwayApiToken,
         environmentId: opts.railwayEnvironmentId,
         maxWorkspaceFileBytes: opts.railwayMaxWorkspaceFileBytes,
+        region: opts.railwaySandboxRegion,
       });
     case "docker":
       return new DockerSandboxProvider(

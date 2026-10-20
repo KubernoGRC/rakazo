@@ -1,4 +1,14 @@
 export const DE_MESSAGES: Record<string, string> = {
+  "Lets this bot organize, retune and schedule the bots it creates. You approve each change.":
+    "Erlaubt diesem Bot, die von ihm erstellten Bots zu organisieren, anzupassen und zu planen. Du genehmigst jede Änderung.",
+  "Too many attempts. Try again in a few minutes.":
+    "Zu viele Versuche. Versuche es in ein paar Minuten erneut.",
+  "The server had a problem. Try again in a moment.":
+    "Auf dem Server ist ein Problem aufgetreten. Versuche es gleich noch einmal.",
+  "Password sign-in is turned off on this server":
+    "Die Anmeldung mit Passwort ist auf diesem Server deaktiviert",
+  "Could not save your sign-in on this device. Try again.":
+    "Deine Anmeldung konnte auf diesem Gerät nicht gespeichert werden. Versuche es erneut.",
   "Your OpenRouter": "Dein OpenRouter",
   "Your OpenAI": "Dein OpenAI",
   "Your Anthropic": "Dein Anthropic",
@@ -86,7 +96,6 @@ export const DE_MESSAGES: Record<string, string> = {
   "Custom server {host}": "Eigener Server {host}",
   "Don’t have an account?": "Du hast noch kein Konto?",
   Email: "E-Mail",
-  "Enter your Rakazo server address.": "Gib die Adresse deines Rakazo-Servers ein.",
   "Forgot password?": "Passwort vergessen?",
   "Loading…": "Wird geladen…",
   Password: "Passwort",
@@ -187,6 +196,7 @@ export const DE_MESSAGES: Record<string, string> = {
   "Failed to stop work": "Arbeit konnte nicht gestoppt werden",
   File: "Datei",
   "Hide {label}": "{label} ausblenden",
+  Diagram: "Diagramm",
   Image: "Bild",
   "Jump to latest": "Zur neuesten Nachricht springen",
   "Jump to latest, new messages": "Zur neuesten Nachricht springen, neue Nachrichten",
@@ -315,6 +325,7 @@ export const DE_MESSAGES: Record<string, string> = {
   "Could not load routine": "Routine konnte nicht geladen werden",
   "Git event": "Git-Ereignis",
   "Message event": "Nachrichtenereignis",
+  "When something changes": "Wenn sich etwas ändert",
   "Open conversation": "Unterhaltung öffnen",
   Paused: "Pausiert",
   Prompt: "Prompt",
@@ -323,6 +334,10 @@ export const DE_MESSAGES: Record<string, string> = {
   "Teams message": "Teams-Nachricht",
   "This routine no longer exists": "Diese Routine gibt es nicht mehr",
   Webhook: "Webhook",
+  // app/bot-profile.tsx
+  Profile: "Profil",
+  Routines: "Routinen",
+  "Could not load routines": "Routinen konnten nicht geladen werden",
   // app/computer.tsx
   "Booting {label}": "{label} wird gestartet",
   Bot: "Bot",
@@ -522,12 +537,13 @@ export const DE_MESSAGES: Record<string, string> = {
   "Speak + transcribe": "Sprechen + transkribieren",
   "Speak only": "Nur sprechen",
   "Speech model": "Sprachmodell",
+  "Transcription model": "Transkriptionsmodell",
+  Reconnect: "Erneut verbinden",
   "This device": "Dieses Gerät",
   "Your phone's built-in voice. Free, no account needed":
     "Die eingebaute Stimme deines Telefons. Kostenlos, kein Konto nötig",
   // app/(settings)/account.tsx
   "Agent messages": "Agent-Nachrichten",
-  "Alerts from routines": "Meldungen von Routinen",
   Appearance: "Erscheinungsbild",
   Archived: "Archiviert",
   "Avatar style": "Avatar-Stil",
@@ -567,7 +583,6 @@ export const DE_MESSAGES: Record<string, string> = {
     "Das löscht dein Konto, deine Bots, Unterhaltungen, Erinnerungen, Dateien und gespeicherten Verbindungen endgültig. Das lässt sich nicht rückgängig machen.",
   "Try again.": "Versuche es erneut.",
   Usage: "Nutzung",
-  "While agents are working": "Während Agents arbeiten",
   "Your account": "Dein Konto",
   "{runs} runs · {tokens} tokens": "{runs} Ausführungen · {tokens} Token",
   "{style} avatars": "Avatare: {style}",
@@ -599,6 +614,11 @@ export const DE_MESSAGES: Record<string, string> = {
   "New section": "Neuer Abschnitt",
   Pin: "Anheften",
   "Rename section": "Abschnitt umbenennen",
+  "Section actions for {name}": "Abschnittsaktionen für {name}",
+  "Could not delete section": "Abschnitt konnte nicht gelöscht werden",
+  "Delete section": "Abschnitt löschen",
+  "Its bots and groups are kept and leave the section.":
+    "Seine Bots und Gruppen bleiben erhalten und verlassen den Abschnitt.",
   "Resume notifications": "Benachrichtigungen wieder einschalten",
   "Save section name": "Abschnittsnamen speichern",
   "Section name": "Abschnittsname",
@@ -825,6 +845,12 @@ export const DE_MESSAGES: Record<string, string> = {
     "Melde dich bei deinem bestehenden Konto an, um SSO zu verknüpfen",
   "SSO is temporarily unavailable. Try again.":
     "SSO ist vorübergehend nicht verfügbar. Versuche es erneut.",
+  "Members ({count})": "Mitglieder ({count})",
+  "Show all": "Alle anzeigen",
+  "Show selected": "Ausgewählte anzeigen",
+  "Filter bots": "Bots filtern",
+  "Pick {min}–{max}": "{min}–{max} auswählen",
+  "No members yet": "Noch keine Mitglieder",
   Applied: "Angewendet",
   Apply: "Anwenden",
   Dismissed: "Verworfen",
@@ -838,4 +864,13 @@ export const DE_MESSAGES: Record<string, string> = {
   Undo: "Rückgängig",
   "Update instructions?": "Anweisungen aktualisieren?",
   "Could not restore instructions": "Anweisungen konnten nicht wiederhergestellt werden",
+  "Hide chats": "Chats ausblenden",
+  "Show chats": "Chats einblenden",
+  "Remove photo": "Foto entfernen",
+  Shape: "Form",
+  "Shape {number}": "Form {number}",
+  "Fleet management": "Flottenverwaltung",
+  "Try again": "Erneut versuchen",
+  "Your session expired": "Deine Sitzung ist abgelaufen",
+  "The server had a problem": "Auf dem Server ist ein Problem aufgetreten",
 };

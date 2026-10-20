@@ -8,6 +8,8 @@ import { DaytonaSandboxEmulator } from "./daytona-emulator.js";
 import { DesktopSandboxProvider } from "./desktop-sandbox.js";
 import { ManagedSandboxEmulator } from "./e2b-emulator.js";
 import { FakeSandboxProvider } from "./fake-sandbox.js";
+import { HostComputerSandbox } from "./host-computer-sandbox.js";
+import { startHostComputerServer } from "./host-computer-server.js";
 import { provisionPrepared } from "./sandbox-test-support.js";
 
 const context = {
@@ -19,14 +21,32 @@ const context = {
 };
 
 const temporaryRoots: string[] = [];
+const hostServers: Array<Awaited<ReturnType<typeof startHostComputerServer>>> = [];
 
 afterEach(async () => {
+  await Promise.all(hostServers.splice(0).map((server) => server.close()));
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
 });
 
 describe.each([
+  [
+    "native host bridge",
+    async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "rakazo-host-contract-"));
+      temporaryRoots.push(root);
+      const token = "ab".repeat(32);
+      const server = await startHostComputerServer({
+        root: await realpath(root),
+        token,
+        hostname: "127.0.0.1",
+      });
+      hostServers.push(server);
+      server.setEnabled(true);
+      return new HostComputerSandbox(`http://127.0.0.1:${server.port}`, token);
+    },
+  ],
   ["fake", () => Promise.resolve(new FakeSandboxProvider())],
   ["managed emulator", () => Promise.resolve(new ManagedSandboxEmulator())],
   ["Daytona emulator", () => Promise.resolve(new DaytonaSandboxEmulator())],
@@ -105,6 +125,11 @@ describe.each([
       },
       context,
     );
+    if (provider instanceof HostComputerSandbox) {
+      await expect(provider.observe()).rejects.toThrow("Local screen control is unavailable");
+      await expect(provider.act()).rejects.toThrow("Local screen control is unavailable");
+      return;
+    }
     const before = await provider.observe(computer, context);
 
     await expect(
@@ -148,7 +173,7 @@ describe.each([
     await provider.destroy(resumed, context);
     await provider.destroy(resumed, context);
     const replacement = await provisionPrepared(provider, request, context);
-    if (provider instanceof DesktopSandboxProvider) {
+    if (provider instanceof DesktopSandboxProvider || provider instanceof HostComputerSandbox) {
       // A configured desktop root retains its workspace through destroy.
       expect(replacement.fresh).toBe(false);
       expect(
