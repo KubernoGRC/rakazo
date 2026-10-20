@@ -11,6 +11,10 @@ export const authCapabilitiesSchema = z.object({
   passwordReset: z.boolean(),
   resetUrl: z.string().url().nullable(),
   billing: z.boolean().optional(),
+  /** Fork: sign-in happens only through a trusted access proxy in front of the server. */
+  accessIdentity: z.boolean().optional(),
+  /** Fork: where sign-out continues to, to end the access proxy's session too. */
+  accessLogoutUrl: z.string().min(1).optional(),
 });
 export type AuthCapabilities = z.infer<typeof authCapabilitiesSchema>;
 

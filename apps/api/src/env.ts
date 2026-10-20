@@ -1,12 +1,13 @@
-import type { TelegramBotCredentials } from "@rakazo/adapters";
+import type { DeploymentConnectorConfig, TelegramBotCredentials } from "@rakazo/adapters";
 import {
+  deploymentConnectorConfigFromEnv,
   resolveCloudAgentProvider,
   resolveDeploymentModel,
   resolveSandboxProvider,
   secretStoreOptionsFromEnv,
   telegramBotsFromEnv,
 } from "@rakazo/adapters";
-import type { OidcConfig } from "@rakazo/auth";
+import type { AccessIdentityConfig, OidcConfig } from "@rakazo/auth";
 import {
   phoneCallSettings,
   resolveAuthSecret,
@@ -21,6 +22,8 @@ export { resolveCloudAgentProvider, resolveSandboxProvider } from "@rakazo/adapt
 export interface AppEnv {
   passwordAuth?: boolean;
   oidc?: OidcConfig;
+  /** Fork: trusted access-proxy identity; see docs/fork-access-identity.md. */
+  accessIdentity?: AccessIdentityConfig;
   nodeEnv: string;
   desktopStackToken?: string;
   databaseUrl: string;
@@ -108,6 +111,8 @@ export interface AppEnv {
   mcpStdioAllowedCommands: string[];
   /** Deployment-owner escape for remote MCP on RFC1918 / Docker-network hosts. */
   mcpAllowPrivateEndpoint: boolean;
+  /** Deployment-owned MCP server, offered beside user-added connectors. */
+  deploymentConnectors: DeploymentConnectorConfig;
   port: number;
   gitSha: string | undefined;
   /** Browser error reporting, served to the web app at runtime. The DSN is public by design. */
@@ -145,8 +150,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     if (value && !["true", "false"].includes(value))
       throw new Error(`${key} must be true or false`);
   }
-  const passwordAuth = source.AUTH_PASSWORD_ENABLED !== "false";
-  if (!passwordAuth && !issuer)
+  const accessIdentity = accessIdentityFromEnv(source);
+  const passwordAuth = accessIdentity ? false : source.AUTH_PASSWORD_ENABLED !== "false";
+  if (!passwordAuth && !issuer && !accessIdentity)
     throw new Error("AUTH_PASSWORD_ENABLED=false requires OIDC configuration");
   const oidc =
     issuer && clientId && clientSecret
@@ -170,6 +176,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   return {
     passwordAuth,
     oidc,
+    ...(accessIdentity ? { accessIdentity } : {}),
     nodeEnv: source.NODE_ENV ?? "",
     databaseUrl: required(source, "DATABASE_URL"),
     realtimeDatabaseUrl: source.REALTIME_DATABASE_URL ?? required(source, "DATABASE_URL"),
@@ -251,6 +258,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
       .map((value) => value.trim())
       .filter(Boolean),
     mcpAllowPrivateEndpoint: source.MCP_ALLOW_PRIVATE_ENDPOINT === "true",
+    deploymentConnectors: deploymentConnectorConfigFromEnv(source),
     port: Number(source.API_PORT ?? 3100),
     gitSha: optional(source.GIT_SHA) ?? optional(source.RAKAZO_GIT_SHA),
     browserMonitoring: browserMonitoringFromEnv(source),
@@ -275,6 +283,88 @@ function browserMonitoringFromEnv(source: NodeJS.ProcessEnv): AppEnv["browserMon
     environment: optional(source.SENTRY_ENVIRONMENT),
     release: optional(source.SENTRY_RELEASE) ?? (sha === "unknown" ? undefined : sha),
   };
+}
+
+/**
+ * Fork: ACCESS_IDENTITY_ENABLED=true makes a verified access-proxy assertion
+ * the only way in. Every setting it needs is required, and any other login
+ * path configured beside it refuses startup. See docs/fork-access-identity.md.
+ */
+function accessIdentityFromEnv(source: NodeJS.ProcessEnv): AccessIdentityConfig | undefined {
+  const enabled = source.ACCESS_IDENTITY_ENABLED;
+  if (enabled && !["true", "false"].includes(enabled))
+    throw new Error("ACCESS_IDENTITY_ENABLED must be true or false");
+  if (enabled !== "true") return undefined;
+  const rawIssuer = optional(source.ACCESS_IDENTITY_ISSUER);
+  const audience = optional(source.ACCESS_IDENTITY_AUDIENCE);
+  const certsFile = optional(source.ACCESS_IDENTITY_CERTS_FILE);
+  if (!rawIssuer || !audience || !certsFile)
+    throw new Error(
+      "ACCESS_IDENTITY_ENABLED=true requires ACCESS_IDENTITY_ISSUER, ACCESS_IDENTITY_AUDIENCE and ACCESS_IDENTITY_CERTS_FILE",
+    );
+  let issuer: string;
+  try {
+    const url = new URL(rawIssuer);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      url.pathname !== "/"
+    )
+      throw new Error();
+    issuer = url.origin;
+  } catch {
+    throw new Error("ACCESS_IDENTITY_ISSUER must be an HTTPS origin");
+  }
+  if (source.AUTH_PASSWORD_ENABLED === "true")
+    throw new Error("ACCESS_IDENTITY_ENABLED=true requires AUTH_PASSWORD_ENABLED to be off");
+  // Only the settings that turn OIDC on conflict. The compose files pass
+  // OIDC_NAME, OIDC_SCOPES and OIDC_ALLOW_SIGNUP_BYPASS through with non-blank
+  // defaults, which configure nothing without an issuer.
+  const oidcKeys = ["OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"].filter((key) =>
+    optional(source[key]),
+  );
+  if (oidcKeys.length > 0)
+    throw new Error(`ACCESS_IDENTITY_ENABLED=true cannot be combined with ${oidcKeys.join(", ")}`);
+  if (source.MESSAGING_OPEN_SIGNUP === "true")
+    throw new Error("ACCESS_IDENTITY_ENABLED=true requires MESSAGING_OPEN_SIGNUP to be off");
+  const logoutUrl = accessLogoutUrl(optional(source.ACCESS_IDENTITY_LOGOUT_URL), issuer);
+  return { issuer, audience, certsFile, ...(logoutUrl ? { logoutUrl } : {}) };
+}
+
+/**
+ * Fork: the sign-out redirect may only leave for the access proxy itself, so it
+ * can't become an open redirect: a path on this server, or an https URL on the
+ * issuer's origin (the proxy's team domain).
+ */
+function accessLogoutUrl(value: string | undefined, issuer: string): string | undefined {
+  if (!value) return undefined;
+  const invalid = () =>
+    new Error(
+      "ACCESS_IDENTITY_LOGOUT_URL must be a path on this server or an https URL on the ACCESS_IDENTITY_ISSUER origin",
+    );
+  if (value.startsWith("/")) {
+    const local = "https://origin.invalid";
+    let url: URL;
+    try {
+      url = new URL(value, local);
+    } catch {
+      throw invalid();
+    }
+    if (url.origin !== local || value.startsWith("//") || value.includes("\\")) throw invalid();
+    return value;
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw invalid();
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.origin !== issuer)
+    throw invalid();
+  return url.href;
 }
 
 function optional(value: string | undefined): string | undefined {

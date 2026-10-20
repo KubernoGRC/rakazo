@@ -229,6 +229,15 @@ export default function SignIn() {
                       {t("Loading…")}
                     </Text>
                   ) : null}
+                  {reset?.accessIdentity ? (
+                    // Fork: the access proxy's sign-in runs only in a web browser.
+                    <Text
+                      accessibilityRole="alert"
+                      style={{ color: tokens.mutedForeground, textAlign: "center", marginTop: 16 }}
+                    >
+                      {t("This server uses your organisation's sign-in in a web browser")}
+                    </Text>
+                  ) : null}
                   {reset?.sso && !reset.passwordAuth && mode !== "forgot" ? (
                     <NativeActionButton
                       label={t("Continue with {name}", { name: reset.sso.name })}

@@ -96,4 +96,23 @@ describe("health routes", () => {
       expect(response.status).toBe(404);
     }
   });
+
+  it("stays unready while a fork readiness check reports a reason", async () => {
+    let reason: string | undefined = "access_identity_keys_unavailable";
+    const health = healthRoutes(
+      () => ({ degraded: false }),
+      undefined,
+      async () => reason,
+    );
+    const response = await health.request("/ready");
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      degraded: false,
+      reason: "access_identity_keys_unavailable",
+    });
+    expect((await health.request("/health")).status).toBe(200);
+    reason = undefined;
+    expect((await health.request("/ready")).status).toBe(200);
+  });
 });

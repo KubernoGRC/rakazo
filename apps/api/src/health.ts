@@ -8,6 +8,8 @@ import { Hono } from "hono";
 export function healthRoutes(
   details: () => Record<string, unknown>,
   database?: () => Promise<unknown>,
+  /** Fork: a reason the instance must not take traffic yet, if any. */
+  unready?: () => Promise<string | undefined>,
 ) {
   const app = new Hono();
   // One probe at a time: polls during a hung check wait on it instead of taking more connections.
@@ -26,6 +28,8 @@ export function healthRoutes(
   };
   app.get("/ready", async (c) => {
     const degraded = details().degraded === true;
+    const reason = await unready?.();
+    if (reason) return c.json({ ok: false, degraded, reason }, 503);
     const databaseUp = database ? await withinDeadline(probe(database)) : true;
     const ok = !degraded && databaseUp;
     return c.json(

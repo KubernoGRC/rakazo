@@ -170,6 +170,7 @@ import { SkillDraftCard } from "../components/teach/SkillDraftCard";
 import { TeachCaptureOverlay } from "../components/teach/TeachCaptureOverlay";
 import { TeachComputerOverlayControl } from "../components/teach/TeachComputerOverlay";
 import { TeachRecordingChrome, TeachStopButton } from "../components/teach/TeachRecordingChrome";
+import { leaveThroughAccessLogout } from "../lib/access-identity";
 import { readActivityMode, writeActivityMode } from "../lib/activity-mode";
 import type { ArtifactTarget } from "../lib/artifact-open";
 import { authClient } from "../lib/auth";
@@ -535,7 +536,10 @@ function SpaceShell() {
   const [logOutError, setLogOutError] = useState<string | null>(null);
   const { signingOut, logOut } = useSignOut(() => {
     clearSpaceSelection();
-    navigate("/");
+    // Fork: continue to the access proxy's logout when the deployment names one.
+    void leaveThroughAccessLogout(true).then((leaving) => {
+      if (!leaving) navigate("/");
+    });
   }, setLogOutError);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);

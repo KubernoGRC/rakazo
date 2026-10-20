@@ -632,3 +632,105 @@ describe("createPrivateNetworkFetch", () => {
     );
   });
 });
+
+describe("pinned private endpoint", () => {
+  const pin = { privateEndpointHost: "mcp.private.example.test" };
+  const resolvesTo =
+    (...addresses: string[]) =>
+    async () =>
+      addresses.map((address) => ({ address, family: address.includes(":") ? 6 : 4 }) as const);
+  const lookupError = (lookup: ReturnType<typeof createSafeLookup>, hostname: string) =>
+    new Promise<Error | null>((resolve) => {
+      lookup(hostname, { family: 0, all: false }, (error) => resolve(error));
+    });
+
+  it("lets exactly the pinned host resolve to private addresses", async () => {
+    await expect(
+      assertSafeRemoteUrl("https://mcp.private.example.test/mcp", resolvesTo("10.0.4.20"), pin),
+    ).resolves.toEqual(new URL("https://mcp.private.example.test/mcp"));
+    await expect(
+      assertSafeRemoteUrl(
+        "https://MCP.Private.Example.Test./mcp",
+        resolvesTo("10.0.4.20", "fd00::20"),
+        pin,
+      ),
+    ).resolves.toBeInstanceOf(URL);
+  });
+
+  it("still requires HTTPS for the pinned host", async () => {
+    await expect(
+      assertSafeRemoteUrl("http://mcp.private.example.test/mcp", resolvesTo("10.0.4.20"), pin),
+    ).rejects.toThrow(/HTTPS/);
+  });
+
+  it.each([
+    ["a public address", ["203.0.113.10"]],
+    ["a mix of private and public addresses", ["10.0.4.20", "203.0.113.10"]],
+    ["loopback", ["127.0.0.1"]],
+    ["link-local metadata", ["169.254.169.254"]],
+    ["mapped link-local metadata", ["::ffff:169.254.169.254"]],
+    ["the unspecified address", ["0.0.0.0"]],
+    ["NAT64-encoded loopback", ["64:ff9b::7f00:1"]],
+    ["NAT64-encoded link-local", ["64:ff9b::a9fe:101"]],
+    ["6to4-encoded loopback", ["2002:7f00:1::1"]],
+    ["IPv6 loopback", ["::1"]],
+    ["IPv6 link-local", ["fe80::1"]],
+    ["shared address space", ["100.64.0.1"]],
+    ["AWS IPv6 metadata", ["fd00:ec2::254"]],
+    ["AWS IPv6 metadata, expanded", ["fd00:0ec2:0000:0000:0000:0000:0000:0254"]],
+    ["AWS IPv4 metadata", ["169.254.169.254"]],
+    ["IPv4 link-local", ["169.254.10.1"]],
+    ["unallocated fc00::/8", ["fc00::20"]],
+    ["a valid address beside IPv6 metadata", ["10.0.4.20", "fd00:ec2::254"]],
+    ["nothing", []],
+  ])("refuses the pinned host when it resolves to %s", async (_label, addresses) => {
+    await expect(
+      assertSafeRemoteUrl("https://mcp.private.example.test/mcp", resolvesTo(...addresses), pin),
+    ).rejects.toThrow(/private addresses/);
+  });
+
+  it.each([
+    "https://other.private.example.test/mcp",
+    "https://sub.mcp.private.example.test/mcp",
+    "https://mcp.private.example.test.attacker.test/mcp",
+    "https://private.example.test/mcp",
+  ])("still refuses any other host that resolves privately: %s", async (endpoint) => {
+    await expect(assertSafeRemoteUrl(endpoint, resolvesTo("10.0.4.20"), pin)).rejects.toThrow(
+      "Connector URL resolves to a private address",
+    );
+  });
+
+  it("still refuses private IP literals", async () => {
+    await expect(
+      assertSafeRemoteUrl("https://10.0.4.20/mcp", resolvesTo("10.0.4.20"), pin),
+    ).rejects.toThrow(/private host/);
+    await expect(
+      assertSafeRemoteUrl("https://10.0.4.20/mcp", resolvesTo("10.0.4.20"), {
+        privateEndpointHost: "10.0.4.20",
+      }),
+    ).rejects.toThrow(/private host/);
+  });
+
+  it("still blocks cloud metadata hostnames even when pinned", async () => {
+    await expect(
+      assertSafeRemoteUrl("https://metadata.google.internal/", resolvesTo("10.0.4.20"), {
+        privateEndpointHost: "metadata.google.internal",
+      }),
+    ).rejects.toThrow(/private host/);
+  });
+
+  it("applies the same pin in the lookup used by the network connection", async () => {
+    const lookup = createSafeLookup(resolvesTo("10.0.4.20"), pin);
+    await expect(lookupError(lookup, "mcp.private.example.test")).resolves.toBeNull();
+    await expect(lookupError(lookup, "other.private.example.test")).resolves.toMatchObject({
+      message: "Connector URL resolves to a private address",
+    });
+    for (const address of ["203.0.113.10", "fd00:ec2::254"]) {
+      await expect(
+        lookupError(createSafeLookup(resolvesTo(address), pin), "mcp.private.example.test"),
+      ).resolves.toMatchObject({
+        message: "Private endpoint must resolve only to private addresses",
+      });
+    }
+  });
+});

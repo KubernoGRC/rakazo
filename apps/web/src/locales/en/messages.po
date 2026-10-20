@@ -4419,6 +4419,10 @@ msgid "Sign in again"
 msgstr "Sign in again"
 
 #: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "Sign in through your organisation's portal"
+
+#: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"
 msgstr "Sign in to Rakazo"
 

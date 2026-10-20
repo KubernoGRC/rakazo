@@ -801,6 +801,8 @@ export const ZH_MESSAGES: Record<string, string> = {
   "Privacy policy": "隐私政策",
   "Continue with {name}": "通过 {name} 继续",
   "Could not load sign-in options": "无法加载登录选项",
+  "This server uses your organisation's sign-in in a web browser":
+    "此服务器使用您组织的登录方式，请在网页浏览器中登录",
   "Deletion code": "删除验证码",
   "Email is not allowed to register": "该邮箱不允许注册",
   "Email verification required": "需要验证邮箱",
