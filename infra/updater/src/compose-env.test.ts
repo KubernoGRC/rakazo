@@ -39,6 +39,8 @@ const SOURCES = {
 const KUBERNETES_SANDBOX =
   "SANDBOX_PROVIDER=kubernetes runs the api and worker in a cluster, not Compose";
 
+const FORK_DEPLOYMENT = "fork setting the deployment supplies through its own compose overlay";
+
 /** Read by code but never passed to the api or worker containers, with the reason. */
 const NOT_PASSED: Record<string, string> = {
   VITEST: "set by the test runner",
@@ -67,6 +69,16 @@ const NOT_PASSED: Record<string, string> = {
   KUBERNETES_SANDBOX_POD_LABELS: KUBERNETES_SANDBOX,
   KUBERNETES_SANDBOX_READY_TIMEOUT_MS: KUBERNETES_SANDBOX,
   KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME: KUBERNETES_SANDBOX,
+  // Fork: the deployment adds these itself (docs/fork-access-identity.md,
+  // docs/fork-deployment-connectors.md); the compose files never carry them.
+  ACCESS_IDENTITY_ENABLED: FORK_DEPLOYMENT,
+  ACCESS_IDENTITY_ISSUER: FORK_DEPLOYMENT,
+  ACCESS_IDENTITY_AUDIENCE: FORK_DEPLOYMENT,
+  ACCESS_IDENTITY_CERTS_FILE: FORK_DEPLOYMENT,
+  ACCESS_IDENTITY_LOGOUT_URL: FORK_DEPLOYMENT,
+  DEPLOYMENT_MCP_URL: FORK_DEPLOYMENT,
+  DEPLOYMENT_MCP_TOKEN: FORK_DEPLOYMENT,
+  DEPLOYMENT_MCP_PRIVATE_ENDPOINT: FORK_DEPLOYMENT,
 };
 
 /**

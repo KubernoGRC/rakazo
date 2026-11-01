@@ -858,6 +858,8 @@ export const JA_MESSAGES: Record<string, string> = {
   "Privacy policy": "プライバシーポリシー",
   "Continue with {name}": "{name}で続行",
   "Could not load sign-in options": "ログイン方法を読み込めませんでした",
+  "This server uses your organisation's sign-in in a web browser":
+    "このサーバーでは、Webブラウザで組織のサインインを使用します",
   "Deletion code": "削除コード",
   "Email is not allowed to register": "このメールアドレスは登録できません",
   "Email verification required": "メールアドレスの確認が必要です",

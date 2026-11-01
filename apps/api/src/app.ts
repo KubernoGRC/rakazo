@@ -47,6 +47,7 @@ import {
   createSecretStore,
   createTicketChangeNotifier,
   createWebProvider,
+  deploymentConnectorProviders,
   deploymentModelUsageLookup,
   EmailEmulator,
   ExpoPushProvider,
@@ -83,7 +84,13 @@ import {
   verifyModelServesAgents,
   withSecretPersistence,
 } from "@rakazo/adapters";
-import { createAuth, isBlockedAuthPath, loopbackTwinOrigins } from "@rakazo/auth";
+import {
+  ACCESS_PROVIDER_ID,
+  createAccessVerifier,
+  createAuth,
+  isBlockedAuthPath,
+  loopbackTwinOrigins,
+} from "@rakazo/auth";
 import type { Actor, AuthCapabilities } from "@rakazo/contracts";
 import { isLocalhostOrLoopbackIp, SERVER_BUILD_HEADER } from "@rakazo/contracts";
 import { signupPolicyFromEnv } from "@rakazo/core";
@@ -119,6 +126,7 @@ import { requestLogging } from "@rakazo/logging/hono";
 import { MarkdownMemoryStore } from "@rakazo/memory";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { accessIdentityGate, createAccessSessionBinding } from "./access-identity.js";
 import { deleteAccountContent } from "./account-deletion.js";
 import { mountAppAssociation, nativePasskeys } from "./app-association.js";
 import { storeInboundAttachment } from "./artifacts.js";
@@ -443,14 +451,21 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         : undefined),
     pipedream,
   });
-  const stack = createConnectorStack(composioOverride, [
-    installed,
-    ...integrationSettings
-      .providers()
-      .filter((provider) => !composioOverride || provider.describe().id !== "composio"),
-    mcp,
-    ...connectorOverrides,
-  ]);
+  const stack = createConnectorStack(
+    composioOverride,
+    deploymentConnectorProviders(
+      env.deploymentConnectors,
+      [
+        installed,
+        ...integrationSettings
+          .providers()
+          .filter((provider) => !composioOverride || provider.describe().id !== "composio"),
+        mcp,
+        ...connectorOverrides,
+      ],
+      remoteConnectors,
+    ),
+  );
   integrationSettings.warmDirectories();
   const runtime =
     runtimeOverride ??
@@ -467,11 +482,14 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       jobs,
       accessToken: env.expoAccessToken,
     });
+  // Fork: trusted access-proxy identity; see docs/fork-access-identity.md.
+  const accessVerifier = env.accessIdentity ? createAccessVerifier(env.accessIdentity) : undefined;
   const auth = createAuth(prisma, {
     analytics,
     passwordAuth: env.passwordAuth,
     breachedPasswordCheck: env.breachedPasswordCheck,
     oidc: env.oidc,
+    accessIdentity: accessVerifier,
     secret: env.authSecret,
     baseURL: env.authUrl,
     webOrigin: env.webOrigin,
@@ -524,6 +542,23 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   const oauthTokenUpgrade = auth
     .encryptStoredOAuthTokens()
     .catch((error) => getLogger().error("oauth token encryption upgrade failed", error));
+  const accessSessionBound = accessVerifier
+    ? createAccessSessionBinding(accessVerifier, {
+        linkedSubject: async (userId) =>
+          (
+            await prisma.account.findFirst({
+              where: { userId, providerId: ACCESS_PROVIDER_ID },
+              select: { accountId: true },
+            })
+          )?.accountId,
+        endSession: async (session) => {
+          await prisma.session.deleteMany({ where: { id: session.id } });
+          await pushTokens
+            .endSession(session.userId, session.id)
+            .catch((error) => getLogger().error("push token removal failed", error));
+        },
+      })
+    : undefined;
   // One provider instance so emulator launches and polls share the same Map.
   const cloudAgent = createCloudAgentConnection({
     CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
@@ -564,6 +599,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       env.composioApiKey ?? "",
       env.cursorApiKey ?? "",
       process.env.TYPESAFE_API_KEY ?? "",
+      env.deploymentConnectors.mcp?.token ?? "",
     ].filter(Boolean),
     secretStore: secrets,
     secretHttp: remoteConnectors,
@@ -726,12 +762,18 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       c.header("cache-control", "no-store");
     });
   }
+  // Fork: under access identity every other route needs a verified assertion.
+  if (accessVerifier) app.use("*", accessIdentityGate(accessVerifier));
   app.get("/api/auth/capabilities", (c) => {
     return c.json({
       sso: env.oidc
         ? { name: env.oidc.name, availability: auth.ssoAvailability() ?? "checking" }
         : null,
       passwordAuth: env.passwordAuth !== false,
+      ...(accessVerifier ? { accessIdentity: true } : {}),
+      ...(accessVerifier && env.accessIdentity?.logoutUrl
+        ? { accessLogoutUrl: env.accessIdentity.logoutUrl }
+        : {}),
       passwordReset: env.passwordAuth !== false && Boolean(email),
       resetUrl:
         env.passwordAuth !== false && email ? new URL("/reset-password", env.webOrigin).href : null,
@@ -779,6 +821,11 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     if (isBlockedAuthPath(path)) {
       return c.json({ error: "Not available in version 1" }, 404);
     }
+    if (accessSessionBound) {
+      // End a session bound to another identity before Better Auth reads it.
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (session?.user) await accessSessionBound(c.req.raw, session);
+    }
     const ip = requestClientIp(c);
     const response = await auth.handler(withClientIp(emptyAuthBodyAsJson(c.req.raw), ip));
     await auditAuthResponse(path, ip, response);
@@ -793,6 +840,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     // The bearer plugin turns a signed `Authorization: Bearer` into the session cookie.
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session?.user) return null;
+    if (accessSessionBound && !(await accessSessionBound(request, session))) return null;
     const actor = await actorFromMembership(
       requireMembership(prisma, session.user.id, request.headers.get("x-rakazo-space-id")),
     );
@@ -1248,6 +1296,11 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
           prisma.$executeRaw`SET LOCAL statement_timeout = 1500`,
           prisma.$queryRaw`SELECT 1`,
         ]),
+      // Fork: without a usable key set every assertion is refused, so do not take traffic.
+      accessVerifier
+        ? async () =>
+            (await accessVerifier.ready()) ? undefined : "access_identity_keys_unavailable"
+        : undefined,
     ),
   );
 

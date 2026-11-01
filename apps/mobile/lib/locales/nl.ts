@@ -868,6 +868,8 @@ export const NL_MESSAGES: Record<string, string> = {
   "Privacy policy": "Privacybeleid",
   "Continue with {name}": "Doorgaan met {name}",
   "Could not load sign-in options": "Aanmeldopties laden mislukt",
+  "This server uses your organisation's sign-in in a web browser":
+    "Deze server gebruikt de aanmelding van je organisatie in een webbrowser",
   "Deletion code": "Verwijderingscode",
   "Email is not allowed to register": "Dit e-mailadres mag niet worden geregistreerd",
   "Email verification required": "E-mailverificatie vereist",

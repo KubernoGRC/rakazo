@@ -6033,3 +6033,7 @@ msgstr "Je spraakaanbieder heeft geen tegoed meer."
 #: src/lib/user-error.ts
 msgid "Your voice provider key was rejected."
 msgstr "Je spraakaanbieder heeft de sleutel geweigerd."
+
+#: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "Meld je aan via de portal van je organisatie"

@@ -4986,6 +4986,10 @@ msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "התחברו ב-<0>{0}</0> והדביקו כאן את הקוד."
 
 #: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr ""
+
+#: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"
 msgstr "התחברות ל-Rakazo"
 

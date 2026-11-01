@@ -31,6 +31,8 @@ import {
   createTicketChangeNotifier,
   createWebProvider,
   databaseCapacityBackoffMs,
+  deploymentConnectorConfigFromEnv,
+  deploymentConnectorProviders,
   deploymentModelUsageLookup,
   ExpoPushProvider,
   GraphileJobPublisher,
@@ -197,11 +199,15 @@ async function main() {
       pipedream,
     },
   );
-  const stack = createConnectorStack(undefined, [
-    new InstalledConnectorProvider(prisma, secrets, {}, allowPrivateEndpoint),
-    ...integrationSettings.providers(),
-    mcp,
-  ]);
+  const deploymentConnectors = deploymentConnectorConfigFromEnv(process.env);
+  const stack = createConnectorStack(
+    undefined,
+    deploymentConnectorProviders(deploymentConnectors, [
+      new InstalledConnectorProvider(prisma, secrets, {}, allowPrivateEndpoint),
+      ...integrationSettings.providers(),
+      mcp,
+    ]),
+  );
   integrationSettings.warmDirectories();
   const memoryProviders = new SpaceMemoryProviderResolver(prisma, secrets);
   const home = createAgentHomeStore(dataDir, prisma);
@@ -266,6 +272,7 @@ async function main() {
       process.env.COMPOSIO_API_KEY ?? "",
       process.env.CURSOR_API_KEY ?? "",
       process.env.TYPESAFE_API_KEY ?? "",
+      deploymentConnectors.mcp?.token ?? "",
     ].filter(Boolean),
     secretStore: secrets,
     mcpAllowPrivateEndpoint: process.env.MCP_ALLOW_PRIVATE_ENDPOINT === "true",

@@ -26,6 +26,7 @@ import {
 } from "@rakazo/ui-web";
 import { Check } from "lucide-react";
 import { useState } from "react";
+import { leaveThroughAccessLogout } from "../lib/access-identity";
 import { rpc } from "../lib/rpc";
 import { useSignOut } from "../lib/sign-out";
 
@@ -83,7 +84,11 @@ export function CreditChoice({ status }: { status: BillingStatus }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState(false);
   const { logOut, signingOut } = useSignOut(
-    () => window.location.assign("/sign-in"),
+    // Fork: continue to the access proxy's logout when the deployment names one.
+    () =>
+      void leaveThroughAccessLogout(true).then((leaving) => {
+        if (!leaving) window.location.assign("/sign-in");
+      }),
     () => setError(true),
   );
   async function choose(ownKey: boolean) {

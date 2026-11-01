@@ -5,6 +5,7 @@ import { Check } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { CreditChoice } from "../components/ModelCredits";
+import { leaveThroughAccessLogout } from "../lib/access-identity";
 import { formatBillingPrice } from "../lib/billing";
 import { clearSpaceSelection, rpc } from "../lib/rpc";
 import { useSignOut } from "../lib/sign-out";
@@ -25,7 +26,10 @@ function LegacyPaywallPage({ status }: { status: BillingStatus }) {
   const [error, setError] = useState<string | null>(null);
   const { signingOut, logOut } = useSignOut(() => {
     clearSpaceSelection();
-    navigate("/");
+    // Fork: continue to the access proxy's logout when the deployment names one.
+    void leaveThroughAccessLogout(true).then((leaving) => {
+      if (!leaving) navigate("/");
+    });
   }, setError);
   // An unpaid or paused subscription resumes from the portal; a new checkout would bill twice.
   const resumable = status.state === "unpaid" || status.state === "paused";

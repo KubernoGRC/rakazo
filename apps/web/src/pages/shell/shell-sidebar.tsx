@@ -13,6 +13,7 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 import { PasskeyOffer } from "../../components/PasskeyOffer";
 import { SidebarFooter } from "../../components/SidebarFooter";
+import { leaveThroughAccessLogout } from "../../lib/access-identity";
 import type { BotsSidebarDensity } from "../../lib/bots-sidebar-density-pref";
 import type { Panel } from "../../lib/right-panel-state";
 import { clearSpaceSelection } from "../../lib/rpc";
@@ -276,7 +277,10 @@ function ShellSidebarFooter({
   const [logOutError, setLogOutError] = useState<string | null>(null);
   const { signingOut, logOut } = useSignOut(() => {
     clearSpaceSelection();
-    navigate("/");
+    // Fork: continue to the access proxy's logout when the deployment names one.
+    void leaveThroughAccessLogout(true).then((leaving) => {
+      if (!leaving) navigate("/");
+    });
   }, setLogOutError);
   const { label: userName, initial: initials } = accountDisplay(user ?? {}, t`You`);
   return (
