@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import * as Plot from "@observablehq/plot";
 import { MAX_CHART_DATA_ROWS } from "@rakazo/contracts";
-import { autoType, csvParse, tsvParse } from "d3-dsv";
+import { autoType, csvParseRows, tsvParseRows } from "d3-dsv";
 
 /**
  * Declarative, JSON-only surface over Observable Plot for the render_plot
@@ -109,6 +109,18 @@ const DATALESS_MARKS = {
   sphere: Plot.sphere,
   graticule: Plot.graticule,
 } as unknown as Record<string, (options: Record<string, unknown>) => Plot.Markish>;
+
+const MAX_PLOT_TICKS = 1_000;
+
+function assertPlotTickLimits(spec: PlotSpec): void {
+  // Tick counts generate new data independently of the input-row limit.
+  const axes = [spec.x, spec.y, spec.fx, spec.fy, ...spec.marks.map((mark) => mark.options)];
+  for (const options of axes) {
+    if (typeof options?.ticks === "number" && options.ticks > MAX_PLOT_TICKS) {
+      throw new Error("Plot tick count exceeds the 1,000-tick limit.");
+    }
+  }
+}
 
 type TransformFactory = (
   outputs: Record<string, unknown>,
@@ -253,9 +265,16 @@ function buildMark(
   return factory(data, finalOptions);
 }
 
+/** csvParse builds row objects with `new Function`, which the web app's CSP blocks. */
+function delimitedRows([columns = [], ...rows]: string[][]): unknown[] {
+  return rows.map((row) =>
+    autoType(Object.fromEntries(columns.map((column, index) => [column, row[index] ?? ""]))),
+  );
+}
+
 export function parsePlotData(name: string, content: string): unknown[] {
-  if (/\.csv$/i.test(name)) return csvParse(content, autoType);
-  if (/\.tsv$/i.test(name)) return tsvParse(content, autoType);
+  if (/\.csv$/i.test(name)) return delimitedRows(csvParseRows(content));
+  if (/\.tsv$/i.test(name)) return delimitedRows(tsvParseRows(content));
   const parsed = JSON.parse(content) as unknown;
   if (!Array.isArray(parsed))
     throw new Error("JSON data files must contain a top-level array of rows");
@@ -315,6 +334,7 @@ export function buildPlotParts(
     throw new Error("The spec needs a non-empty marks array.");
   }
   assertPlotDataWithinLimits(spec, data);
+  assertPlotTickLimits(spec);
   const { title, marks, data: nestedData, ...plotOptions } = spec;
   const sharedData = data ?? (Array.isArray(nestedData) ? nestedData : undefined);
   const normalizedData = new WeakMap<unknown[], unknown[]>();

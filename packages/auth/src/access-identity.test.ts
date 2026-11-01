@@ -53,7 +53,11 @@ vi.mock("better-auth/adapters/prisma", async () => {
     },
   };
 });
-vi.mock("@rakazo/db", () => ({ bootstrapUserSpace: vi.fn(async () => ({ spaceId: "space-1" })) }));
+vi.mock("@rakazo/db", () => ({
+  bootstrapUserSpace: vi.fn(async () => ({ spaceId: "space-1" })),
+  recordSecurityEvent: vi.fn(async () => undefined),
+  personalOrganizationIds: vi.fn(async () => []),
+}));
 
 const ISSUER = "https://team.access.example.test";
 const AUDIENCE = "app-audience";
@@ -355,6 +359,7 @@ function fixture() {
     member: { findMany: vi.fn(async () => []) },
     messagingIdentity: { deleteMany: vi.fn(async () => ({ count: 0 })) },
     organization: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+    passkey: { deleteMany: vi.fn(async () => ({ count: 0 })) },
     spaceMember: {
       findFirst: vi.fn(async ({ where }: { where: { userId: string } }) =>
         members.has(where.userId) ? { spaceId: "space-1" } : null,

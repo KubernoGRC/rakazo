@@ -1,8 +1,11 @@
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
+import { SHIPPED_BOT_AVATAR_SHAPE_KEYS } from "@rakazo/core";
 import {
+  BOT_AVATAR_COLORS,
   BotAvatar,
-  DEFAULT_GROK_BOT_COLOR,
+  BotShapePreview,
+  DEFAULT_BOT_AVATAR_COLOR,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -10,12 +13,124 @@ import {
   DialogHeader,
   DialogTitle,
   defaultBotAvatarValue,
-  GROK_BOT_COLORS,
-  GrokShapePreview,
   parseBotAvatar,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
 } from "@rakazo/ui-web";
+import { Button } from "@rakazo/ui-web/components/ui/button";
 import { Check, Pencil, Upload, X } from "lucide-react";
-import { type ClipboardEvent, type DragEvent, useRef, useState } from "react";
+import type { ClipboardEvent, DragEvent } from "react";
+import { useRef, useState } from "react";
+
+/**
+ * The shape grid and color row for a bot's look. With `organicIdentities`, the grid also offers
+ * the organic body each identity draws (for a bot that has no id yet); without them, "Default"
+ * restores the bot's own organic body.
+ */
+export function BotLookPicker({
+  value,
+  identity,
+  organicIdentities,
+  onChange,
+}: {
+  value: string;
+  identity?: string;
+  organicIdentities?: readonly string[];
+  onChange: (value: string, identity?: string) => void;
+}) {
+  const parsed = parseBotAvatar(value);
+  const currentColor = parsed.color || DEFAULT_BOT_AVATAR_COLOR;
+  const isDefaultLook = !parsed.isImage && parsed.shapeIndex === undefined;
+
+  function selectColor(color: string) {
+    onChange(parsed.shapeIndex === undefined ? color : `${color}::shape_${parsed.shapeIndex}`);
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        {organicIdentities ? null : (
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
+              <Trans>Shape</Trans>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              type="button"
+              data-testid="avatar-studio-default"
+              aria-pressed={isDefaultLook}
+              onClick={() => {
+                const next = defaultBotAvatarValue(value);
+                if (next !== value) onChange(next);
+              }}
+              className={`px-3 py-1 text-xs font-medium transition-colors ${
+                isDefaultLook
+                  ? "bg-secondary text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Trans>Default</Trans>
+            </Button>
+          </div>
+        )}
+        <div
+          className={`grid place-items-center gap-2 ${organicIdentities ? "grid-cols-4 sm:grid-cols-8 sm:gap-1" : "grid-cols-4"}`}
+        >
+          {organicIdentities?.map((organicIdentity, index) => (
+            <BotShapePreview
+              key={organicIdentity}
+              identity={organicIdentity}
+              label={t`Shape ${index + 1}`}
+              color={currentColor}
+              selected={isDefaultLook && identity === organicIdentity}
+              onClick={() => onChange(currentColor, organicIdentity)}
+            />
+          ))}
+          {SHIPPED_BOT_AVATAR_SHAPE_KEYS.map((key, shapeIndex) => (
+            <BotShapePreview
+              key={key}
+              shapeIndex={shapeIndex}
+              color={currentColor}
+              selected={!parsed.isImage && parsed.shapeIndex === shapeIndex}
+              onClick={() => onChange(`${currentColor}::shape_${shapeIndex}`)}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="border-t border-border pt-2">
+        {organicIdentities ? null : (
+          <div className="mb-2 text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
+            <Trans>Color</Trans>
+          </div>
+        )}
+        <div className="grid grid-cols-6 place-items-center gap-2">
+          {BOT_AVATAR_COLORS.map((color) => {
+            const selected = currentColor.toLowerCase() === color.toLowerCase() && !parsed.isImage;
+            return (
+              <button
+                key={color}
+                type="button"
+                onClick={() => selectColor(color)}
+                aria-label={t`Color ${color}`}
+                aria-pressed={selected}
+                className={`size-6 rounded-full border transition-transform hover:scale-110 active:scale-95 focus-visible:ring-2 focus-visible:ring-ring ${
+                  selected
+                    ? "scale-105 border-transparent ring-2 ring-foreground ring-offset-2 ring-offset-popover"
+                    : "border-border"
+                }`}
+                style={{ backgroundColor: color }}
+              />
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export interface AvatarStudioPopoverProps {
   value: string;
@@ -38,22 +153,6 @@ export function AvatarStudioPopover({
   const [activeTab, setActiveTab] = useState<"bot" | "upload">("bot");
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const parsed = parseBotAvatar(value, identity);
-  const currentColor = parsed.color || DEFAULT_GROK_BOT_COLOR;
-  const isDefaultLook = !parsed.isImage && parsed.shapeIndex === undefined;
-
-  function selectShape(shapeIndex: number) {
-    onChange(`${currentColor}::shape_${shapeIndex}`);
-  }
-
-  function selectColor(color: string) {
-    if (parsed.shapeIndex === undefined) {
-      onChange(color);
-      return;
-    }
-    onChange(`${color}::shape_${parsed.shapeIndex}`);
-  }
 
   function restoreDefaultAvatar() {
     const next = defaultBotAvatarValue(value);
@@ -142,167 +241,97 @@ export function AvatarStudioPopover({
             <DialogDescription className="sr-only">
               <Trans>Choose a bot shape, color, or upload an image</Trans>
             </DialogDescription>
-            <button
+            <Button
+              variant="ghost"
+              size="icon-sm"
               type="button"
               onClick={() => setOpen(false)}
-              className="flex size-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="rounded-full text-muted-foreground"
               aria-label={t`Close`}
             >
               <X size={16} />
-            </button>
+            </Button>
           </DialogHeader>
 
           <div className="flex flex-col items-center justify-center py-2">
             <BotAvatar color={value} identity={identity} size={78} status={status} />
           </div>
 
-          <div className="flex items-center justify-between border-b border-border pb-1">
-            <div className="flex items-center rounded-full bg-muted p-1 text-xs">
-              <button
+          <Tabs
+            value={activeTab}
+            onValueChange={(next) => setActiveTab(next as "bot" | "upload")}
+            className="gap-4"
+          >
+            <div className="flex items-center justify-between border-b border-border pb-1">
+              <TabsList className="rounded-full">
+                <TabsTrigger value="bot" className="rounded-full px-3 text-xs">
+                  <Trans>Bot</Trans>
+                </TabsTrigger>
+                <TabsTrigger value="upload" className="rounded-full px-3 text-xs">
+                  <Trans>Upload</Trans>
+                </TabsTrigger>
+              </TabsList>
+
+              <Button
+                variant="ghost"
+                size="sm"
                 type="button"
-                onClick={() => setActiveTab("bot")}
-                aria-pressed={activeTab === "bot"}
-                className={`rounded-full px-3 py-1 font-medium transition-colors ${
-                  activeTab === "bot"
-                    ? "bg-card text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
+                onClick={restoreDefaultAvatar}
+                className="text-xs text-muted-foreground"
               >
-                <Trans>Bot</Trans>
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab("upload")}
-                aria-pressed={activeTab === "upload"}
-                className={`rounded-full px-3 py-1 font-medium transition-colors ${
-                  activeTab === "upload"
-                    ? "bg-card text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Trans>Upload</Trans>
-              </button>
+                <Trans>Reset</Trans>
+              </Button>
             </div>
 
-            <button
-              type="button"
-              onClick={restoreDefaultAvatar}
-              className="px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <Trans>Reset</Trans>
-            </button>
-          </div>
-
-          {activeTab === "bot" ? (
-            <div className="space-y-4 pt-1" data-testid="avatar-studio-bot-tab">
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <div className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
-                    <Trans>Shape</Trans>
-                  </div>
-                  <button
-                    type="button"
-                    data-testid="avatar-studio-default"
-                    aria-pressed={isDefaultLook}
-                    onClick={restoreDefaultAvatar}
-                    className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                      isDefaultLook
-                        ? "bg-secondary text-foreground"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <Trans>Default</Trans>
-                  </button>
-                </div>
-                <div className="grid grid-cols-4 place-items-center gap-2">
-                  {[0, 1, 2, 3, 4, 5, 6, 7].map((shapeIndex) => (
-                    <GrokShapePreview
-                      key={shapeIndex}
-                      shapeIndex={shapeIndex}
-                      color={currentColor}
-                      selected={!parsed.isImage && parsed.shapeIndex === shapeIndex}
-                      onClick={() => selectShape(shapeIndex)}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              <div className="border-t border-border pt-2">
-                <div className="mb-2 text-[11px] font-medium tracking-wider text-muted-foreground uppercase">
-                  <Trans>Color</Trans>
-                </div>
-                <div className="grid grid-cols-6 place-items-center gap-2">
-                  {GROK_BOT_COLORS.map((color) => {
-                    const selected =
-                      currentColor.toLowerCase() === color.toLowerCase() && !parsed.isImage;
-                    return (
-                      <button
-                        key={color}
-                        type="button"
-                        onClick={() => selectColor(color)}
-                        aria-label={t`Color ${color}`}
-                        aria-pressed={selected}
-                        className={`size-6 rounded-full border transition-transform hover:scale-110 active:scale-95 focus-visible:ring-2 focus-visible:ring-ring ${
-                          selected
-                            ? "scale-105 border-transparent ring-2 ring-foreground ring-offset-2 ring-offset-popover"
-                            : "border-border"
-                        }`}
-                        style={{ backgroundColor: color }}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <button
-              type="button"
-              aria-label={t`Image upload area`}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragOver(true);
-              }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              onPaste={handlePaste}
-              onClick={() => fileInputRef.current?.click()}
-              className={`flex w-full flex-col items-center justify-center rounded-xl border border-dashed p-6 text-center transition-colors ${
-                dragOver
-                  ? "border-primary bg-primary/10"
-                  : "border-border bg-muted hover:border-foreground/30"
-              }`}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) processImageFile(file);
+            <TabsContent value="bot" className="pt-1" data-testid="avatar-studio-bot-tab">
+              <BotLookPicker value={value} onChange={onChange} />
+            </TabsContent>
+            <TabsContent value="upload">
+              <button
+                type="button"
+                aria-label={t`Image upload area`}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setDragOver(true);
                 }}
-              />
-              <div className="mb-2 grid size-10 place-items-center rounded-full bg-secondary text-muted-foreground">
-                <Upload size={18} strokeWidth={1.8} />
-              </div>
-              <p className="text-[12.5px] font-medium text-muted-foreground">
-                <Trans>Drag, drop, or paste an image</Trans>
-              </p>
-              <span className="mt-3 rounded-lg bg-secondary px-3 py-1.5 text-xs font-medium text-foreground">
-                <Trans>Choose file</Trans>
-              </span>
-            </button>
-          )}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+                onPaste={handlePaste}
+                onClick={() => fileInputRef.current?.click()}
+                className={`flex w-full flex-col items-center justify-center rounded-xl border border-dashed p-6 text-center transition-colors ${
+                  dragOver
+                    ? "border-primary bg-primary/10"
+                    : "border-border bg-muted hover:border-foreground/30"
+                }`}
+              >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) processImageFile(file);
+                  }}
+                />
+                <div className="mb-2 grid size-10 place-items-center rounded-full bg-secondary text-muted-foreground">
+                  <Upload size={18} strokeWidth={1.8} />
+                </div>
+                <p className="text-[12.5px] font-medium text-muted-foreground">
+                  <Trans>Drag, drop, or paste an image</Trans>
+                </p>
+                <span className="mt-3 rounded-lg bg-secondary px-3 py-1.5 text-xs font-medium text-foreground">
+                  <Trans>Choose file</Trans>
+                </span>
+              </button>
+            </TabsContent>
+          </Tabs>
 
           <DialogFooter className="border-border sm:justify-end">
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="flex items-center gap-1.5 rounded-xl bg-secondary px-4 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:bg-accent"
-            >
+            <Button variant="secondary" size="sm" type="button" onClick={() => setOpen(false)}>
               <Check size={14} />
               <Trans>Done</Trans>
-            </button>
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

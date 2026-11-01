@@ -10,7 +10,13 @@ export const authCapabilitiesSchema = z.object({
   passwordAuth: z.boolean(),
   passwordReset: z.boolean(),
   resetUrl: z.string().url().nullable(),
+  // Older servers omit this field; clients treat omission as unavailable.
+  emailCode: z.boolean().optional(),
   billing: z.boolean().optional(),
+  /** WebAuthn relying party ID; null or omitted when this server does not offer passkeys. */
+  passkeyRpId: z.string().min(1).nullable().optional(),
+  /** Native apps this domain vouches for; omitted by older servers, which means none. */
+  nativePasskeys: z.object({ ios: z.boolean(), android: z.boolean() }).optional(),
   /** Fork: sign-in happens only through a trusted access proxy in front of the server. */
   accessIdentity: z.boolean().optional(),
   /** Fork: where sign-out continues to, to end the access proxy's session too. */

@@ -1,13 +1,15 @@
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import {
+  ipVersion,
+  isCloudMetadataHost,
+  isInternalHostname,
+  isNonPublicAddress,
+  normalizeHost,
+} from "@rakazo/contracts";
 import { readBoundedResponseBytes } from "@rakazo/core";
 import { Agent } from "undici";
-import {
-  createAddressCheckedLookup,
-  isPrivateAddress,
-  type ResolvedAddress,
-  type ResolveHostname,
-} from "./network-address.js";
+import type { ResolvedAddress, ResolveHostname } from "./network-address.js";
+import { createAddressCheckedLookup, egressRefused } from "./network-address.js";
 import { fetchPairedWithDispatcher } from "./undici-fetch.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -69,26 +71,21 @@ export async function assertSafeWebUrl(
   }
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (isBlockedHostname(hostname)) {
-    throw new Error("URL targets a private or internal host");
+    throw egressRefused(hostname, new Error("URL targets a private or internal host"));
   }
-  assertPublicAddresses(await withAbort(resolve(hostname), signal));
+  const addresses = await withAbort(resolve(hostname), signal);
+  try {
+    assertPublicAddresses(addresses);
+  } catch (error) {
+    throw egressRefused(hostname, error);
+  }
   return url;
 }
 
 export function isBlockedHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/\.$/, "");
-  if (
-    normalized === "localhost" ||
-    normalized.endsWith(".localhost") ||
-    normalized.endsWith(".local") ||
-    normalized.endsWith(".internal") ||
-    normalized === "metadata.google.internal" ||
-    normalized === "metadata.goog"
-  ) {
-    return true;
-  }
-  if (isIP(normalized) !== 0) return isPrivateAddress(normalized);
-  return false;
+  const host = normalizeHost(hostname);
+  if (isInternalHostname(host) || isCloudMetadataHost(host)) return true;
+  return ipVersion(host) !== 0 && isNonPublicAddress(host);
 }
 
 type SafeWebResponse<Body> = { url: string; body: Body; contentType: string | null };
@@ -279,7 +276,7 @@ async function readBodyPrefix(
 }
 
 function assertPublicAddresses(addresses: ResolvedAddress[]): void {
-  if (addresses.length === 0 || addresses.some((entry) => isPrivateAddress(entry.address))) {
+  if (addresses.length === 0 || addresses.some((entry) => isNonPublicAddress(entry.address))) {
     throw new Error("URL resolves to a private address");
   }
 }

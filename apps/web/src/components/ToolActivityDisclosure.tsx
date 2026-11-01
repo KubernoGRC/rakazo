@@ -1,5 +1,10 @@
-import { Plural } from "@lingui/react/macro";
+import { Plural, Trans } from "@lingui/react/macro";
 import type { ThreadMessage } from "@rakazo/contracts";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@rakazo/ui-web/components/ui/collapsible";
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { formatToolActivityDuration, toolStepCount } from "../lib/tool-activity-view";
@@ -57,9 +62,7 @@ export function ToolSteps({
 
 /**
  * The tool-activity card. It starts open while the run is live and folds when the run
- * ends: the `key` swap remounts the element, so `open` restarts from `live`. A manual
- * collapse during the run holds, because React only rewrites `open` when the prop
- * changes, and it stays `true` for the whole run.
+ * ends. The keyed default keeps manual toggles until the run changes phase.
  */
 export function ToolActivityDisclosure({
   live,
@@ -73,15 +76,16 @@ export function ToolActivityDisclosure({
   children: ReactNode;
 }) {
   const duration = formatToolActivityDuration(durationMs);
+  const toolCount = stepCount;
   return (
-    <details
+    <Collapsible
       key={live ? "working" : "actions"}
-      open={live}
+      defaultOpen={live}
       data-testid="tool-activity"
       data-live={live || undefined}
       className="group"
     >
-      <summary
+      <CollapsibleTrigger
         className={`flex min-h-6 w-fit cursor-pointer list-none items-center gap-1 rounded-md py-0.5 pe-1.5 text-[13px] font-medium outline-none hover:text-foreground/75 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
           live ? "text-foreground/75" : "text-muted-foreground"
         }`}
@@ -90,19 +94,20 @@ export function ToolActivityDisclosure({
           aria-hidden
           size={14}
           strokeWidth={1.8}
-          className="transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none"
+          className="transition-transform duration-150 group-data-panel-open:rotate-90 motion-reduce:transition-none"
         />
-        {live ? (
-          <Plural value={stepCount} one="Working… · # tool" other="Working… · # tools" />
-        ) : (
-          <>
-            <Plural value={stepCount} one="Done · # tool" other="Done · # tools" />
-            {duration ? ` · ${duration}` : null}
-          </>
-        )}
-      </summary>
-      <div className="ms-[7px] mt-0.5 border-s border-border ps-3">{children}</div>
-    </details>
+        <span className="flex items-center gap-2">
+          <span>{live ? <Trans>Working…</Trans> : <Trans>Done</Trans>}</span>
+          <span>
+            <Plural value={toolCount} one="# tool" other="# tools" />
+          </span>
+          {!live && duration ? <span>{duration}</span> : null}
+        </span>
+      </CollapsibleTrigger>
+      <CollapsibleContent hiddenUntilFound>
+        <div className="ms-[7px] mt-0.5 border-s border-border ps-3">{children}</div>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -122,7 +127,7 @@ export function StandaloneToolActivity({
 }) {
   return (
     <div className="flex justify-start" dir="ltr" data-testid="tool-activity-line">
-      <div className="max-w-[74%] min-w-0 ps-1">
+      <div className="max-w-full min-w-0 ps-1">
         <ToolActivityDisclosure live={live} stepCount={stepCount} durationMs={durationMs}>
           <ToolSteps
             steps={steps}

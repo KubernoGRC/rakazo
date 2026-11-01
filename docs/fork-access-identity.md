@@ -30,6 +30,9 @@ The API refuses to start when the mode is on and any of these hold:
 issuer, so their compose defaults are ignored. The compose files default
 `AUTH_PASSWORD_ENABLED` to `true`, so a compose deployment sets it to `false`. The compose
 files do not pass the `ACCESS_IDENTITY_*` variables through; the deployment adds them.
+Upstream gives `api` and `worker` an explicit `environment:` allowlist rather than
+`env_file: .env`, so a value written only to `.env` never reaches them: the
+deployment's own compose overlay has to pass these to `api`.
 
 ## What the mode enforces
 

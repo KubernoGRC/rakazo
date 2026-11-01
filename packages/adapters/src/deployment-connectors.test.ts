@@ -147,7 +147,6 @@ describe("deploymentConnectorProviders", () => {
     const server = mcpServer();
     const user = provider("installed", ["echo"]);
     const { connector } = createConnectorStack(
-      false,
       undefined,
       deploymentConnectorProviders({ mcp: { endpoint: ENDPOINT, privateEndpoint: true } }, [user], {
         fetch: server.fetch,
@@ -181,7 +180,6 @@ describe("deploymentConnectorProviders", () => {
   it("refuses a user-owned provider that claims the deployment connector id", () => {
     expect(() =>
       createConnectorStack(
-        false,
         undefined,
         deploymentConnectorProviders({ mcp: { endpoint: ENDPOINT, privateEndpoint: false } }, [
           provider("deployment", []),

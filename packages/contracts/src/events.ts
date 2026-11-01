@@ -1,4 +1,5 @@
 import * as z from "zod";
+import { AgentImportSetupItemSchema } from "./agent-import-setup.js";
 import { botSecretDestinationSchema } from "./bot-secrets.js";
 import { Id } from "./ids.js";
 import { McpTransportSchema } from "./mcp.js";
@@ -121,8 +122,12 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     // an ask persisted before an owner toggles the private-HTTP flag still
     // validates on replay.
     credential: botSecretDestinationSchema({ allowPrivateHttpOrigin: true }).optional(),
+    /** On a fetch approval, the site an "always" answer allows. */
+    site: z.string().optional(),
     status: z.enum(["pending", "answered"]).optional(),
     answer: z.string().optional(),
+    /** A secret request the user dismissed instead of answering. */
+    dismissed: z.literal(true).optional(),
     actions: z
       .array(
         z.object({
@@ -221,7 +226,7 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     kind: z.literal("cloud_agent"),
     agentId: z.string(),
     title: z.string(),
-    status: z.enum(["running", "finished", "failed", "cancelled"]),
+    status: z.enum(["running", "finished", "failed", "cancelled", "expired"]),
     url: z.string(),
     branch: z.string().optional(),
     prUrl: z.string().optional(),
@@ -255,6 +260,12 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     endpoint: z.string().nullable(),
     needsOAuth: z.boolean(),
     status: z.enum(["pending", "connected", "dismissed"]).default("pending"),
+  }),
+  z.object({
+    kind: z.literal("import_setup"),
+    items: z.array(AgentImportSetupItemSchema),
+    /** Set by Undo, which also empties `items`; the checklist is then hidden. */
+    undone: z.boolean().optional(),
   }),
   z.object({
     kind: z.literal("image"),

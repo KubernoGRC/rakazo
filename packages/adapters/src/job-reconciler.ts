@@ -3,6 +3,7 @@ import { messagingDeliverJob, routineWakeupJob, runContinueJob } from "@rakazo/a
 import type { MessageBlock } from "@rakazo/contracts";
 import { stuckWorkStatusMessages } from "@rakazo/core";
 import type { Pool, PrismaClient, ThreadEvents } from "@rakazo/db";
+import { reconcileComputerRuns } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import type { PoolClient } from "pg";
 import { returnBotMessageOutcome } from "./bot-messages.js";
@@ -16,6 +17,11 @@ const DEFAULT_INTERVAL_MS = 30_000;
 const DEFAULT_BATCH_SIZE = 100;
 const ROUTINE_LOOKAHEAD_MS = 60_000;
 const CONTROL_LOOKAHEAD_MS = 60_000;
+/**
+ * A queued run's job lock older than a run lease is abandoned. A live worker
+ * finishing a failed attempt holds it for seconds before Graphile unlocks it.
+ */
+const ABANDONED_QUEUED_LOCK_MS = 5 * 60_000;
 // Two keys give Rakazo's lock a namespace without relying on a hash that might collide
 // with an application using the one-key advisory-lock API.
 const RECONCILIATION_LOCK_NAMESPACE = 1_380_019_075;
@@ -107,7 +113,12 @@ export function createJobReconciler(
     leadership?: ReconciliationLeadership;
     reconcileComputerUpdates?: () => Promise<void>;
     reconcileCloudAgents?: () => Promise<void>;
+    reconcileModelCredits?: () => Promise<void>;
     reconcileRoutineRetryNotices?: () => Promise<void>;
+    reconcileSecurityEventRetention?: () => Promise<void>;
+    reconcileHomeStorage?: () => Promise<void>;
+    reconcileIdleComputers?: () => Promise<void>;
+    reconcileDeadJobs?: () => Promise<void>;
   },
   options: { intervalMs?: number; batchSize?: number } = {},
 ) {
@@ -115,6 +126,7 @@ export function createJobReconciler(
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   let timer: ReturnType<typeof setInterval> | undefined;
   let reconciling: Promise<void> | undefined;
+  let lastCompletedAt = Date.now();
   let stuckCursor: Cursor | undefined;
   let runCursor: Cursor | undefined;
   let routineCursor: Cursor | undefined;
@@ -129,9 +141,15 @@ export function createJobReconciler(
       const auxiliary = await Promise.allSettled(
         [
           () => reconcileCallRequests(deps),
+          () => reconcileComputerRuns(deps.prisma),
           deps.reconcileCloudAgents,
+          deps.reconcileModelCredits,
           deps.reconcileComputerUpdates,
           deps.reconcileRoutineRetryNotices,
+          deps.reconcileSecurityEventRetention,
+          deps.reconcileHomeStorage,
+          deps.reconcileIdleComputers,
+          deps.reconcileDeadJobs,
         ].map(async (reconcile) => reconcile?.()),
       );
       for (const result of auxiliary) {
@@ -202,7 +220,7 @@ export function createJobReconciler(
           },
           orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
           take: batchSize,
-          select: { id: true, updatedAt: true },
+          select: { id: true, status: true, updatedAt: true },
         }),
         deps.prisma.routine.findMany({
           where: {
@@ -334,8 +352,18 @@ export function createJobReconciler(
       // A queued run already has a job while it waits out failure backoff.
       // Default replace would zero that job's attempts and run it now. keepExisting
       // leaves the job while attempts remain, and still replaces one that is exhausted.
+      // A locked job whose worker died is never unlocked, so it is replaced: any lock
+      // for a run whose lease expired, and for a queued run only a lock older than
+      // a lease, since a live worker finishing a failed attempt still holds it.
+      const abandonedQueuedLockAt = new Date(now.getTime() - ABANDONED_QUEUED_LOCK_MS);
       await Promise.all([
-        ...runs.map((run) => deps.jobs.enqueue({ ...runContinueJob(run.id), keepExisting: true })),
+        ...runs.map((run) =>
+          deps.jobs.enqueue({
+            ...runContinueJob(run.id),
+            keepExisting: true,
+            replaceLockedBefore: run.status === "queued" ? abandonedQueuedLockAt : now,
+          }),
+        ),
         ...routines.flatMap((routine) =>
           routine.nextRunAt
             ? [deps.jobs.enqueue(routineWakeupJob(routine.id, routine.nextRunAt))]
@@ -373,9 +401,13 @@ export function createJobReconciler(
           ? { at: lastControl.controlLeaseExpiresAt, id: lastControl.id }
           : undefined;
       if (!controlCursor) controlScanDeadline = undefined;
-    })().finally(() => {
-      reconciling = undefined;
-    });
+    })()
+      .then(() => {
+        lastCompletedAt = Date.now();
+      })
+      .finally(() => {
+        reconciling = undefined;
+      });
     return reconciling;
   };
   const reconcileSafely = () => {
@@ -386,6 +418,7 @@ export function createJobReconciler(
 
   return {
     reconcileOnce,
+    lastCompletedAt: () => lastCompletedAt,
     start() {
       if (timer) return;
       reconcileSafely();

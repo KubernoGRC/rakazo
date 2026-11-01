@@ -37,14 +37,21 @@ export interface RakazoDesktopOAuthCallback {
 }
 
 export interface RakazoDesktop {
+  /** Optional for compatibility with older desktop releases. */
+  badge?: {
+    set: (count: number) => Promise<boolean>;
+  };
   computer?: {
+    /** Native main persists host choice through its local capability, never a user session. */
+    managesHostChoice?: boolean;
     requestAccess: () => Promise<boolean>;
     revokeAccess: () => Promise<void>;
     onConfigure: (listener: () => void) => () => void;
   };
-  /** Only the isolated local settings window is authorized to call this bridge. */
-  localSettings?: {
-    request: (pathname: string, body: string) => Promise<{ status: number; body: string }>;
+  /** Optional for compatibility with older desktop releases. */
+  passkeys?: {
+    /** Relying parties this build is associated with for system passkeys (macOS); others fail. */
+    rpIds: () => Promise<string[]>;
   };
   platform: string;
   window: {
@@ -82,6 +89,8 @@ export interface DesktopSetup {
 
 export interface DesktopSetupState {
   defaultLocalUrl: string;
+  /** Hosted Rakazo origin, saved as an `existing` server when chosen. */
+  cloudUrl: string;
   saved: DesktopSetup | null;
   /** Present when a saved or newly selected server could not be reopened. */
   error?: string;

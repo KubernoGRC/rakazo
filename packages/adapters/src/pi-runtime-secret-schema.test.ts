@@ -2,12 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { builtinAgentTools } from "./builtin-tools.js";
 import { parseConnectorToolArgs } from "./lazy-tool-catalog.js";
-import {
-  jsonField,
-  jsonSchemaParameters,
-  parametersFor,
-  prepareRequestSecretArguments,
-} from "./pi-runtime.js";
+import { jsonField, jsonSchemaParameters, parametersFor } from "./pi-runtime-tool-parameters.js";
+import { prepareRequestSecretArguments } from "./pi-runtime-tools.js";
 
 /**
  * `pi-runtime` used to re-declare `request_secret`'s parameters by hand, and the
@@ -159,6 +155,28 @@ describe("prepareRequestSecretArguments", () => {
         credential: sampleCredential,
       }),
     ).toEqual({ label: "GitHub PAT", purpose: "api_key", credential: sampleCredential });
+  });
+
+  it("keeps a page URL's site, not its path or query", () => {
+    expect(
+      prepareRequestSecretArguments({
+        label: "Sign in",
+        purpose: "password",
+        credential: {
+          name: "site_login",
+          origin: "https://www.example.test/some/login/page?x=1",
+          auth: { type: "login" },
+        },
+      }),
+    ).toEqual({
+      label: "Sign in",
+      purpose: "password",
+      credential: {
+        name: "site_login",
+        origin: "https://www.example.test",
+        auth: { type: "login" },
+      },
+    });
   });
 
   it("keeps replace, so an existing credential can be overwritten", () => {

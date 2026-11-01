@@ -11,6 +11,8 @@ import type {
   BackgroundJob,
   BackgroundJobHandlers,
   BillingCheckoutRequest,
+  BillingCreditCheckoutRequest,
+  BillingCreditPurchase,
   BillingPrice,
   BillingSubscriptionSnapshot,
   BrowserActRequest,
@@ -73,6 +75,7 @@ import type {
   SemanticMemorySaveRequest,
   SnapshotRef,
   SpeechClip,
+  StreamedPortableFile,
   TerminalRequest,
   TransactionalEmail,
   VoiceCapabilities,
@@ -87,6 +90,7 @@ import type {
   WebSearchHit,
   WebSearchRequest,
   WorkspaceDirectoryRequest,
+  WorkspaceExportLimits,
 } from "./types.js";
 
 export interface SandboxProvider {
@@ -117,6 +121,12 @@ export interface SandboxProvider {
       homePath: string;
       providerRef?: string;
       providerKind?: ComputerRef["kind"];
+      /**
+       * When the saved workspace a replacement would restore was read from the computer. A
+       * provider that can only bring `providerRef` back from an older snapshot of its own
+       * reports it gone instead, so the newer save wins.
+       */
+      savedAt?: Date;
     },
     context: AdapterContext,
   ): Promise<ComputerRef>;
@@ -127,6 +137,13 @@ export interface SandboxProvider {
   provisionKind?(): Promise<ComputerRef["kind"]>;
   /** Read-only probe: true only when this exact reference is already running. */
   isRunning?(computer: ComputerRef, context: AdapterContext): Promise<boolean>;
+  /**
+   * Read-only probe: true only when the provider already holds this reference stopped with its
+   * disk kept, so it resumes as it was without anything running now.
+   */
+  isStopped?(computer: ComputerRef, context: AdapterContext): Promise<boolean>;
+  /** True only when this computer currently mounts the server's home directory. */
+  hasMountedHome?(computer: ComputerRef, context: AdapterContext): Promise<boolean>;
   /** Perform idempotent provider setup after the lifecycle has captured the reference. */
   prepare(computer: ComputerRef, context: AdapterContext): Promise<void>;
   execute(
@@ -156,7 +173,7 @@ export interface SandboxProvider {
     computer: ComputerRef,
     request: TerminalRequest,
     context: AdapterContext,
-  ): Promise<{ url: string }>;
+  ): Promise<{ url: string; headers?: Record<string, string> }>;
   setScreenControl?(
     computer: ComputerRef,
     interactive: boolean,
@@ -187,7 +204,12 @@ export interface SandboxProvider {
     options?: { maxBytes?: number },
   ): Promise<Uint8Array>;
   writeFile(computer: ComputerRef, file: PortableFile, context: AdapterContext): Promise<void>;
-  exportWorkspace(computer: ComputerRef, context: AdapterContext): AsyncIterable<PortableFile>;
+  /** Large files may come as streams. A provider that lists first refuses `limits` up front. */
+  exportWorkspace(
+    computer: ComputerRef,
+    context: AdapterContext,
+    limits?: WorkspaceExportLimits,
+  ): AsyncIterable<PortableFile | StreamedPortableFile>;
   importWorkspace(
     computer: ComputerRef,
     files: AsyncIterable<PortableFile>,
@@ -197,7 +219,16 @@ export interface SandboxProvider {
   keepAlive?(computer: ComputerRef): Promise<void>;
   /** Drop a single-screen graphical claim for this bot so another Team bot can use the display. */
   releaseScreen?(computer: ComputerRef, context: AdapterContext): Promise<void>;
-  stop(computer: ComputerRef, context: AdapterContext): Promise<void>;
+  /**
+   * Stops the computer, keeping its disk where the provider can. `discardUnsaved` says nothing on
+   * the computer can be read anymore: a provider that refuses to stop because it cannot save the
+   * disk first stops anyway, keeping its last good copy.
+   */
+  stop(
+    computer: ComputerRef,
+    context: AdapterContext,
+    options?: { discardUnsaved?: boolean },
+  ): Promise<void>;
   destroy(computer: ComputerRef, context: AdapterContext): Promise<void>;
 }
 
@@ -231,6 +262,8 @@ export interface ManagedConnectorProvider
     Omit<ConnectionAuthProvider, "describe"> {
   catalog(context: AdapterContext, query?: string): Promise<ConnectorCatalogItem[]>;
   listConnectedExternalIds(context: AdapterContext): Promise<string[]>;
+  /** Connection refs the provider reports as dead until the user reconnects them. */
+  listReconnectRefs?(context: AdapterContext): Promise<string[]>;
   connectionReady(context: AdapterContext, externalId: string): Promise<boolean>;
   warmDirectory?(): Promise<void>;
 }
@@ -327,6 +360,44 @@ export interface AgentHomeStore {
   ): Promise<Array<{ path: string; kind: "file" | "dir"; size: number }>>;
 }
 
+/**
+ * A bucket of opaque objects on an S3-compatible service (or a test fake). Only the API and
+ * worker hold one; sandboxes never receive its credentials or object URLs.
+ */
+export interface ObjectStorage {
+  /** Writes the whole stream as one object, replacing any object with that key. */
+  put(key: string, body: AsyncIterable<Uint8Array>): Promise<void>;
+  /** Throws when the object does not exist. */
+  get(key: string): AsyncIterable<Uint8Array>;
+  list(prefix: string): AsyncIterable<{ key: string; lastModified: Date }>;
+  /** Missing keys are not an error. */
+  delete(keys: readonly string[]): Promise<void>;
+}
+
+/** Identifies the data key being wrapped; implementations bind it into the wrap. */
+export interface KeyWrapContext {
+  spaceId: string;
+  version: number;
+}
+
+export interface WrappedDataKey {
+  masterKeyId: string;
+  wrappedKey: string;
+}
+
+/**
+ * Wraps per-space data keys under master keys it never reveals. The local
+ * implementation reads master keys from the environment; a KMS or secret
+ * manager adapter implements the same contract.
+ */
+export interface KeyProvider {
+  describe(): AdapterDescriptor<{ rotate: boolean }>;
+  /** Master key that new wraps use. Older ids stay valid for unwrap. */
+  activeKeyId(): string;
+  wrap(dataKey: Uint8Array, context: KeyWrapContext): Promise<WrappedDataKey>;
+  unwrap(wrapped: WrappedDataKey, context: KeyWrapContext): Promise<Uint8Array>;
+}
+
 export interface ArtifactStore {
   describe(): AdapterDescriptor<{ stream: boolean }>;
   put(artifact: ArtifactPut, context: AdapterContext): Promise<{ id: string; hash: string }>;
@@ -375,14 +446,19 @@ export interface TransactionalEmailProvider {
  * vendor API. Sync is pull-based: webhooks only say which customer changed.
  */
 export interface BillingProvider {
-  describe(): AdapterDescriptor<{ trials: boolean; portal: boolean }>;
+  /** Optional prepaid model usage capabilities; product code owns the balance ledger. */
+  createCreditCheckout?(input: BillingCreditCheckoutRequest): Promise<{ url: string }>;
+  listCreditPurchases?(customerId: string): Promise<BillingCreditPurchase[]>;
+  setMonthlyCredits?(customerId: string, amountCents: number): Promise<void>;
+  describe(): AdapterDescriptor<{ trials: boolean; portal: boolean; modelCredits?: boolean }>;
   getPrice(): Promise<BillingPrice>;
   createCustomer(input: { email: string; organizationId: string }): Promise<{ customerId: string }>;
   createCheckout(input: BillingCheckoutRequest): Promise<{ url: string }>;
   createPortal(input: { customerId: string; returnUrl: string }): Promise<{ url: string }>;
   /** Current subscription for the customer, preferring one that grants access. */
   getCustomerSubscription(customerId: string): Promise<BillingSubscriptionSnapshot | null>;
-  updateSeats(subscriptionItemId: string, seats: number): Promise<void>;
+  /** Sets seats on the customer's subscription; a no-op when none can still take updates. */
+  updateSeats(customerId: string, seats: number): Promise<void>;
   cancelCustomerSubscriptions(customerId: string): Promise<void>;
   /** Verifies the signature. `null` means the request is not authentic. */
   parseWebhook(rawBody: string, headers: Headers): { customerId: string } | "ignored" | null;

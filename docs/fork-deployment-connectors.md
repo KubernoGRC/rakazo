@@ -8,6 +8,8 @@ instance behaves exactly like upstream.
 ## Configuration
 
 Set these on both the API and the worker. They read the same variables.
+The compose files don't carry them, and upstream's `environment:` allowlist drops
+anything only in `.env`, so the deployment's own compose overlay passes them.
 
 | Variable | Effect |
 | --- | --- |

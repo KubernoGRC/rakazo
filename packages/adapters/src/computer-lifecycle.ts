@@ -9,11 +9,12 @@ import type {
 import { computerControlExpireJobKey } from "@rakazo/adapter-kit";
 import type { ComputerUpdate } from "@rakazo/contracts";
 import { ACTIVE_RUN_STATUSES, parseScreenLeaseId, screenLeaseId } from "@rakazo/core";
+import type { PrismaClient, ThreadEvents } from "@rakazo/db";
 import {
   expireComputerExecutionLeases,
-  type PrismaClient,
   parseComputerMode,
-  type ThreadEvents,
+  recordComputerRunEnd,
+  recordComputerRunStart,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import {
@@ -26,12 +27,14 @@ import {
 import { toComputerRef } from "./computer-support.js";
 import {
   checkpointComputerWorkspace,
+  deletedTeamBotFolders,
   ensureComputerWorkspaceLayout,
   removeDeletedBotWorkspaces,
   restoreComputerWorkspace,
 } from "./computer-workspace.js";
-import { isSandboxGoneError } from "./e2b-sandbox.js";
 import { resolveAgentHomePath } from "./home.js";
+import { ObjectAgentHomeStore } from "./home-object-store.js";
+import { isSandboxDamagedError, isSandboxGoneError } from "./sandbox-errors.js";
 
 type ComputerUpdateProgress = (
   stage: Exclude<ComputerUpdate["stage"], "preparing">,
@@ -162,6 +165,8 @@ export async function provisionComputer(
   controlHolder: "bot" | "none" = "none",
   onProgress?: ComputerUpdateProgress,
 ): Promise<ComputerRef> {
+  const started = performance.now();
+  const log = getLogger().child({ "computer.id": computerId, "run.id": context.runId });
   let existing = await deps.prisma.computer.findUniqueOrThrow({ where: { id: computerId } });
   if (existing.maintenanceId && existing.maintenanceId !== context.operationId)
     throw new ComputerBusyError();
@@ -181,6 +186,7 @@ export async function provisionComputer(
     const ref = toComputerRef(existing);
     if (await deps.sandbox.isRunning(ref, context)) {
       context.signal.throwIfAborted();
+      const runningSince = existing.runningSince ?? new Date();
       const retained = await deps.prisma.computer.updateMany({
         where: {
           id: computerId,
@@ -192,12 +198,10 @@ export async function provisionComputer(
           ...(context.botId ? { bots: { some: { id: context.botId, archivedAt: null } } } : {}),
         },
         // A row activated by an older release has no clock yet; start it now.
-        data: {
-          updatedAt: new Date(),
-          ...(existing.runningSince ? {} : { runningSince: new Date() }),
-        },
+        data: { updatedAt: new Date(), runningSince },
       });
       if (retained.count !== 1) throw new ComputerBusyError();
+      await recordComputerRunStart(deps.prisma, existing, runningSince);
       await deps.sandbox.prepare(ref, context);
       await ensureComputerWorkspaceLayout(
         deps.sandbox,
@@ -206,6 +210,11 @@ export async function provisionComputer(
         context.botId,
         context,
       );
+      log.info("computer.provisioned", {
+        provider: ref.kind,
+        operation: "reuse",
+        durationMs: Math.round(performance.now() - started),
+      });
       return ref;
     }
   }
@@ -320,18 +329,61 @@ export async function provisionComputer(
   if (claimed.count !== 1) throw new ComputerBusyError();
   let provisioned: ComputerRef | undefined;
   try {
+    // Docker mounts the cached directory, so it must hold the stored revision before boot.
+    if (!reconnecting && deps.home instanceof ObjectAgentHomeStore)
+      await deps.home.hydrate(existing.homeKey);
     await onProgress?.("recreating");
-    const ref = await deps.sandbox.provision(
-      {
-        botId: existing.homeKey,
-        homePath,
-        providerRef: existing.providerRef ?? undefined,
-        providerKind: existing.kind as ComputerRef["kind"],
-      },
-      context,
-    );
+    const provision = () =>
+      getLogger().withContext(
+        { "computer.id": computerId, "run.id": context.runId, previousState: existing.state },
+        () =>
+          deps.sandbox.provision(
+            {
+              botId: existing.homeKey,
+              homePath,
+              providerRef: existing.providerRef ?? undefined,
+              providerKind: existing.kind as ComputerRef["kind"],
+              // A save from an older release has no time; the provider keeps its own state then.
+              savedAt:
+                existing.homeRevision === "empty"
+                  ? undefined
+                  : (existing.homeRevisionAt ?? undefined),
+            },
+            context,
+          ),
+      );
+    let ref = await provision();
     provisioned = ref;
-    await deps.sandbox.prepare(ref, context);
+    try {
+      await deps.sandbox.prepare(ref, context);
+    } catch (error) {
+      if (
+        !isSandboxDamagedError(error) ||
+        !(await claimAutoRecovery(deps.prisma, existing, claimStamp))
+      )
+        throw error;
+      // Stopping keeps the provider's last good copy of a system that can no longer run anything,
+      // and starting again resumes it, or replaces it from the saved workspace when that is newer.
+      log.warn("computer.auto_recover", { provider: ref.kind, step: "stop", error });
+      try {
+        // A computer this call just created holds nothing yet; make another rather than leave
+        // it behind while starting again would create a second one.
+        if (ref.fresh) await deps.sandbox.destroy(ref, context);
+        else await deps.sandbox.stop(ref, context, { discardUnsaved: true });
+        ref = await provision();
+        provisioned = ref;
+        await deps.sandbox.prepare(ref, context);
+      } catch (failure) {
+        log.warn("computer.auto_recover", { provider: ref.kind, step: "failed", error: failure });
+        // Recover stays the way out; a failure on the way says less than the damage itself.
+        throw isSandboxDamagedError(failure) ? failure : error;
+      }
+      log.warn("computer.auto_recover", {
+        provider: ref.kind,
+        step: "recovered",
+        operation: ref.fresh ? "replaced" : "resumed",
+      });
+    }
     const replacement =
       ref.fresh === true ||
       !existing.providerRef ||
@@ -357,6 +409,10 @@ export async function provisionComputer(
       });
     }
     const activeControl = hasActiveComputerControl(existing);
+    // A reconnect to a computer that stayed up continues its stretch; any start begins one.
+    const continued =
+      existing.state === "running" && existing.runningSince && !ref.started && !replacement;
+    const runningSince = continued ? existing.runningSince! : new Date();
     const activated = await deps.prisma.computer.updateMany({
       where: {
         id: computerId,
@@ -370,11 +426,7 @@ export async function provisionComputer(
         state: "running",
         providerRef: ref.providerRef,
         kind: ref.kind,
-        // A reconnect to a computer that stayed up continues its stretch; any start begins one.
-        runningSince:
-          existing.state === "running" && existing.runningSince && !ref.started && !replacement
-            ? existing.runningSince
-            : new Date(),
+        runningSince,
         ...(!reconnecting
           ? {
               controlHolder: activeControl ? "user" : controlHolder,
@@ -393,8 +445,26 @@ export async function provisionComputer(
     if (activated.count !== 1) {
       throw new ComputerBusyError();
     }
+    // A computer we believed running that the provider had to resume or replace was stopped
+    // or lost at the provider without us.
+    await recordComputerRunStart(
+      deps.prisma,
+      { ...existing, kind: ref.kind, providerRef: ref.providerRef },
+      runningSince,
+      existing.state === "running" ? "gone" : "reconciled",
+    );
+    log.info("computer.provisioned", {
+      provider: ref.kind,
+      operation: replacement ? "create" : ref.started ? "resume" : "reuse",
+      durationMs: Math.round(performance.now() - started),
+    });
     return ref;
   } catch (error) {
+    log.warn("computer.provision_failed", {
+      provider: existing.kind,
+      durationMs: Math.round(performance.now() - started),
+      error,
+    });
     // A failed reconnect never owns an existing workspace, even if setup failed.
     const rollbackError =
       provisioned && (!reconnecting || provisioned.fresh === true)
@@ -432,6 +502,24 @@ export async function provisionComputer(
   }
 }
 
+/**
+ * Takes the one automatic recovery a damaged computer gets until a later save shows it works
+ * again, so one that comes back damaged is not stopped and started on every use.
+ */
+async function claimAutoRecovery(
+  prisma: PrismaClient,
+  computer: { id: string; homeRevisionAt: Date | null; autoRecoveredAt: Date | null },
+  claimStamp: Date,
+): Promise<boolean> {
+  const last = computer.autoRecoveredAt;
+  if (last && !(computer.homeRevisionAt && computer.homeRevisionAt > last)) return false;
+  const claimed = await prisma.computer.updateMany({
+    where: { id: computer.id, state: "booting", updatedAt: claimStamp, autoRecoveredAt: last },
+    data: { autoRecoveredAt: new Date(), updatedAt: claimStamp },
+  });
+  return claimed.count === 1;
+}
+
 async function waitForComputerReady(
   prisma: PrismaClient,
   computerId: string,
@@ -466,7 +554,12 @@ async function rollbackProvisionedComputer(
         await sandbox.destroy(computer, context);
       }
     } else {
-      await sandbox.stop(computer, context);
+      // Nothing on a damaged computer can be read, so only the provider's last good copy is left.
+      if (isSandboxDamagedError(cause)) {
+        await sandbox.stop(computer, context, { discardUnsaved: true });
+      } else {
+        await sandbox.stop(computer, context);
+      }
     }
     return undefined;
   } catch (error) {
@@ -489,10 +582,7 @@ export function screenLeaseIdForRun(
   return screenLeaseId(lease?.runId ?? runId, lease?.fence ?? fence);
 }
 
-/**
- * Dedicated computers do not take an active computer-execution lease, but a retained screen
- * needs an increasing fence across runs. Keep the sequence in the expired per-computer/bot row.
- */
+/** Dedicated screen leases serialize workers and retain the fence after release. */
 export async function acquireDedicatedScreenLeaseFence(
   prisma: PrismaClient,
   input: {
@@ -530,15 +620,18 @@ export async function acquireDedicatedScreenLeaseFence(
       FOR UPDATE SKIP LOCKED`;
     if (currentRun.length !== 1) throw new ComputerBusyError();
 
-    const expiredAt = new Date(0);
+    // An unexpired holder owns the screen until release, pause, or expiry. Keep the
+    // expired row so explicit release never resets the next worker's screen fence.
+    // The current worker ownership check also permits resuming this run's held takeover.
     const now = new Date();
+    const expiresAt = new Date(now.getTime() + EXECUTION_LEASE_MS);
     const [existing] = await tx.computerExecutionLease.updateManyAndReturn({
       where: {
         computerId: input.computerId,
         botId: input.botId,
-        expiresAt: { lte: now },
+        OR: [{ expiresAt: { lte: now } }, { runId: input.runId }],
       },
-      data: { runId: input.runId, expiresAt: expiredAt, fence: { increment: 1 } },
+      data: { runId: input.runId, expiresAt, fence: { increment: 1 } },
       select: { fence: true },
     });
     if (existing) {
@@ -562,7 +655,7 @@ export async function acquireDedicatedScreenLeaseFence(
           botId: input.botId,
           runId: input.runId,
           fence,
-          expiresAt: expiredAt,
+          expiresAt,
         },
         select: { fence: true },
       });
@@ -723,7 +816,12 @@ export function computerSupportsUpdate(kind: string): boolean {
 /** Kinds whose provider opens a user terminal through the shared Linux screen gateway. */
 export function computerSupportsTerminal(kind: string): boolean {
   return (
-    kind === "docker" || kind === "e2b" || kind === "daytona" || kind === "box" || kind === "fake"
+    kind === "docker" ||
+    kind === "e2b" ||
+    kind === "daytona" ||
+    kind === "boat" ||
+    kind === "kubernetes" ||
+    kind === "fake"
   );
 }
 
@@ -935,16 +1033,18 @@ export async function replaceComputer(
     if (oldRef && (mode === "update" || (existing.state === "running" && mode === "recover"))) {
       try {
         await onProgress?.("saving");
+        const checkpointedAt = new Date();
         const revision = await checkpointComputerWorkspace(
           deps.home,
           deps.sandbox,
           existing.homeKey,
           oldRef,
           context,
+          () => deletedTeamBotFolders(deps.prisma, existing),
         );
         const recorded = await deps.prisma.computer.updateMany({
           where: { id: computerId, state: "suspending", updatedAt: claimStamp },
-          data: { homeRevision: revision, updatedAt: claimStamp },
+          data: { homeRevision: revision, homeRevisionAt: checkpointedAt, updatedAt: claimStamp },
         });
         if (recorded.count !== 1) throw new ComputerBusyError();
       } catch (error) {
@@ -981,10 +1081,13 @@ export async function replaceComputer(
         controlLeaseExpiresAt: null,
         controlBotId: null,
         controlRunId: null,
+        // The replacement is a new machine; damage to the old one is no reason to hold it back.
+        autoRecoveredAt: null,
         updatedAt: claimStamp,
       },
     });
     if (stopped.count !== 1) throw new ComputerBusyError();
+    await recordComputerRunEnd(deps.prisma, existing, "replaced");
     return provisionComputer(deps, computerId, context, controlHolder, onProgress);
   } catch (error) {
     await deps.prisma.computer

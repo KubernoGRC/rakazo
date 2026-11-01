@@ -42,6 +42,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import type { UpdaterConfig } from "./updater-logic.js";
 import {
+  missingSecretAssignments,
   readTagState,
   resolveUpdaterConfig,
   truncateOutput,
@@ -62,6 +63,9 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 export interface CommandResult {
   ok: boolean;
   exitCode: number | null;
+  /** Complete machine-readable stdout, bounded by the child process maxBuffer. */
+  stdout: string;
+  /** Truncated stdout/stderr for diagnostics and update step logs. */
   output: string;
 }
 
@@ -144,6 +148,7 @@ export const runHostCommand: UpdaterCommandRunner = (command, args, options) => 
     return Promise.resolve({
       ok: false,
       exitCode: null,
+      stdout: "",
       output: "Refusing to run an unexpected program.",
     });
   }
@@ -163,7 +168,7 @@ export const runHostCommand: UpdaterCommandRunner = (command, args, options) => 
     ) => {
       const output = truncateOutput(`${stdout}${stderr}`);
       if (!error) {
-        resolve({ ok: true, exitCode: 0, output });
+        resolve({ ok: true, exitCode: 0, stdout: String(stdout), output });
         return;
       }
       const exitCode = typeof error.code === "number" ? error.code : null;
@@ -172,7 +177,12 @@ export const runHostCommand: UpdaterCommandRunner = (command, args, options) => 
       const reason = timedOut
         ? `Timed out after ${options.timeoutMs}ms (${signal}).`
         : error.message;
-      resolve({ ok: false, exitCode, output: output ? `${output}\n${reason}` : reason });
+      resolve({
+        ok: false,
+        exitCode,
+        stdout: String(stdout),
+        output: output ? `${output}\n${reason}` : reason,
+      });
     };
     if (command === "git") execFile("git", argv, execOptions, done);
     else execFile("docker", argv, execOptions, done);
@@ -392,7 +402,7 @@ export function createUpdaterApp(
       git(gitStatusArgv()),
       git(gitUntrackedFilesArgv()),
     ]);
-    const porcelain = parseGitStatusPorcelain(status.ok ? status.output : "");
+    const porcelain = parseGitStatusPorcelain(status.ok ? status.stdout : "");
     let contentChanged: string[] = [];
     let contentDiffOk = true;
     if (status.ok && !porcelain.clean) {
@@ -402,22 +412,22 @@ export function createUpdaterApp(
       ]);
       contentDiffOk = worktree.ok && index.ok;
       contentChanged = [
-        ...parseGitNameOnly(worktree.ok ? worktree.output : ""),
-        ...parseGitNameOnly(index.ok ? index.output : ""),
+        ...parseGitNameOnly(worktree.ok ? worktree.stdout : ""),
+        ...parseGitNameOnly(index.ok ? index.stdout : ""),
       ];
     }
     const tracked = resolveTrackedDirtyPaths({
       porcelainChanged: porcelain.changed,
       contentChanged,
       contentDiffOk,
-      untrackedPaths: parseGitNameOnly(untracked.ok ? untracked.output : ""),
+      untrackedPaths: parseGitNameOnly(untracked.ok ? untracked.stdout : ""),
     });
     const stateReadable = status.ok && untracked.ok;
     return {
       present: true,
-      commit: head.ok ? head.output.trim() : null,
-      branch: branch.ok ? branch.output.trim() : null,
-      remoteUrl: remote.ok ? remote.output.trim() : null,
+      commit: head.ok ? head.stdout.trim() : null,
+      branch: branch.ok ? branch.stdout.trim() : null,
+      remoteUrl: remote.ok ? remote.stdout.trim() : null,
       dirty: stateReadable ? tracked.dirty : true,
       dirtyPaths: stateReadable
         ? tracked.dirtyPaths
@@ -434,7 +444,7 @@ export function createUpdaterApp(
     if (!listed.ok) {
       throw new UpdateRefused(`Could not read releases from ${repoUrl}: ${listed.output}`);
     }
-    const release = selectLatestRelease(parseLsRemoteReleases(listed.output));
+    const release = selectLatestRelease(parseLsRemoteReleases(listed.stdout));
     if (release === null) {
       throw new UpdateRefused(
         `${repoUrl} has no published release tags, so there is no image to pull.`,
@@ -457,7 +467,7 @@ export function createUpdaterApp(
     if (!listed.ok) {
       throw new UpdateRefused(`Could not read ${request.branch} from ${request.repoUrl}.`);
     }
-    const commit = listed.output.trim().split(/\s/)[0] ?? "";
+    const commit = listed.stdout.trim().split(/\s/)[0] ?? "";
     if (!isGitCommit(commit)) {
       throw new UpdateRefused(`${request.repoUrl} has no branch called ${request.branch}.`);
     }
@@ -658,7 +668,7 @@ export function createUpdaterApp(
       let toTag = input.toTag;
       if (input.strategy === "build") {
         const head = await git(["rev-parse", "HEAD"]);
-        const commit = head.ok ? head.output.trim() : "";
+        const commit = head.ok ? head.stdout.trim() : "";
         if (!isGitCommit(commit)) {
           record.error = "Could not read the commit to build.";
           return record;
@@ -674,6 +684,7 @@ export function createUpdaterApp(
 
       try {
         await writeEnvAssignments({
+          ...missingSecretAssignments(await readEnvFile()),
           [IMAGE_TAG_ENV]: toTag,
           [PREVIOUS_IMAGE_TAG_ENV]: input.fromTag,
         });

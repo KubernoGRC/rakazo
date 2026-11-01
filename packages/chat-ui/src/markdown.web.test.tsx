@@ -8,8 +8,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { LinkFavicons } from "./markdown.web";
 import {
   ChatMarkdown,
+  defaultMarkdownCopy,
   LinkFaviconsContext,
   LinkifiedText,
+  MarkdownCopyProvider,
   RemoteImagesContext,
 } from "./markdown.web";
 
@@ -558,5 +560,76 @@ describe("web external link confirmation", () => {
     expect(open).not.toHaveBeenCalled();
     open.mockRestore();
     await view.cleanup();
+  });
+});
+
+describe("web markdown code copy", () => {
+  it("copies a fence's code exactly as written, then reads Copied", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<ChatMarkdown>{"```ts\nconst a = 1;\n\n  return a;\n```"}</ChatMarkdown>);
+    });
+    const button = container.querySelector("button");
+    expect(button?.getAttribute("aria-label")).toBe("Copy code");
+    await act(async () => {
+      button?.click();
+    });
+    expect(writeText).toHaveBeenCalledWith("const a = 1;\n\n  return a;");
+    expect(button?.getAttribute("aria-label")).toBe("Copied");
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    Reflect.deleteProperty(navigator, "clipboard");
+  });
+
+  it("gives an empty fence no copy button, as on mobile", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown>{"```ts\n```\n\n```\n\n\n```\n\n    indented"}</ChatMarkdown>,
+    );
+    expect(html.match(/<pre/g)).toHaveLength(3);
+    expect(html.match(/aria-label="Copy code"/g)).toHaveLength(1);
+  });
+
+  it("renders provider copy in place of the English defaults", () => {
+    const rows = Array.from({ length: 12 }, (_, i) => `| ${i + 1} | v${i + 1} |`).join("\n");
+    const markdown = ["```ts", "const a = 1;", "```", "", "| N | V |", "|---|---|", rows].join(
+      "\n",
+    );
+    const html = renderToStaticMarkup(
+      <MarkdownCopyProvider
+        copy={{
+          ...defaultMarkdownCopy,
+          copyCode: "Copiar código",
+          copyRows: "Copiar filas",
+          rowRange: (from, to, total) => `${from} a ${to} de ${total} filas`,
+        }}
+      >
+        <ChatMarkdown>{markdown}</ChatMarkdown>
+      </MarkdownCopyProvider>,
+    );
+    expect(html).toContain('aria-label="Copiar código"');
+    expect(html).toContain('aria-label="Copiar filas"');
+    expect(html).toContain("1 a 10 de 12 filas");
+  });
+});
+
+describe("web markdown mentions", () => {
+  it("draws a mention the app renders and keeps an unknown one as its name", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        renderMention={(id, name) => (id === "bot-1" ? <b data-id={id}>{name}</b> : undefined)}
+      >
+        {"[Planner](rakazo-mention:bot-1) and [Other](rakazo-mention:bot-2)"}
+      </ChatMarkdown>,
+    );
+    expect(html).toContain('<b data-id="bot-1">Planner</b>');
+    expect(html).toContain("<span>Other</span>");
+    expect(html).not.toContain("<a");
   });
 });
