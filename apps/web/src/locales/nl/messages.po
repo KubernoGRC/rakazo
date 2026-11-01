@@ -3226,6 +3226,7 @@ msgstr "Spraakanbieders laden…"
 
 #: src/components/PageLoading.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/PeerMessagesOverlay.tsx
 #: src/pages/RoutineRunHistory.tsx
@@ -4986,6 +4987,10 @@ msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "Meld je aan op <0>{0}</0> en plak de code hier."
 
 #: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "Meld je aan via de portal van je organisatie"
+
+#: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"
 msgstr "Aanmelden bij Rakazo"
 
@@ -6033,7 +6038,3 @@ msgstr "Je spraakaanbieder heeft geen tegoed meer."
 #: src/lib/user-error.ts
 msgid "Your voice provider key was rejected."
 msgstr "Je spraakaanbieder heeft de sleutel geweigerd."
-
-#: src/pages/Auth.tsx
-msgid "Sign in through your organisation's portal"
-msgstr "Meld je aan via de portal van je organisatie"

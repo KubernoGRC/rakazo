@@ -3226,6 +3226,7 @@ msgstr "음성 서비스를 불러오는 중…"
 
 #: src/components/PageLoading.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/PeerMessagesOverlay.tsx
 #: src/pages/RoutineRunHistory.tsx

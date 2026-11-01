@@ -3227,6 +3227,7 @@ msgstr "正在載入語音供應商…"
 
 #: src/components/PageLoading.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/PeerMessagesOverlay.tsx
 #: src/pages/RoutineRunHistory.tsx
@@ -4987,6 +4988,10 @@ msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "在 <0>{0}</0> 登入，然後將代碼貼到這裡。"
 
 #: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "請透過貴組織的入口網站登入"
+
+#: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"
 msgstr "登入 Rakazo"
 
@@ -6034,7 +6039,3 @@ msgstr "你的語音供應商額度已用完。"
 #: src/lib/user-error.ts
 msgid "Your voice provider key was rejected."
 msgstr "你的語音供應商拒絕了該金鑰。"
-
-#: src/pages/Auth.tsx
-msgid "Sign in through your organisation's portal"
-msgstr "請透過貴組織的入口網站登入"
