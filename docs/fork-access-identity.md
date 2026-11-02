@@ -18,6 +18,7 @@ Set these on the API. The worker does not authenticate users and does not read t
 | `ACCESS_IDENTITY_AUDIENCE` | The access application's audience (AUD) tag. The assertion's `aud` must contain it. |
 | `ACCESS_IDENTITY_CERTS_FILE` | A path to the signing keys, written by the host: a JWKS, or the proxy's `certs` document, which has the same `keys` array. |
 | `ACCESS_IDENTITY_LOGOUT_URL` | Optional. Where the browser goes after signing out, to end the proxy's session too. A path on this server, or an https URL on the issuer's origin, for example `https://<team>.cloudflareaccess.com/cdn-cgi/access/logout`. Anything else refuses startup, so it can't become an open redirect. |
+| `ACCESS_IDENTITY_EXEMPT_WEBHOOKS` | Optional. Comma-separated messaging provider names, for example `teams`, whose webhook needs no assertion. See [Exempt routes](#what-the-mode-enforces). Refuses startup without this mode. |
 
 The API refuses to start when the mode is on and any of these hold:
 
@@ -57,7 +58,10 @@ deployment's own compose overlay has to pass these to `api`.
   - `/api/internal/screen-target`, which the web server calls server to server with its
     own bearer secret.
 
-  Every other route is closed without an assertion, including inbound webhooks.
+  Every other route is closed without an assertion, including inbound webhooks. The one
+  exception is a messaging provider listed in `ACCESS_IDENTITY_EXEMPT_WEBHOOKS`: exactly
+  `POST /api/v1/messaging/webhook/<name>`, which that provider's adapter authenticates
+  itself ([Teams](fork-teams.md)).
 - **The certs file is reloaded when it changes.** A change is detected by mtime and size,
   checked on each request. A file that cannot be read or parsed, or that holds no usable
   RSA signing key, keeps the last good set. Until a good set has been loaded once, every

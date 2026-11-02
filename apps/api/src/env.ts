@@ -33,6 +33,11 @@ export interface AppEnv {
   oidc?: OidcConfig;
   /** Fork: trusted access-proxy identity; see docs/fork-access-identity.md. */
   accessIdentity?: AccessIdentityConfig;
+  /**
+   * Fork: messaging providers whose webhook skips the access assertion because
+   * the provider authenticates it itself; see docs/fork-access-identity.md.
+   */
+  accessExemptWebhooks?: string[];
   nodeEnv: string;
   desktopStackToken?: string;
   databaseUrl: string;
@@ -123,6 +128,10 @@ export interface AppEnv {
   larkVerificationToken: string | undefined;
   larkEncryptKey: string | undefined;
   larkDomain: string | undefined;
+  // Fork: a single-tenant Azure Bot (docs/fork-teams.md).
+  teamsAppId: string | undefined;
+  teamsAppPassword: string | undefined;
+  teamsAppTenantId: string | undefined;
   /** Unknown chat senders auto-provision their own accounts when true. */
   messagingOpenSignup: boolean;
   /** Bot that owns team/external chat rooms on the messaging surface. */
@@ -181,6 +190,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
       throw new Error(`${key} must be true or false`);
   }
   const accessIdentity = accessIdentityFromEnv(source);
+  const accessExemptWebhooks = accessExemptWebhooksFromEnv(source, Boolean(accessIdentity));
   const passwordAuth = accessIdentity ? false : source.AUTH_PASSWORD_ENABLED !== "false";
   if (!passwordAuth && !issuer && !accessIdentity)
     throw new Error("AUTH_PASSWORD_ENABLED=false requires OIDC configuration");
@@ -206,6 +216,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     breachedPasswordCheck: source.AUTH_BREACHED_PASSWORD_CHECK_ENABLED === "true",
     oidc,
     ...(accessIdentity ? { accessIdentity } : {}),
+    ...(accessExemptWebhooks.length > 0 ? { accessExemptWebhooks } : {}),
     nodeEnv: source.NODE_ENV ?? "",
     databaseUrl: required(source, "DATABASE_URL"),
     realtimeDatabaseUrl: source.REALTIME_DATABASE_URL ?? required(source, "DATABASE_URL"),
@@ -288,6 +299,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     larkVerificationToken: optional(source.LARK_VERIFICATION_TOKEN),
     larkEncryptKey: optional(source.LARK_ENCRYPT_KEY),
     larkDomain: optional(source.LARK_DOMAIN),
+    teamsAppId: optional(source.TEAMS_APP_ID),
+    teamsAppPassword: optional(source.TEAMS_APP_PASSWORD),
+    teamsAppTenantId: optional(source.TEAMS_APP_TENANT_ID),
     messagingOpenSignup: source.MESSAGING_OPEN_SIGNUP === "true",
     teamChatBotId: optional(source.TEAM_CHAT_BOT_ID) ?? optional(source.SLACK_RAKAZO_BOT_ID),
     teamChatJudgeProvider: optional(source.TEAM_CHAT_JUDGE_PROVIDER),
@@ -384,6 +398,25 @@ function accessIdentityFromEnv(source: NodeJS.ProcessEnv): AccessIdentityConfig 
     throw new Error("ACCESS_IDENTITY_ENABLED=true requires MESSAGING_OPEN_SIGNUP to be off");
   const logoutUrl = accessLogoutUrl(optional(source.ACCESS_IDENTITY_LOGOUT_URL), issuer);
   return { issuer, audience, certsFile, ...(logoutUrl ? { logoutUrl } : {}) };
+}
+
+/**
+ * Fork: ACCESS_IDENTITY_EXEMPT_WEBHOOKS lists messaging providers, by name,
+ * whose webhook route needs no access assertion: the access proxy cannot sign
+ * a vendor's server-to-server call, and the provider's adapter verifies it
+ * instead. Meaningless without access identity, so it refuses startup then.
+ */
+function accessExemptWebhooksFromEnv(source: NodeJS.ProcessEnv, accessIdentity: boolean): string[] {
+  const raw = optional(source.ACCESS_IDENTITY_EXEMPT_WEBHOOKS);
+  if (!raw) return [];
+  if (!accessIdentity)
+    throw new Error("ACCESS_IDENTITY_EXEMPT_WEBHOOKS requires ACCESS_IDENTITY_ENABLED=true");
+  const providers = raw.split(",").map((name) => name.trim());
+  if (providers.some((name) => !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)))
+    throw new Error(
+      "ACCESS_IDENTITY_EXEMPT_WEBHOOKS must be a comma-separated list of messaging provider names",
+    );
+  return [...new Set(providers)];
 }
 
 /**

@@ -15,6 +15,7 @@ import type { ClientOptions as SendblueClientOptions } from "sendblue";
 import type { MessagingPlatform } from "./chat-sdk-surface.js";
 import { LazyLarkAdapter } from "./lark/lazy-adapter.js";
 import { Domain } from "./lark/thread-id.js";
+import { teamsPlatform } from "./teams-platform.js";
 import { isVitestRuntime } from "./test-runtime.js";
 
 /**
@@ -43,6 +44,10 @@ export interface MessagingEnvironmentValues {
   larkVerificationToken?: string | undefined;
   larkEncryptKey?: string | undefined;
   larkDomain?: string | undefined;
+  // Fork: a single-tenant Azure Bot (docs/fork-teams.md).
+  teamsAppId?: string | undefined;
+  teamsAppPassword?: string | undefined;
+  teamsAppTenantId?: string | undefined;
 }
 
 export function messagingEnvFromProcess(
@@ -71,6 +76,9 @@ export function messagingEnvFromProcess(
     larkVerificationToken: clean(env.LARK_VERIFICATION_TOKEN),
     larkEncryptKey: clean(env.LARK_ENCRYPT_KEY),
     larkDomain: clean(env.LARK_DOMAIN),
+    teamsAppId: clean(env.TEAMS_APP_ID),
+    teamsAppPassword: clean(env.TEAMS_APP_PASSWORD),
+    teamsAppTenantId: clean(env.TEAMS_APP_TENANT_ID),
   };
 }
 
@@ -307,6 +315,17 @@ export function messagingPlatformsFromEnv(
         domain: env.larkDomain?.toLowerCase() === "lark" ? Domain.Lark : Domain.Feishu,
       }),
     });
+  }
+
+  // Fork: all three or nothing, like every other platform (docs/fork-teams.md).
+  if (env.teamsAppId && env.teamsAppPassword && env.teamsAppTenantId) {
+    platforms.push(
+      teamsPlatform({
+        appId: env.teamsAppId,
+        appPassword: env.teamsAppPassword,
+        tenantId: env.teamsAppTenantId,
+      }),
+    );
   }
 
   return platforms;

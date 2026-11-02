@@ -2,6 +2,7 @@ import type { AccessVerifier } from "@rakazo/auth";
 import { SCREEN_TARGET_ENDPOINT } from "@rakazo/core/node/screen-capability";
 import { getLogger } from "@rakazo/logging";
 import type { MiddlewareHandler } from "hono";
+import { MESSAGING_WEBHOOK_BASE_PATH } from "./messaging-webhook.js";
 
 /**
  * Fork: routes reachable without an access assertion under access identity.
@@ -22,10 +23,22 @@ export const ACCESS_REQUIRED_BODY = {
   message: "Sign in through your organisation's portal",
 } as const;
 
-/** Refuses every other request whose assertion does not verify. */
-export function accessIdentityGate(verifier: AccessVerifier): MiddlewareHandler {
+/**
+ * Refuses every other request whose assertion does not verify. `exemptWebhooks`
+ * names messaging providers (ACCESS_IDENTITY_EXEMPT_WEBHOOKS) whose webhook is
+ * a vendor's server-to-server POST that the access proxy lets through and the
+ * provider's adapter verifies: exactly that path and method, nothing under it.
+ */
+export function accessIdentityGate(
+  verifier: AccessVerifier,
+  { exemptWebhooks = [] }: { exemptWebhooks?: readonly string[] } = {},
+): MiddlewareHandler {
+  const webhookPaths = new Set(
+    exemptWebhooks.map((provider) => `${MESSAGING_WEBHOOK_BASE_PATH}/${provider}`),
+  );
   return async (c, next) => {
     if (ACCESS_EXEMPT_PATHS.has(c.req.path)) return next();
+    if (c.req.method === "POST" && webhookPaths.has(c.req.path)) return next();
     const verdict = await verifier.verify(c.req.raw.headers);
     if (!verdict.ok) {
       getLogger().warn("access identity refused", { reason: verdict.reason, route: c.req.path });
