@@ -48,7 +48,10 @@ export async function applyTool(
   _route?: unknown,
   observer?: AgentToolExecutionObserver,
 ) {
-  const knownTool = TOOL_HANDLERS.has(name) || ctx.tools.connector.has(name);
+  const knownTool =
+    TOOL_HANDLERS.has(name) ||
+    ctx.tools.connector.has(name) ||
+    ctx.tools.builtins.some((tool) => tool.name === name);
   try {
     return await auditToolCall(ctx, name, args, knownTool, (audit) =>
       dispatchOneTool(ctx, name, args, executionId, observer, audit),
@@ -110,7 +113,10 @@ async function dispatchTool(
   const refused = await prepareToolRequest(ctx, request);
   if (refused) return refused;
   const gate = await gateToolCall(ctx, request, observer);
-  if ("result" in gate) return gate.result;
+  if ("result" in gate) {
+    if (gate.replayed) audit.replayed();
+    return gate.result;
+  }
   audit.passedGate(gate.call);
   return toolHandler(gate.call.name)(ctx, gate.call);
 }

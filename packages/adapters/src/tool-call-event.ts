@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ConnectorRoute } from "@rakazo/adapter-kit";
+import type { AgentToolCompletion, ConnectorRoute } from "@rakazo/adapter-kit";
 import { stableJsonValue } from "@rakazo/core/node/approval-effect-key";
 import { recordSecurityEvent } from "@rakazo/db";
 import { isToolPauseResult } from "./approval-effect.js";
@@ -14,7 +14,7 @@ import type { ToolRequest } from "./run-tool-request.js";
  * - `refused`: it never ran. A disabled or unknown tool, a malformed request, or an
  *   approval policy that blocks it.
  * - `replayed`: it did not run again; its gate returned what an earlier attempt of the same
- *   effect already settled. That attempt has its own event.
+ *   effect already settled, success or failure. That attempt has its own event.
  * - `approval_requested`: it is waiting for a person to approve it.
  * - `input_requested`: it is waiting for protected input from the owner.
  * - `cancelled`: the run was cancelled while it was in flight.
@@ -41,6 +41,8 @@ export interface ToolCallAudit {
   resolved(request: ToolRequest): void;
   /** The call passed its approval gate and is about to run. */
   passedGate(call: ToolCall): void;
+  /** The gate returned a result an earlier attempt of the same effect already settled. */
+  replayed(): void;
 }
 
 const UNKNOWN_TOOL = "(unknown)";
@@ -61,12 +63,21 @@ export async function auditToolCall<T>(
   const startedAt = now();
   let route: ConnectorRoute | undefined = ctx.tools.connector.get(name)?.route;
   let passed: ToolCall | undefined;
+  let replayed = false;
+  // The arguments that run can differ from what the model sent: an approved replay restores
+  // the request the person approved. Hash what was dispatched, as far as the call got.
+  let dispatchedArgs = args;
   const audit: ToolCallAudit = {
     resolved(request) {
       route = request.connectorCall.route ?? route;
+      dispatchedArgs = request.args;
     },
     passedGate(call) {
       passed = call;
+      dispatchedArgs = call.args;
+    },
+    replayed() {
+      replayed = true;
     },
   };
   const record = async (outcome: ToolCallOutcome, result: unknown) => {
@@ -74,7 +85,7 @@ export async function auditToolCall<T>(
       await recordSecurityEvent(
         await toolCalledEvent(ctx, {
           name: knownTool ? name : UNKNOWN_TOOL,
-          args,
+          args: dispatchedArgs,
           route,
           call: passed,
           outcome,
@@ -93,21 +104,64 @@ export async function auditToolCall<T>(
     await record(ctx.context.signal.aborted ? "cancelled" : "error", undefined);
     throw error;
   }
-  await record(toolCallOutcome(result, passed !== undefined), result);
+  await record(toolCallOutcome(result, { ranPastGate: passed !== undefined, replayed }), result);
   return result;
 }
 
-/** Classify what a dispatch returned. A call that never passed its gate cannot be `ok`. */
-export function toolCallOutcome(result: unknown, ranPastGate: boolean): ToolCallOutcome {
+/**
+ * Classify what a dispatch returned. A call that never passed its gate cannot be `ok`, and a
+ * result its gate replayed is `replayed` whatever it says.
+ */
+export function toolCallOutcome(
+  result: unknown,
+  stage: { ranPastGate: boolean; replayed?: boolean },
+): ToolCallOutcome {
   if (isToolPauseResult(result)) {
     return (result.details as { secret?: unknown }).secret === "paused"
       ? "input_requested"
       : "approval_requested";
   }
+  if (stage.replayed) return "replayed";
   const failed = isErrorResult(result);
-  // Before the gate, only an error stops a call; a result there is an earlier attempt's.
-  if (!ranPastGate) return failed ? "refused" : "replayed";
+  if (!stage.ranPastGate) return failed ? "refused" : "replayed";
   return failed ? "error" : "ok";
+}
+
+/**
+ * Tools the agent runtime runs itself, without passing them to the run's dispatcher. Their
+ * completions are recorded from the runtime's completion callback instead.
+ */
+export const RUNTIME_OWNED_TOOLS: ReadonlySet<string> = new Set([
+  "ask_user",
+  "request_takeover",
+  "run_subagent",
+]);
+
+/** Record `tool.called` for a runtime-owned tool from its completion. Others are ignored. */
+export async function recordRuntimeToolCall(
+  ctx: RunContext,
+  completion: AgentToolCompletion,
+): Promise<void> {
+  if (!RUNTIME_OWNED_TOOLS.has(completion.name)) return;
+  const failed =
+    completion.error !== undefined ||
+    isErrorResult((completion.result as { details?: unknown } | undefined)?.details);
+  const outcome: ToolCallOutcome = failed ? "error" : completion.paused ? "input_requested" : "ok";
+  try {
+    await recordSecurityEvent(
+      await toolCalledEvent(ctx, {
+        name: completion.name,
+        args: completion.args ?? {},
+        route: undefined,
+        call: undefined,
+        outcome,
+        result: completion.result,
+        durationMs: completion.durationMs,
+      }),
+    );
+  } catch {
+    // Recording never affects the run.
+  }
 }
 
 /** Who let a call that passed its gate run, and the id of the approval a person gave. */
@@ -168,6 +222,13 @@ export async function toolCallHost(
 }
 
 const PACKAGE_NAME = /^@?[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)?(?:@[a-z0-9._-]+)?$/i;
+/** Package launchers whose first positional argument is the package, and their value-less flags. */
+const PACKAGE_LAUNCHERS: Readonly<Record<string, ReadonlySet<string>>> = {
+  npx: new Set(["-y", "--yes", "-q", "--quiet"]),
+  pnpx: new Set(["-y", "--yes"]),
+  bunx: new Set(["-y", "--yes", "--bun"]),
+  uvx: new Set(["-q", "--quiet", "--offline"]),
+};
 
 /** A stable, secret-free name for an MCP server, from its stored transport settings. */
 export function mcpServerHost(server: {
@@ -185,13 +246,25 @@ export function mcpServerHost(server: {
   }
   if (!server.command) return undefined;
   const command = server.command.split(/[\\/]/).at(-1) ?? server.command;
-  // Only the first positional argument, and only when it reads as a package name: flags and
-  // later arguments can carry tokens.
-  const first = Array.isArray(server.args)
-    ? server.args.find((arg): arg is string => typeof arg === "string" && !arg.startsWith("-"))
-    : undefined;
-  const pkg = first && PACKAGE_NAME.test(first) ? ` ${first}` : "";
-  return `stdio:${command}${pkg}`.slice(0, 200);
+  const pkg = launchedPackage(command, server.args);
+  return `stdio:${command}${pkg ? ` ${pkg}` : ""}`.slice(0, 200);
+}
+
+/**
+ * The package a known launcher runs. Arguments can carry credentials (`--password x`), so only
+ * a recognised launcher's leading value-less flags are skipped, any other flag ends the search,
+ * and the result must read as a package name. Unknown commands name no package.
+ */
+function launchedPackage(command: string, args: unknown): string | undefined {
+  const flags = PACKAGE_LAUNCHERS[command];
+  if (!flags || !Array.isArray(args)) return undefined;
+  for (const arg of args) {
+    if (typeof arg !== "string") return undefined;
+    if (flags.has(arg)) continue;
+    if (arg.startsWith("-")) return undefined;
+    return PACKAGE_NAME.test(arg) ? arg : undefined;
+  }
+  return undefined;
 }
 
 const hostCaches = new WeakMap<RunContext, Map<string, Promise<string | undefined>>>();
@@ -245,11 +318,9 @@ async function toolCalledEvent(
   };
 }
 
+/** An `{ error }` result, or an MCP result envelope with `isError: true`. */
 function isErrorResult(result: unknown): boolean {
-  return (
-    typeof result === "object" &&
-    result !== null &&
-    !Array.isArray(result) &&
-    typeof (result as { error?: unknown }).error === "string"
-  );
+  if (typeof result !== "object" || result === null || Array.isArray(result)) return false;
+  const record = result as { error?: unknown; isError?: unknown };
+  return (record.error !== undefined && record.error !== null) || record.isError === true;
 }

@@ -13,6 +13,7 @@ import {
   auditToolCall,
   contentDigest,
   mcpServerHost,
+  recordRuntimeToolCall,
   toolCallApproval,
   toolCallOutcome,
 } from "./tool-call-event.js";
@@ -77,6 +78,7 @@ function fakeContext({
     tools: {
       connector: new Map(tools.map((tool) => [tool.name, tool])),
       disabled: new Set<string>(),
+      builtins: [{ name: "cloud_agent_launch", description: "", inputSchema: {} }],
     },
     computer: { pageBrowserAllowed: true, acceptsImages: true },
     context: { signal: abortController.signal },
@@ -291,6 +293,54 @@ describe("tool.called through the dispatcher", () => {
     await expect(applyTool(ctx, MCP_TOOL.name, {}, "call-1")).resolves.toEqual({ ok: true });
   });
 
+  it("hashes the arguments that ran, not the ones the model sent", async () => {
+    const { ctx } = fakeContext();
+    const modelArgs = { title: "reconstructed by the model" };
+    const approvedArgs = { title: "what the person approved" };
+    resolveToolRequest.mockResolvedValue(request(MCP_TOOL.name, approvedArgs));
+    gateToolCall.mockImplementation(async () => ({
+      call: passedCall(MCP_TOOL.name, approvedArgs, { status: "approved" }),
+    }));
+    connectorTool.mockResolvedValue({ ok: true });
+
+    await applyTool(ctx, MCP_TOOL.name, modelArgs, "call-1");
+
+    expect(recordedEvents()[0]!.metadata.argsSha256).toBe(contentDigest(approvedArgs).sha256);
+  });
+
+  it("records a failure an earlier attempt settled as replayed, not refused", async () => {
+    const { ctx } = fakeContext();
+    resolveToolRequest.mockResolvedValue(request(MCP_TOOL.name, {}));
+    gateToolCall.mockResolvedValue({ result: { error: "earlier failure" }, replayed: true });
+
+    await applyTool(ctx, MCP_TOOL.name, {}, "call-1");
+
+    expect(recordedEvents().map((event) => event.metadata.outcome)).toEqual(["replayed"]);
+  });
+
+  it("records an MCP error envelope as an error", async () => {
+    const { ctx } = fakeContext();
+    resolveToolRequest.mockResolvedValue(request(MCP_TOOL.name, {}));
+    gateToolCall.mockImplementation(async () => ({ call: passedCall(MCP_TOOL.name, {}) }));
+    connectorTool.mockResolvedValue({ isError: true, content: [{ type: "text", text: "no" }] });
+
+    await applyTool(ctx, MCP_TOOL.name, {}, "call-1");
+
+    expect(recordedEvents().map((event) => event.metadata.outcome)).toEqual(["error"]);
+  });
+
+  it("names a declared built-in the dispatcher routes by prefix", async () => {
+    const { ctx } = fakeContext();
+    const builtin = request("cloud_agent_launch", {});
+    builtin.connectorCall.route = undefined as never;
+    resolveToolRequest.mockResolvedValue(builtin);
+    gateToolCall.mockResolvedValue({ result: { error: "blocked" } });
+
+    await applyTool(ctx, "cloud_agent_launch", {}, "call-1");
+
+    expect(recordedEvents()[0]!.metadata.tool).toBe("cloud_agent_launch");
+  });
+
   it("looks a server's host up once per run", async () => {
     const { ctx, findFirst } = fakeContext();
     resolveToolRequest.mockResolvedValue(request(MCP_TOOL.name, {}));
@@ -329,17 +379,22 @@ describe("auditToolCall", () => {
 
 describe("toolCallOutcome", () => {
   it.each([
-    [{ ok: true }, true, "ok"],
-    [{ error: "boom" }, true, "error"],
-    [{ error: "blocked" }, false, "refused"],
-    [{ stored: "earlier result" }, false, "replayed"],
-    [approvalPausedToolResult(), false, "approval_requested"],
-    [secretPausedToolResult(), true, "input_requested"],
-    ["plain text", true, "ok"],
-    [["list"], true, "ok"],
-  ])("classifies %j (past gate: %s) as %s", (result, pastGate, outcome) => {
-    expect(toolCallOutcome(result, pastGate)).toBe(outcome);
-  });
+    [{ ok: true }, true, false, "ok"],
+    [{ error: "boom" }, true, false, "error"],
+    [{ isError: true, content: [] }, true, false, "error"],
+    [{ error: "blocked" }, false, false, "refused"],
+    [{ error: "earlier failure" }, false, true, "replayed"],
+    [{ stored: "earlier result" }, false, false, "replayed"],
+    [approvalPausedToolResult(), false, false, "approval_requested"],
+    [secretPausedToolResult(), true, false, "input_requested"],
+    ["plain text", true, false, "ok"],
+    [["list"], true, false, "ok"],
+  ])(
+    "classifies %j (past gate: %s, replayed: %s) as %s",
+    (result, ranPastGate, replayed, outcome) => {
+      expect(toolCallOutcome(result, { ranPastGate, replayed })).toBe(outcome);
+    },
+  );
 });
 
 describe("toolCallApproval", () => {
@@ -385,6 +440,47 @@ describe("contentDigest", () => {
   });
 });
 
+describe("recordRuntimeToolCall", () => {
+  it("records a tool the runtime ran itself, with its arguments' digest", async () => {
+    const { ctx } = fakeContext();
+    const args = { question: "Which?", options: ["a", "b"] };
+
+    await recordRuntimeToolCall(ctx, {
+      name: "ask_user",
+      executionId: "call-1",
+      durationMs: 5,
+      args,
+      result: { content: [], details: args, terminate: true },
+      paused: true,
+    });
+    await recordRuntimeToolCall(ctx, {
+      name: "run_subagent",
+      executionId: "call-2",
+      durationMs: 9,
+      args: { task: "x" },
+      error: new Error("helper failed"),
+    });
+
+    expect(recordedEvents().map((event) => event.metadata)).toEqual([
+      expect.objectContaining({
+        tool: "ask_user",
+        outcome: "input_requested",
+        argsSha256: contentDigest(args).sha256,
+        durationMs: 5,
+      }),
+      expect.objectContaining({ tool: "run_subagent", outcome: "error" }),
+    ]);
+    expect(JSON.stringify(recordedEvents())).not.toContain("Which?");
+  });
+
+  it("ignores tools the dispatcher already records", async () => {
+    const { ctx } = fakeContext();
+    await recordRuntimeToolCall(ctx, { name: "web_fetch", executionId: "c", durationMs: 1 });
+    await recordRuntimeToolCall(ctx, { name: "request_secret", executionId: "c", durationMs: 1 });
+    expect(recordedEvents()).toEqual([]);
+  });
+});
+
 describe("mcpServerHost", () => {
   it("names a remote server by its endpoint's hostname only", () => {
     expect(
@@ -406,6 +502,30 @@ describe("mcpServerHost", () => {
         args: ["-y", "@vendor/mcp-server@1.2.3", "--flag", "opaque-value"],
       }),
     ).toBe("stdio:npx @vendor/mcp-server@1.2.3");
+  });
+
+  it("never names an option value as the package", () => {
+    for (const command of ["npx", "node", "mytool"]) {
+      expect(
+        mcpServerHost({
+          transport: "stdio",
+          endpoint: null,
+          command,
+          args: ["--password", "exampleSensitiveValue123", "@vendor/mcp-server"],
+        }),
+      ).toBe(`stdio:${command}`);
+    }
+  });
+
+  it("names no package for a command that is not a known launcher", () => {
+    expect(
+      mcpServerHost({
+        transport: "stdio",
+        endpoint: null,
+        command: "node",
+        args: ["exampleSensitiveValue123"],
+      }),
+    ).toBe("stdio:node");
   });
 
   it("leaves out a first argument that does not read as a package name", () => {
