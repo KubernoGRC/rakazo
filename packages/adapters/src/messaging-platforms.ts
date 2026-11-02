@@ -15,6 +15,7 @@ import type { ClientOptions as SendblueClientOptions } from "sendblue";
 import type { MessagingPlatform } from "./chat-sdk-surface.js";
 import { LazyLarkAdapter } from "./lark/lazy-adapter.js";
 import { Domain } from "./lark/thread-id.js";
+import type { TeamsTransport } from "./teams-platform.js";
 import { teamsPlatform } from "./teams-platform.js";
 import { isVitestRuntime } from "./test-runtime.js";
 
@@ -143,6 +144,8 @@ export function messagingPlatformsFromEnv(
     sendblueTransport?: Pick<SendblueClientOptions, "baseURL" | "fetch">;
     /** Test seam: replace only the official Lark SDK HTTP boundary. */
     larkTransport?: HttpInstance;
+    /** Test seam: replace only Microsoft's token issuance and JWT check. */
+    teamsTransport?: TeamsTransport;
   } = {},
 ): MessagingPlatform[] {
   const platforms: MessagingPlatform[] = [];
@@ -320,11 +323,14 @@ export function messagingPlatformsFromEnv(
   // Fork: all three or nothing, like every other platform (docs/fork-teams.md).
   if (env.teamsAppId && env.teamsAppPassword && env.teamsAppTenantId) {
     platforms.push(
-      teamsPlatform({
-        appId: env.teamsAppId,
-        appPassword: env.teamsAppPassword,
-        tenantId: env.teamsAppTenantId,
-      }),
+      teamsPlatform(
+        {
+          appId: env.teamsAppId,
+          appPassword: env.teamsAppPassword,
+          tenantId: env.teamsAppTenantId,
+        },
+        options.teamsTransport,
+      ),
     );
   }
 

@@ -1,3 +1,4 @@
+import type { TeamsAdapterConfig } from "@chat-adapter/teams";
 import { createTeamsAdapter } from "@chat-adapter/teams";
 import { getLogger } from "@rakazo/logging";
 import type { Adapter, WebhookOptions } from "chat";
@@ -10,6 +11,9 @@ export interface TeamsCredentials {
   tenantId: string;
 }
 
+/** Test seam: replaces only Microsoft's token issuance and JWT check, offline. */
+export type TeamsTransport = Pick<TeamsAdapterConfig, "token" | "webhookVerifier">;
+
 /**
  * Fork: Microsoft Teams as a messaging surface (docs/fork-teams.md).
  *
@@ -21,13 +25,17 @@ export interface TeamsCredentials {
  * not by Teams' per-bot user id, so a linked identity records who the person
  * is in the directory and stays valid if the bot is registered again.
  */
-export function teamsPlatform(credentials: TeamsCredentials): MessagingPlatform {
+export function teamsPlatform(
+  credentials: TeamsCredentials,
+  transport: TeamsTransport = {},
+): MessagingPlatform {
   const tenantId = credentials.tenantId.toLowerCase();
   const adapter = createTeamsAdapter({
     appType: "SingleTenant",
     appId: credentials.appId,
     appPassword: credentials.appPassword,
     appTenantId: credentials.tenantId,
+    ...transport,
   });
   const handleWebhook = adapter.handleWebhook.bind(adapter);
   Object.assign(adapter, {
