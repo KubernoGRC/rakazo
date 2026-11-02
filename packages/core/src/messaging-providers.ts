@@ -4,6 +4,8 @@ const PROVIDER_NAMES: Record<string, string> = {
   whatsapp: "WhatsApp",
   telegram: "Telegram",
   lark: "Feishu",
+  // Fork: docs/fork-teams.md.
+  teams: "Microsoft Teams",
 };
 
 /** User-facing name of a messaging provider (falls back to the raw id). */

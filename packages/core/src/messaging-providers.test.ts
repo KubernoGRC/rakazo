@@ -9,7 +9,8 @@ describe("messaging provider labels", () => {
   it("names known providers and falls back to the raw id", () => {
     expect(messagingProviderName("sendblue")).toBe("iMessage");
     expect(messagingProviderName("telegram")).toBe("Telegram");
-    expect(messagingProviderName("teams")).toBe("teams");
+    expect(messagingProviderName("teams")).toBe("Microsoft Teams");
+    expect(messagingProviderName("discord")).toBe("discord");
   });
 
   it("names extra Telegram bots after their configured name", () => {

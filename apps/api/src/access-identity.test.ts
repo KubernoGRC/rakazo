@@ -25,9 +25,9 @@ const verifier: AccessVerifier = {
   },
 };
 
-function gated() {
+function gated(exemptWebhooks?: string[]) {
   const app = new Hono();
-  app.use("*", accessIdentityGate(verifier));
+  app.use("*", accessIdentityGate(verifier, exemptWebhooks ? { exemptWebhooks } : {}));
   app.all("*", (c) => c.text("reached"));
   return app;
 }
@@ -68,6 +68,25 @@ describe("access identity gate", () => {
     SCREEN_TARGET_ENDPOINT,
   ])("keeps %s reachable without an assertion", async (path) => {
     expect(await (await gated().request(path)).text()).toBe("reached");
+  });
+
+  it("lets an exempt provider's webhook POST through without an assertion", async () => {
+    const response = await gated(["teams"]).request("/api/v1/messaging/webhook/teams", {
+      method: "POST",
+    });
+    expect(await response.text()).toBe("reached");
+  });
+
+  it.each([
+    ["not exempted", undefined, "POST", "/api/v1/messaging/webhook/teams"],
+    ["another provider", ["teams"], "POST", "/api/v1/messaging/webhook/slack"],
+    ["a GET", ["teams"], "GET", "/api/v1/messaging/webhook/teams"],
+    ["a path below it", ["teams"], "POST", "/api/v1/messaging/webhook/teams/x"],
+    ["a trailing slash", ["teams"], "POST", "/api/v1/messaging/webhook/teams/"],
+    ["the legacy phone webhook", ["teams"], "POST", "/api/v1/phone/webhook"],
+  ])("still requires an assertion for a webhook %s", async (_label, exempt, method, path) => {
+    const response = await gated(exempt).request(path, { method });
+    expect(response.status).toBe(401);
   });
 });
 

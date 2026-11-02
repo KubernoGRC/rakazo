@@ -763,7 +763,11 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     });
   }
   // Fork: under access identity every other route needs a verified assertion.
-  if (accessVerifier) app.use("*", accessIdentityGate(accessVerifier));
+  if (accessVerifier)
+    app.use(
+      "*",
+      accessIdentityGate(accessVerifier, { exemptWebhooks: env.accessExemptWebhooks ?? [] }),
+    );
   app.get("/api/auth/capabilities", (c) => {
     return c.json({
       sso: env.oidc

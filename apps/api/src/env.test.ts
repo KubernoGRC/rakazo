@@ -436,5 +436,27 @@ describe("OIDC environment", () => {
       expect(env.oidc).toBeUndefined();
       expect(env.passwordAuth).toBe(false);
     });
+    it("lists the messaging webhooks exempt from the assertion", () => {
+      expect(loadEnv(access).accessExemptWebhooks).toBeUndefined();
+      expect(
+        loadEnv({ ...access, ACCESS_IDENTITY_EXEMPT_WEBHOOKS: " teams, telegram-work ,teams" })
+          .accessExemptWebhooks,
+      ).toEqual(["teams", "telegram-work"]);
+    });
+    it.each([
+      ["a path", "teams/extra"],
+      ["a wildcard", "*"],
+      ["an empty entry", "teams,"],
+      ["an upper-case name", "Teams"],
+    ])("refuses an exempt webhook list with %s", (_label, value) => {
+      expect(() => loadEnv({ ...access, ACCESS_IDENTITY_EXEMPT_WEBHOOKS: value })).toThrow(
+        /ACCESS_IDENTITY_EXEMPT_WEBHOOKS must be/,
+      );
+    });
+    it("refuses exempt webhooks without access identity", () => {
+      expect(() => loadEnv({ ...base, ACCESS_IDENTITY_EXEMPT_WEBHOOKS: "teams" })).toThrow(
+        /requires ACCESS_IDENTITY_ENABLED=true/,
+      );
+    });
   });
 });
