@@ -45,6 +45,7 @@ import {
 import type { McpOAuthBroker, OAuthMaterial } from "./mcp-oauth.js";
 import {
   accessTokenExpiresAt,
+  launchOAuthClient,
   looksLikeSecretValue,
   McpReauthorizationRequiredError,
   oauthMaterialSecrets,
@@ -1059,10 +1060,9 @@ export class McpConnector implements ConnectorProvider {
           values = {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
-            client_id: material.oauthClient?.client_id,
-            client_secret: material.oauthClient?.client_secret,
+            ...launchOAuthClient(material),
             expires_at: expiresAt === undefined ? undefined : String(expiresAt),
-            scope: tokens.scope ?? material.oauthClient?.scope,
+            scope: tokens.scope ?? launchOAuthClient(material).scope,
             token_type: tokens.token_type,
           };
           launchEnv = resolveMcpOAuthEnv(env, values);
