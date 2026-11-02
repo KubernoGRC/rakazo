@@ -243,9 +243,47 @@ function effectiveClient(
     material.oauth?.discoveryState?.authorizationServerUrl ??
     material.oauthClient?.authorization_server;
   const deployment = deploymentClients && deploymentClientFor(deploymentClients, issuer);
-  return deployment
-    ? { client: deploymentPreRegistered(deployment), deployment: true }
-    : { client: material.oauthClient, deployment: false };
+  if (!deployment) return { client: material.oauthClient, deployment: false };
+  assertIssuerMetadata(deployment, material.oauth?.discoveryState);
+  return { client: deploymentPreRegistered(deployment), deployment: true };
+}
+
+/**
+ * A deployment client's secret goes only where its configured issuer says. Discovery can
+ * fall back to metadata the MCP endpoint itself serves, and an endpoint can name the
+ * configured issuer there while pointing the token endpoint at itself. So the metadata's
+ * issuer must be the configured one, and its endpoints must be on the issuer's origin,
+ * however the metadata was obtained. Without metadata, the SDK derives the endpoints from
+ * the issuer itself.
+ */
+function assertIssuerMetadata(
+  client: DeploymentOAuthClient,
+  discovery: OAuthDiscoveryState | undefined,
+): void {
+  const metadata = discovery?.authorizationServerMetadata;
+  if (!metadata) return;
+  const origin = new URL(client.issuer).origin;
+  const sameOrigin = (value: unknown) => {
+    if (value === undefined) return true;
+    if (typeof value !== "string") return false;
+    try {
+      return new URL(value).origin === origin;
+    } catch {
+      return false;
+    }
+  };
+  let issuer: string | undefined;
+  try {
+    issuer = new URL(metadata.issuer).href;
+  } catch {
+    issuer = undefined;
+  }
+  if (
+    issuer !== client.issuer ||
+    !sameOrigin(metadata.authorization_endpoint) ||
+    !sameOrigin(metadata.token_endpoint)
+  )
+    throw new McpOAuthDeploymentMetadataError();
 }
 
 /** The client values a stdio server's `{{oauth.*}}` templates may read. A deployment
@@ -297,6 +335,16 @@ export class McpOAuthServerMismatchError extends Error {
       "MCP OAuth authorization server differs from the one this client was first used with; reconfigure the server's OAuth client",
     );
     this.name = "McpOAuthServerMismatchError";
+  }
+}
+
+/** Discovered metadata that does not belong to the issuer a deployment client was configured for. */
+export class McpOAuthDeploymentMetadataError extends McpOAuthServerMismatchError {
+  constructor() {
+    super();
+    this.message =
+      "MCP OAuth authorization server metadata does not belong to the deployment's configured issuer";
+    this.name = "McpOAuthDeploymentMetadataError";
   }
 }
 

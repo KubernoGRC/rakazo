@@ -38,6 +38,11 @@ back to per-user clients for a server the deployment meant to configure.
 - A stdio server's `{{oauth.client_id}}` and `{{oauth.scope}}` templates read the
   deployment client. `{{oauth.client_secret}}` is **not** available for a deployment
   client, because the secret is never handed to a server process.
+- A deployment client is used only when the discovered authorization-server metadata
+  names its configured issuer, and the metadata's authorization and token endpoints are
+  on that issuer's origin. Discovery can fall back to metadata the MCP endpoint itself
+  serves, so the check applies however the metadata was obtained. A flow that fails it
+  is refused rather than sent the secret.
 - The secrets are redacted from OAuth errors, logs and tool results.
 
 ## Where it touches upstream files

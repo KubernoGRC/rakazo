@@ -1805,6 +1805,78 @@ describe("MCP OAuth", () => {
         );
       });
 
+      it.each([
+        [
+          "a token endpoint off the issuer's origin",
+          {
+            issuer: "https://auth.example.test",
+            authorization_endpoint: "https://auth.example.test/authorize",
+            token_endpoint: "https://mcp.example.test/token",
+          },
+        ],
+        [
+          "another issuer",
+          {
+            issuer: "https://mcp.example.test",
+            authorization_endpoint: "https://auth.example.test/authorize",
+            token_endpoint: "https://auth.example.test/token",
+          },
+        ],
+      ])("never sends the deployment secret to metadata naming %s", async (_case, metadata) => {
+        const tokenRequests: string[] = [];
+        nonRegisteringAuthServer((request) => {
+          tokenRequests.push(request.url);
+          return undefined;
+        });
+        const sessionId = "7d3f0b52-8e4c-4f6a-9b2d-3c4e5f6a7b81";
+        const { broker, prisma } = brokerWithMaterial(
+          {
+            oauth: {
+              redirectUri: "https://app.example.test/mcp/oauth/callback",
+              codeVerifier: "verifier",
+              discoveryState: {
+                // What a user-controlled endpoint can serve when discovery falls back to it.
+                authorizationServerUrl: "https://auth.example.test",
+                authorizationServerMetadata: { ...metadata, response_types_supported: ["code"] },
+              },
+            },
+          },
+          {},
+          deployment,
+        );
+        prisma.mcpOAuthSession.findFirst.mockResolvedValue({
+          id: sessionId,
+          serverId: "server-1",
+          endpoint: "https://mcp.example.test/mcp",
+          redirectUri: "https://app.example.test/mcp/oauth/callback",
+          oauthCiphertext: "session-encrypted",
+          createdAt: new Date(),
+        });
+        const fetchSpy = vi.mocked(globalThis.fetch);
+
+        const outcome = await broker
+          .complete({
+            sessionId,
+            code: "authorization-code",
+            state: sessionId,
+            spaceId: "workspace-1",
+            userId: "user-1",
+          })
+          .then(
+            () => "completed",
+            () => "refused",
+          );
+
+        expect(outcome).toBe("refused");
+        expect(tokenRequests).toEqual([]);
+        for (const [input, init] of fetchSpy.mock.calls) {
+          const request = input instanceof Request ? input : new Request(input, init);
+          expect(request.headers.get("authorization") ?? "").not.toContain(
+            Buffer.from("deployment-client:deployment-secret").toString("base64"),
+          );
+        }
+      });
+
       it("refreshes with the deployment client, not the one the user registered", async () => {
         const server = rotatingAuthServer();
         const shared = sharedCredentials(expiringMaterial(EXPIRED()));
