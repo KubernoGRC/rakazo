@@ -102,3 +102,5 @@ images **by digest** from the job summary, never by tag.
 - [Deployment connectors](fork-deployment-connectors.md)
 - [Trusted access identity](fork-access-identity.md): a verified access-proxy assertion as
   the only way in. Its fail-closed checks must stay in place.
+- [Per-call tool events](fork-tool-call-events.md): a content-free `tool.called` security
+  event for every agent tool call.

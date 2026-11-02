@@ -15,6 +15,8 @@ import { memoryTools } from "./run-tools-memory.js";
 import { messagingTools } from "./run-tools-messaging.js";
 import { secretTools } from "./run-tools-secrets.js";
 import { taskTools } from "./run-tools-tasks.js";
+import type { ToolCallAudit } from "./tool-call-event.js";
+import { auditToolCall } from "./tool-call-event.js";
 
 const TOOL_HANDLERS = new Map<string, ToolHandler>([
   ...Object.entries(computerTools),
@@ -34,7 +36,10 @@ function toolHandler(name: string): ToolHandler {
   );
 }
 
-/** Run one tool call of this run's model: gate it, then hand it to its tool family. */
+/**
+ * Run one tool call of this run's model: gate it, then hand it to its tool family. Every call,
+ * however it ends, records one `tool.called` security event.
+ */
 export async function applyTool(
   ctx: RunContext,
   name: string,
@@ -43,8 +48,11 @@ export async function applyTool(
   _route?: unknown,
   observer?: AgentToolExecutionObserver,
 ) {
+  const knownTool = TOOL_HANDLERS.has(name) || ctx.tools.connector.has(name);
   try {
-    return await dispatchOneTool(ctx, name, args, executionId, observer);
+    return await auditToolCall(ctx, name, args, knownTool, (audit) =>
+      dispatchOneTool(ctx, name, args, executionId, observer, audit),
+    );
   } finally {
     if (toolResultTaintsRun(name)) ctx.state.tainted = true;
   }
@@ -56,15 +64,16 @@ async function dispatchOneTool(
   args: Record<string, unknown>,
   executionId: string,
   observer: AgentToolExecutionObserver | undefined,
+  audit: ToolCallAudit,
 ) {
   if (name !== "propose_instructions_update")
-    return dispatchTool(ctx, name, args, executionId, observer);
+    return dispatchTool(ctx, name, args, executionId, observer, audit);
   const { approval } = ctx.state;
   if (approval.proposalInFlight)
     return { error: "This bot already has a pending instruction proposal." };
   approval.proposalInFlight = true;
   try {
-    return await dispatchTool(ctx, name, args, executionId, observer);
+    return await dispatchTool(ctx, name, args, executionId, observer, audit);
   } finally {
     approval.proposalInFlight = false;
   }
@@ -76,6 +85,7 @@ async function dispatchTool(
   args: Record<string, unknown>,
   executionId: string,
   observer: AgentToolExecutionObserver | undefined,
+  audit: ToolCallAudit,
 ) {
   ctx.context.signal.throwIfAborted();
   if (ctx.state.handedOff) {
@@ -96,9 +106,11 @@ async function dispatchTool(
   }
   const request = await resolveToolRequest(ctx, name, args, executionId);
   if ("error" in request) return request;
+  audit.resolved(request);
   const refused = await prepareToolRequest(ctx, request);
   if (refused) return refused;
   const gate = await gateToolCall(ctx, request, observer);
   if ("result" in gate) return gate.result;
+  audit.passedGate(gate.call);
   return toolHandler(gate.call.name)(ctx, gate.call);
 }
