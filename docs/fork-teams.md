@@ -63,6 +63,7 @@ access proxy must let that one path through too (a bypass for exactly that path)
 - `packages/adapters/src/teams-platform.ts` (new): the platform, the tenant pin and the
   sender address.
 - `packages/adapters/src/messaging-platforms.ts`: the three settings and the mount.
+- `packages/core/src/messaging-providers.ts`: the provider's display name, "Microsoft Teams".
 - `packages/adapters/package.json`: the `@chat-adapter/teams` dependency.
 - `apps/api/src/env.ts`: the settings, and `ACCESS_IDENTITY_EXEMPT_WEBHOOKS`.
 - `apps/api/src/access-identity.ts` and `apps/api/src/app.ts`: the webhook exemption.
