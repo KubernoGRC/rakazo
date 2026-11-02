@@ -70,7 +70,9 @@ const NOT_PASSED: Record<string, string> = {
   KUBERNETES_SANDBOX_READY_TIMEOUT_MS: KUBERNETES_SANDBOX,
   KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME: KUBERNETES_SANDBOX,
   // Fork: the deployment adds these itself (docs/fork-access-identity.md,
-  // docs/fork-deployment-connectors.md); the compose files never carry them.
+  // docs/fork-deployment-connectors.md, docs/fork-deployment-oauth-clients.md); the
+  // compose files never carry them. MCP_OAUTH_CLIENT_<LABEL>_* are read by name from
+  // the labels MCP_OAUTH_CLIENTS lists, so the scan sees only the list.
   ACCESS_IDENTITY_ENABLED: FORK_DEPLOYMENT,
   ACCESS_IDENTITY_ISSUER: FORK_DEPLOYMENT,
   ACCESS_IDENTITY_AUDIENCE: FORK_DEPLOYMENT,
@@ -79,6 +81,7 @@ const NOT_PASSED: Record<string, string> = {
   DEPLOYMENT_MCP_URL: FORK_DEPLOYMENT,
   DEPLOYMENT_MCP_TOKEN: FORK_DEPLOYMENT,
   DEPLOYMENT_MCP_PRIVATE_ENDPOINT: FORK_DEPLOYMENT,
+  MCP_OAUTH_CLIENTS: FORK_DEPLOYMENT,
 };
 
 /**

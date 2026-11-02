@@ -10,7 +10,9 @@ their **own** access through it. Nothing changes unless `MCP_OAUTH_CLIENTS` is s
 
 ## Configuration
 
-Set these on both the API and the worker.
+Set these on both the API and the worker. Like the other fork settings, the compose
+files don't carry them; the deployment's own compose overlay or env file passes them
+(`infra/updater/src/compose-env.test.ts` lists them as deployment-supplied).
 
 | Variable | Meaning |
 | --- | --- |
