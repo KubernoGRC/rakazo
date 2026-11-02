@@ -372,6 +372,18 @@ export type ExternalEffectStore = {
   };
 };
 
+export const DENIED_EFFECT_ERROR =
+  "The user denied this action. Do not retry or rephrase it; tell the user and ask what they want instead.";
+
+/** The result a retry of an effect the user denied gets back. It never ran. */
+export function isDeniedEffectResult(result: unknown): boolean {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    (result as { error?: unknown }).error === DENIED_EFFECT_ERROR
+  );
+}
+
 export function resolveDuplicateEffectGate(
   effect: { status: string; result?: unknown },
   toolName: string,
@@ -382,10 +394,7 @@ export function resolveDuplicateEffectGate(
   if (effect.status === "denied") {
     return {
       action: "return",
-      result: {
-        error:
-          "The user denied this action. Do not retry or rephrase it; tell the user and ask what they want instead.",
-      },
+      result: { error: DENIED_EFFECT_ERROR },
     };
   }
   if (effect.status === "executing") {

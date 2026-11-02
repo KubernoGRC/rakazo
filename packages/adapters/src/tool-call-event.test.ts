@@ -1,7 +1,12 @@
 import type { ConnectorTool } from "@rakazo/adapter-kit";
 import type * as DbModule from "@rakazo/db";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { approvalPausedToolResult } from "./approval-effect.js";
+import { approvalPausedToolResult, DENIED_EFFECT_ERROR } from "./approval-effect.js";
+import {
+  SUBAGENT_FAILURE_PREFIX,
+  SUBAGENT_NESTING_REFUSAL,
+  SUBAGENT_STOPPED,
+} from "./pi-runtime-subagent.js";
 import type { RunContext } from "./run-context.js";
 import { secretPausedToolResult } from "./run-secret.js";
 import type * as GateModule from "./run-tool-gate.js";
@@ -318,6 +323,16 @@ describe("tool.called through the dispatcher", () => {
     expect(recordedEvents().map((event) => event.metadata.outcome)).toEqual(["replayed"]);
   });
 
+  it("records a retry of an action the user denied as refused", async () => {
+    const { ctx } = fakeContext();
+    resolveToolRequest.mockResolvedValue(request(MCP_TOOL.name, {}));
+    gateToolCall.mockResolvedValue({ result: { error: DENIED_EFFECT_ERROR }, replayed: true });
+
+    await applyTool(ctx, MCP_TOOL.name, {}, "call-1");
+
+    expect(recordedEvents().map((event) => event.metadata.outcome)).toEqual(["refused"]);
+  });
+
   it("records an MCP error envelope as an error", async () => {
     const { ctx } = fakeContext();
     resolveToolRequest.mockResolvedValue(request(MCP_TOOL.name, {}));
@@ -471,6 +486,23 @@ describe("recordRuntimeToolCall", () => {
       expect.objectContaining({ tool: "run_subagent", outcome: "error" }),
     ]);
     expect(JSON.stringify(recordedEvents())).not.toContain("Which?");
+  });
+
+  it.each([
+    [`${SUBAGENT_FAILURE_PREFIX}provider failed`, "error"],
+    [SUBAGENT_NESTING_REFUSAL, "refused"],
+    [SUBAGENT_STOPPED, "cancelled"],
+    ["Result from your helper", "ok"],
+  ])("records a subagent that returned %j as %s", async (text, outcome) => {
+    const { ctx } = fakeContext();
+    await recordRuntimeToolCall(ctx, {
+      name: "run_subagent",
+      executionId: "call-1",
+      durationMs: 1,
+      args: {},
+      result: { content: [{ type: "text", text }], details: { result: text } },
+    });
+    expect(recordedEvents()[0]!.metadata.outcome).toBe(outcome);
   });
 
   it("ignores tools the dispatcher already records", async () => {

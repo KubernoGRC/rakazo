@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import type { AgentToolCompletion, ConnectorRoute } from "@rakazo/adapter-kit";
 import { stableJsonValue } from "@rakazo/core/node/approval-effect-key";
 import { recordSecurityEvent } from "@rakazo/db";
-import { isToolPauseResult } from "./approval-effect.js";
+import { isDeniedEffectResult, isToolPauseResult } from "./approval-effect.js";
+import { subagentOutcome } from "./pi-runtime-subagent.js";
 import type { RunContext } from "./run-context.js";
 import type { ToolCall } from "./run-tool-gate.js";
 import type { ToolRequest } from "./run-tool-request.js";
@@ -121,7 +122,8 @@ export function toolCallOutcome(
       ? "input_requested"
       : "approval_requested";
   }
-  if (stage.replayed) return "replayed";
+  // A retry of an effect the user denied gets the denial back; nothing ran, then or now.
+  if (stage.replayed) return isDeniedEffectResult(result) ? "refused" : "replayed";
   const failed = isErrorResult(result);
   if (!stage.ranPastGate) return failed ? "refused" : "replayed";
   return failed ? "error" : "ok";
@@ -143,10 +145,20 @@ export async function recordRuntimeToolCall(
   completion: AgentToolCompletion,
 ): Promise<void> {
   if (!RUNTIME_OWNED_TOOLS.has(completion.name)) return;
-  const failed =
-    completion.error !== undefined ||
-    isErrorResult((completion.result as { details?: unknown } | undefined)?.details);
-  const outcome: ToolCallOutcome = failed ? "error" : completion.paused ? "input_requested" : "ok";
+  const details = (completion.result as { details?: unknown } | undefined)?.details;
+  // A subagent reports failure in its returned text, not by throwing.
+  const delegation =
+    completion.name === "run_subagent"
+      ? subagentOutcome((details as { result?: unknown } | undefined)?.result)
+      : "ok";
+  const outcome: ToolCallOutcome =
+    completion.error !== undefined || isErrorResult(details)
+      ? "error"
+      : delegation !== "ok"
+        ? delegation
+        : completion.paused
+          ? "input_requested"
+          : "ok";
   try {
     await recordSecurityEvent(
       await toolCalledEvent(ctx, {
