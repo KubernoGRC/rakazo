@@ -37,6 +37,7 @@ import {
   controlPortPublicationMatches,
   homeVolumeMatches,
   hostComputerUser,
+  isolatedGatewaySupported,
   legacyNetworkOwnedSolelyBy,
   parseMemoryBytes,
   publishedLoopbackControlHostPort,
@@ -2023,6 +2024,32 @@ describe("isolated computer egress (fork patch)", () => {
     expect(computerNetworkCreateOptions("bot_1", "owner", "open", "default")).not.toHaveProperty(
       "Internal",
     );
+  });
+
+  it("isolates the gateway of an egress none network when the engine supports it", () => {
+    const gateway = {
+      "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+      "com.docker.network.bridge.gateway_mode_ipv6": "isolated",
+    };
+    expect(
+      computerNetworkCreateOptions("bot_1", "owner", "open", "none", { isolatedGateway: true })
+        .Options,
+    ).toEqual(gateway);
+    expect(
+      computerNetworkCreateOptions("bot_1", "owner", "restricted", "none", {
+        isolatedGateway: true,
+      }).Options,
+    ).toEqual({ "com.docker.network.bridge.name": computerBridgeNameFor("bot_1"), ...gateway });
+    // Never on a default network, even when asked.
+    expect(
+      computerNetworkCreateOptions("bot_1", "owner", "open", "default", { isolatedGateway: true }),
+    ).not.toHaveProperty("Options");
+    expect(isolatedGatewaySupported("1.50")).toBe(true);
+    expect(isolatedGatewaySupported("1.51")).toBe(true);
+    expect(isolatedGatewaySupported("2.0")).toBe(true);
+    for (const version of ["1.49", "1.9", "", undefined, "v1.50", "1.50.1"]) {
+      expect(isolatedGatewaySupported(version), String(version)).toBe(false);
+    }
   });
 
   it("matches a network's egress only when both the flag and the label agree", () => {

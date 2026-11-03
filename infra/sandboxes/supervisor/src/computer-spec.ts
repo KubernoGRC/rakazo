@@ -273,13 +273,39 @@ export type ComputerNetworkEgress = "default" | "none";
 
 export const COMPUTER_NETWORK_EGRESS_LABEL = "rakazo.egress";
 
+/**
+ * An internal network has no route off the host, but its computers can still
+ * reach services the host binds on the bridge's gateway address. Docker Engine
+ * 28.2 (API 1.50) can give an internal network no gateway address at all
+ * ("isolated" gateway mode). Older engines need the restricted-egress host rules,
+ * whose INPUT drop covers the named computer bridges, instead.
+ */
+export function isolatedGatewaySupported(apiVersion: string | undefined) {
+  const match = /^(\d+)\.(\d+)$/.exec(apiVersion ?? "");
+  if (!match) return false;
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  return major > 1 || (major === 1 && minor >= 50);
+}
+
 /** docker.createNetwork payload for a bot's computer network. */
 export function computerNetworkCreateOptions(
   botId: string,
   owner: string,
   egress: ComputerEgressMode = "open",
   networkEgress: ComputerNetworkEgress = "default",
+  options: { isolatedGateway?: boolean } = {},
 ) {
+  const driverOptions: Record<string, string> = {
+    ...(egress === "restricted"
+      ? { "com.docker.network.bridge.name": computerBridgeNameFor(botId) }
+      : {}),
+    ...(networkEgress === "none" && options.isolatedGateway
+      ? {
+          "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+          "com.docker.network.bridge.gateway_mode_ipv6": "isolated",
+        }
+      : {}),
+  };
   return {
     Name: computerNetworkNameFor(botId),
     Driver: "bridge",
@@ -290,9 +316,7 @@ export function computerNetworkCreateOptions(
       ...(networkEgress === "none" ? { [COMPUTER_NETWORK_EGRESS_LABEL]: "none" } : {}),
     },
     ...(networkEgress === "none" ? { Internal: true } : {}),
-    ...(egress === "restricted"
-      ? { Options: { "com.docker.network.bridge.name": computerBridgeNameFor(botId) } }
-      : {}),
+    ...(Object.keys(driverOptions).length ? { Options: driverOptions } : {}),
   };
 }
 
