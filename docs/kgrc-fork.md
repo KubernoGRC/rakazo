@@ -108,5 +108,7 @@ images **by digest** from the job summary, never by tag.
   event for every agent tool call.
 - [Isolated computer egress](fork-isolated-computer-egress.md): an opt-in computer with no
   route off the host, reaching only operator-named peers.
+- [Computer coding agent](fork-computer-coding-agent.md): a headless coding command in a
+  single-use isolated computer, fetching with the owner's own forge token, ending at a diff.
 - [Microsoft Teams](fork-teams.md): a single-tenant Teams surface that refuses other tenants
   and links each sender by their directory identity.

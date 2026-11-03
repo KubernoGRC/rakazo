@@ -8,6 +8,11 @@ export function resolveCloudAgentProvider(source: NodeJS.ProcessEnv = process.en
   const requested = (configured?.trim() || "none").toLowerCase();
   if (requested === "none" || requested === "") return "none";
   if (requested === "emulator" || requested === "fake") return "emulator";
+  // Fork patch: the computer provider (docs/fork-computer-coding-agent.md). The worker
+  // validates the rest of its configuration when it builds the provider.
+  if (requested === "computer") {
+    return optional(source.CLOUD_AGENT_SPACE_ID) ? "computer" : "none";
+  }
   if (requested === "cursor") {
     return optional(source.CURSOR_API_KEY) && optional(source.CLOUD_AGENT_SPACE_ID)
       ? "cursor"

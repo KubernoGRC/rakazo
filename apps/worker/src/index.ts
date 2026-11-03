@@ -45,6 +45,7 @@ import {
   isPipedreamEnabled,
   McpConnector,
   McpOAuthBroker,
+  mcpForgeTokenResolver,
   mcpStdioOptionsFromEnv,
   messagingEnvFromProcess,
   messagingPlatformsFromEnv,
@@ -235,7 +236,17 @@ async function main() {
     ticketBoardEnabled,
   });
   // One provider instance so emulator launches and polls share the same Map.
-  const cloudAgent = createCloudAgentConnection();
+  // Fork patch: the computer provider runs here, with the sandbox and the owner's forge token.
+  const cloudAgent = createCloudAgentConnection(process.env, {
+    sandbox,
+    dataDir,
+    forgeToken: mcpForgeTokenResolver({
+      prisma,
+      broker: mcpOAuth,
+      issuer:
+        process.env.CLOUD_AGENT_COMPUTER_FORGE_ISSUER?.trim() || "https://github.com/login/oauth",
+    }),
+  });
   // Shared with the reconciler so a stuck wait uses the same push path as a finish notice.
   const pushTokens = new PrismaPushTokenStore(prisma, resolveEncryptionKey(process.env));
   const notifications = new ExpoPushProvider(pushTokens, {

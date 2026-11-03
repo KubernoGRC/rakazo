@@ -101,6 +101,41 @@ describe("cloud agent composition", () => {
     })!;
     expect(rotated.key).not.toBe(connection.key);
   });
+  it("binds the computer provider to its Space and keeps its runtime out of the API", () => {
+    expect(resolveCloudAgentProvider({ CLOUD_AGENT_PROVIDER: "computer" })).toBe("none");
+    expect(() =>
+      createCloudAgentConnection({ CLOUD_AGENT_PROVIDER: "computer", CLOUD_AGENT_SPACE_ID: "s" }),
+    ).toThrow(/runtime/);
+    // The API process passes only the data directory and no runtime settings.
+    const reader = createCloudAgentConnection(
+      { CLOUD_AGENT_PROVIDER: "computer", CLOUD_AGENT_SPACE_ID: "test-space" },
+      { dataDir: "/tmp/never-used" },
+    )!;
+    expect(cloudAgentsEnabled(reader, "test-space")).toBe(true);
+    expect(cloudAgentsEnabled(reader, "other-space")).toBe(false);
+    expect(reader.provider.describe().capabilities).toMatchObject({ launch: true, reply: false });
+    // The worker builds the same key, so ownership matches across processes.
+    const worker = createCloudAgentConnection(
+      {
+        CLOUD_AGENT_PROVIDER: "computer",
+        CLOUD_AGENT_SPACE_ID: "test-space",
+        CLOUD_AGENT_COMPUTER_COMMAND: '["claude","-p"]',
+        CLOUD_AGENT_COMPUTER_REPOS: "example/repo",
+        CLOUD_AGENT_COMPUTER_RELAY_URL: "http://model-relay:8790",
+        CLOUD_AGENT_COMPUTER_MODEL: "m",
+        MODEL_RELAY_SIGNING_KEY: "k".repeat(32),
+      },
+      { dataDir: "/tmp/never-used", sandbox: {} as never, forgeToken: async () => undefined },
+    )!;
+    expect(worker.key).toBe(reader.key);
+    // A worker with a runtime refuses to start on a malformed configuration.
+    expect(() =>
+      createCloudAgentConnection(
+        { CLOUD_AGENT_PROVIDER: "computer", CLOUD_AGENT_SPACE_ID: "test-space" },
+        { dataDir: "/tmp/never-used", sandbox: {} as never, forgeToken: async () => undefined },
+      ),
+    ).toThrow(/CLOUD_AGENT_COMPUTER_COMMAND/);
+  });
   it("never grants an unscoped live provider access", () => {
     expect(
       cloudAgentsEnabled(

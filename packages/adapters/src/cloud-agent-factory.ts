@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import type { CloudAgentProvider } from "@rakazo/adapter-kit";
 import { EmulatorCloudAgentProvider } from "./cloud-agent-emulator.js";
 import { resolveCloudAgentProvider } from "./cloud-agent-provider-env.js";
+import {
+  type ComputerCloudAgentDeps,
+  ComputerCloudAgentProvider,
+  computerCloudAgentConfigFromEnv,
+} from "./computer-cloud-agent.js";
 import { CursorCloudAgentProvider } from "./cursor-cloud-agent.js";
 
 /** The composition root binds a credential to exactly one authorized Space. */
@@ -26,10 +31,26 @@ export function cloudAgentsEnabled(
 
 export function createCloudAgentConnection(
   source: NodeJS.ProcessEnv = process.env,
+  // Fork patch: the computer provider's runtime. The worker passes the sandbox and forge
+  // token; the API passes only the data directory, to read results for cloud_agent_status.
+  computer?: ComputerCloudAgentDeps,
 ): CloudAgentConnection | null {
   const kind = resolveCloudAgentProvider(source);
   if (kind === "emulator") {
     return { provider: new EmulatorCloudAgentProvider(), key: "emulator" };
+  }
+  if (kind === "computer") {
+    if (!computer) throw new Error("CLOUD_AGENT_PROVIDER=computer needs its runtime");
+    const spaceId = source.CLOUD_AGENT_SPACE_ID!.trim();
+    return {
+      provider: new ComputerCloudAgentProvider(
+        computer.sandbox ? computerCloudAgentConfigFromEnv(source) : null,
+        computer,
+      ),
+      // Ownership survives a relay key rotation; the space binding is what fails closed.
+      key: `computer:${createHash("sha256").update(spaceId).digest("hex")}`,
+      spaceId,
+    };
   }
   if (kind !== "cursor") return null;
   const apiKey = source.CURSOR_API_KEY!.trim();

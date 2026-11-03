@@ -603,6 +603,11 @@ export interface CloudAgentProvider {
     context: AdapterContext,
   ): Promise<CloudAgentHandle>;
   cancel(id: string, context: AdapterContext, runId?: string): Promise<CloudAgentSnapshot>;
+  /**
+   * Fork patch: a provider that keeps its result locally (the computer provider) returns
+   * it here for `cloud_agent_status`. It never throws.
+   */
+  result?(id: string): Promise<unknown>;
 }
 
 /**
