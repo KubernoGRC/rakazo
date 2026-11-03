@@ -61,6 +61,9 @@ conflict with them:
 
 - **Image changes** go in `infra/compose/Dockerfile.kgrc`, an overlay applied on top
   of the image built from upstream's unmodified `infra/compose/Dockerfile`.
+- **Computer image changes** go in `infra/sandboxes/computer/Dockerfile.kgrc`, applied the
+  same way on top of upstream's computer image. It adds the pinned coding CLI for the
+  computer coding agent, with its managed settings.
 - **Image publishing** is `.github/workflows/kgrc-publish-images.yml`, which releases
   from `kgrc` with `kgrc-v*` tags.
 

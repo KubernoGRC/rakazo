@@ -1,0 +1,22 @@
+# Fork-owned overlay on the upstream computer image (infra/sandboxes/computer/Dockerfile),
+# built unmodified as BASE_IMAGE. It adds one headless coding CLI for the computer
+# coding agent (docs/fork-computer-coding-agent.md). The CLI is pinned by version and
+# SHA-256 and installed at build time: a computer has no package manager at run time,
+# and an isolated computer has no route to fetch one.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+ARG CLAUDE_CODE_VERSION=2.1.311
+ARG CLAUDE_CODE_SHA256=86dc1fcc69498159eaf15f446613e847010f9036bfbbdffd4c49350be8489ada
+RUN set -eux; \
+  curl -fsSL "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/linux-x64/claude" \
+    -o /usr/local/bin/claude; \
+  echo "${CLAUDE_CODE_SHA256}  /usr/local/bin/claude" | sha256sum -c -; \
+  chmod 0755 /usr/local/bin/claude
+# Deployment-wide CLI policy, which a user's own settings can't override: no web tools
+# (an isolated computer can't reach the web anyway; this is defence in depth), no
+# bypass-permissions mode, and no background network calls.
+COPY --chmod=0644 claude-code-managed-settings.json /etc/claude-code/managed-settings.json
+USER 1000:1000
+RUN claude --version
