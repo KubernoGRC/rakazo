@@ -14,6 +14,7 @@ import type {
 import { CloudAgentRequestRejected, CloudAgentRetryLater } from "@rakazo/adapter-kit";
 import { getLogger } from "@rakazo/logging";
 import { issueRelayCapability } from "./model-relay-capability.js";
+import { readBodyCapped } from "./web-ssrf.js";
 
 /**
  * Fork patch: the `computer` cloud-agent provider (docs/fork-computer-coding-agent.md).
@@ -68,6 +69,8 @@ interface RunState {
   capability?: string;
   /** Set once the coding command has been started in the computer. */
   runStarted?: boolean;
+  /** A teardown that has not finished yet: the run turns terminal once the computer is gone. */
+  pending?: { status: Phase; reason?: string };
   startedAt: number;
   deadline: number;
   status: Phase;
@@ -88,6 +91,9 @@ export interface ComputerCloudAgentResult {
 const WORK_DIR = ".rakazo-coding";
 const CHUNK_BYTES = 2 * 1024 * 1024;
 const RESULT_DIFF_PREVIEW_BYTES = 60_000;
+/** How long a result that can't be read, or a computer that won't go, is retried past the deadline. */
+const RETRY_GRACE_MS = 60 * 60_000;
+const CLEANUP_TIMEOUT_MS = 60_000;
 const SUMMARY_BYTES = 16_000;
 const DEFAULTS = {
   deadlineMs: 60 * 60_000,
@@ -201,11 +207,13 @@ rm -f "$work/snapshot.tgz"
 cd "$repo" || fail "cannot enter the repository"
 g() { git -c user.name=rakazo -c user.email=rakazo@localhost -c commit.gpgsign=false "$@"; }
 g init -q && g add -A && g commit -q -m base || fail "baseline commit failed"
+# The imported baseline, kept apart from HEAD: the command may commit its own work.
+base=$(git rev-parse HEAD) || fail "baseline commit failed"
 timeout --kill-after=30 "\${RAKAZO_CODING_TIMEOUT_S:-3600}" "$@" "$(cat "$work/brief.md")" \\
   > "$work/output.txt" 2> "$work/stderr.txt"
 code=$?
-cd "$repo" && g add -A && g diff --cached --binary HEAD > "$work/diff.patch" \\
-  && g diff --cached --numstat HEAD > "$work/numstat.txt" || fail "diff failed"
+cd "$repo" && g add -A && g diff --cached --binary "$base" > "$work/diff.patch" \\
+  && g diff --cached --numstat "$base" > "$work/numstat.txt" || fail "diff failed"
 echo "$code" > "$work/exit"
 `;
 }
@@ -291,11 +299,16 @@ export class ComputerCloudAgentProvider implements CloudAgentProvider {
     return { ...context, botId };
   }
 
-  private async forge(token: string, url: string, accept = "application/vnd.github+json") {
+  private async forge(
+    token: string,
+    url: string,
+    accept = "application/vnd.github+json",
+    timeoutMs = 45_000,
+  ) {
     const response = await this.fetchImpl(url, {
       headers: { accept, authorization: `Bearer ${token}`, "x-github-api-version": "2022-11-28" },
       redirect: "follow",
-      signal: AbortSignal.timeout(45_000),
+      signal: AbortSignal.timeout(timeoutMs),
     }).catch(() => {
       throw new CloudAgentRetryLater("unavailable");
     });
@@ -321,6 +334,8 @@ export class ComputerCloudAgentProvider implements CloudAgentProvider {
     if (!repository || !this.config.repositories.includes(repository)) {
       throw new CloudAgentRequestRejected("invalid");
     }
+    // The brief is text; a run must never report success on an attachment it never saw.
+    if (request.images?.length) throw new CloudAgentRequestRejected("invalid");
     if (!sandbox.describe().capabilities.isolatedEgress) {
       throw new Error("the sandbox provider cannot isolate computer egress");
     }
@@ -342,13 +357,15 @@ export class ComputerCloudAgentProvider implements CloudAgentProvider {
     const tarball = await this.forge(
       token,
       `${this.config.forgeApi}/repos/${repository}/tarball/${commit.sha}`,
+      "application/vnd.github+json",
+      180_000,
     );
     const declared = Number(tarball.headers.get("content-length") ?? "0");
     if (declared > this.config.maxSnapshotBytes) throw new CloudAgentRequestRejected("invalid");
-    const snapshot = new Uint8Array(await tarball.arrayBuffer());
-    if (snapshot.byteLength > this.config.maxSnapshotBytes) {
+    // Bounded while it is read, so a response with no length can't exhaust the worker.
+    const snapshot = await readBodyCapped(tarball, this.config.maxSnapshotBytes).catch(() => {
       throw new CloudAgentRequestRejected("invalid");
-    }
+    });
 
     const botId = `coding-${id}`;
     const started = this.now();
@@ -418,18 +435,28 @@ export class ComputerCloudAgentProvider implements CloudAgentProvider {
         }),
         RAKAZO_CODING_TIMEOUT_S: String(Math.ceil(this.config.deadlineMs / 1000)),
       };
-      // setsid -f detaches the run from this exec, which returns at once.
+      // setsid -f detaches the run, and every stream it inherits is closed, so this exec
+      // returns at once instead of holding the run's output open.
       await this.exec(
         sandbox,
         computer,
-        ["setsid", "-f", "bash", `${WORK_DIR}/run.sh`, ...this.config.command],
+        [
+          "bash",
+          "-c",
+          'setsid -f bash "$0" "$@" </dev/null >/dev/null 2>&1',
+          `${WORK_DIR}/run.sh`,
+          ...this.config.command,
+        ],
         ctx,
         env,
       );
       state.runStarted = true;
       await this.saveState(state);
     } catch (error) {
-      await this.teardown(state, ctx, "failed", "launch failed");
+      // A computer that wouldn't go keeps the run open; `get` retries until it does.
+      if (!(await this.teardown(state, ctx, "failed", "launch failed"))) {
+        return this.snapshotOf(state);
+      }
       if (error instanceof CloudAgentRequestRejected || error instanceof CloudAgentRetryLater) {
         throw error;
       }
@@ -483,13 +510,18 @@ export class ComputerCloudAgentProvider implements CloudAgentProvider {
     if (state.status !== "running") return this.snapshotOf(state);
     const { sandbox } = this.requireRuntime();
     const ctx = this.computerContext(context, state.botId);
+    if (state.pending) {
+      await this.teardown(state, ctx, state.pending.status, state.pending.reason);
+      return this.snapshotOf(state);
+    }
     if (!state.computer || !state.runStarted) {
       await this.teardown(state, ctx, "failed", "launch interrupted");
       return this.snapshotOf(state);
     }
+    const computer = state.computer;
     const read = (file: string, maxBytes: number) =>
       sandbox
-        .readFile(state.computer!, `${WORK_DIR}/${file}`, ctx, { maxBytes })
+        .readFile(computer, `${WORK_DIR}/${file}`, ctx, { maxBytes })
         .then((bytes) => new TextDecoder().decode(bytes))
         .catch(() => undefined);
     const exit = await read("exit", 64);
@@ -500,17 +532,29 @@ export class ComputerCloudAgentProvider implements CloudAgentProvider {
       return this.snapshotOf(state);
     }
     const error = await read("error", 4096);
-    const numstat = (await read("numstat.txt", 1024 * 1024)) ?? "";
-    const readDiff = await read("diff.patch", this.config.maxDiffBytes + 1);
-    const diff = readDiff ?? "";
-    const output = (await read("output.txt", 1024 * 1024)) ?? "";
+    const numstat = await read("numstat.txt", 1024 * 1024);
+    const diff = await read("diff.patch", this.config.maxDiffBytes + 1);
     let status: Phase = exit.trim() === "0" ? "finished" : "failed";
     let reason =
       error?.trim() || (status === "failed" ? `command exited ${exit.trim()}` : undefined);
-    if (readDiff === undefined && numstat.trim()) {
-      // A diff that exists but can't be read (too large for the read limit) is never shown empty.
-      status = "failed";
-      reason = "the diff could not be read; it may exceed the size limit";
+    if (numstat === undefined || diff === undefined) {
+      // Never report a result that wasn't read: the computer holds the only copy. A diff
+      // that is simply too large is a failure now; anything else is retried.
+      const size = await this.exec(
+        sandbox,
+        computer,
+        ["bash", "-c", `wc -c < ${WORK_DIR}/diff.patch`],
+        ctx,
+      ).catch(() => undefined);
+      if (numstat !== undefined && Number(size?.trim()) > this.config.maxDiffBytes) {
+        status = "failed";
+        reason = "the diff exceeds the size limit";
+      } else if (this.now() <= state.deadline + RETRY_GRACE_MS) {
+        return this.snapshotOf(state);
+      } else {
+        status = "failed";
+        reason = "the result could not be read";
+      }
     } else if (Buffer.byteLength(diff) > this.config.maxDiffBytes) {
       status = "failed";
       reason = "the diff exceeds the size limit";
@@ -518,8 +562,11 @@ export class ComputerCloudAgentProvider implements CloudAgentProvider {
       status = "failed";
       reason = "the diff changes a binary file";
     }
+    const output = (await read("output.txt", 1024 * 1024)) ?? "";
     const dir = this.runDir(id);
-    await writeFile(path.join(dir, "diff.patch"), diff, { mode: 0o600 });
+    // Kept whenever it was read within the limit, a failed run's partial work included.
+    const kept = diff !== undefined && Buffer.byteLength(diff) <= this.config.maxDiffBytes;
+    await writeFile(path.join(dir, "diff.patch"), kept ? diff : "", { mode: 0o600 });
     await writeFile(path.join(dir, "summary.md"), output.slice(-SUMMARY_BYTES), { mode: 0o600 });
     await this.teardown(state, ctx, status, reason);
     return this.snapshotOf(state);
@@ -563,9 +610,27 @@ export class ComputerCloudAgentProvider implements CloudAgentProvider {
     };
   }
 
-  /** Revoke the capability, destroy the computer, remove its home. Best effort, then terminal. */
-  private async teardown(state: RunState, ctx: AdapterContext, status: Phase, reason?: string) {
+  /**
+   * Revoke the capability, destroy the computer, remove its home. The run turns terminal only
+   * once the computer is gone: until then the intent is kept as `pending`, and every `get` and
+   * `cancel` retries. Cleanup has its own bounded signal, so an expired poll can't fail it. A
+   * lost reference is recovered by provisioning the run's bot id, which is idempotent. Past the
+   * deadline by `RETRY_GRACE_MS`, it gives up and says so. Returns whether it finished.
+   */
+  private async teardown(
+    state: RunState,
+    context: AdapterContext,
+    status: Phase,
+    reason?: string,
+  ): Promise<boolean> {
     const logger = getLogger();
+    state.pending = { status, ...(reason ? { reason } : {}) };
+    await this.saveState(state);
+    const ctx: AdapterContext = {
+      ...context,
+      botId: state.botId,
+      signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS),
+    };
     if (state.capability && this.runtimeConfig) {
       await this.fetchImpl(`${this.config.relayUrl}/capabilities/revoke`, {
         method: "POST",
@@ -573,18 +638,39 @@ export class ComputerCloudAgentProvider implements CloudAgentProvider {
         signal: AbortSignal.timeout(10_000),
       }).catch((error) => logger.warn("relay capability revoke failed", error));
     }
-    if (state.computer && this.deps.sandbox) {
-      await this.deps.sandbox
-        .destroy(state.computer, ctx)
-        .catch((error) => logger.error("coding computer destroy failed", error));
+    const { sandbox } = this.deps;
+    let gone = !sandbox;
+    if (sandbox) {
+      try {
+        const computer =
+          state.computer ??
+          (await sandbox.provision(
+            {
+              botId: state.botId,
+              homePath: path.join(this.deps.dataDir, "homes", state.botId),
+              egress: "none",
+            },
+            ctx,
+          ));
+        await sandbox.destroy(computer, ctx);
+        gone = true;
+      } catch (error) {
+        logger.error("coding computer destroy failed", error);
+      }
     }
+    if (!gone && this.now() <= state.deadline + RETRY_GRACE_MS) return false;
     await rm(path.join(this.deps.dataDir, "homes", state.botId), {
       recursive: true,
       force: true,
     }).catch((error) => logger.error("coding computer home removal failed", error));
     state.status = status;
     state.capability = undefined;
-    if (reason) state.reason = reason;
+    state.pending = undefined;
+    state.reason = gone
+      ? reason
+      : [reason, "its computer could not be removed"].filter(Boolean).join("; ");
+    if (!state.reason) delete state.reason;
     await this.saveState(state);
+    return true;
   }
 }

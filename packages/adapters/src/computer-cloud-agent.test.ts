@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -78,7 +78,17 @@ class FakeSandbox {
     this.calls.push({ execute: request });
     this.commands.push(request);
     if (request.argv[0] === "bash" && request.argv[1] === "-c") {
-      yield { type: "stdout", data: this.probeOutput };
+      const size = /^wc -c < (.+)$/.exec(request.argv[2] ?? "");
+      if (size) {
+        const file = this.files.get(size[1]!);
+        if (!file) {
+          yield { type: "exit", code: 1 };
+          return;
+        }
+        yield { type: "stdout", data: `${file.byteLength}\n` };
+      } else {
+        yield { type: "stdout", data: this.probeOutput };
+      }
     }
     yield { type: "exit", code: 0 };
   }
@@ -161,8 +171,12 @@ describe("computer cloud agent configuration", () => {
     expect(numstatHasBinary("1\t2\ta.ts\n")).toBe(false);
   });
 
-  it("records the diff after the command, whatever its exit code", () => {
+  it("records the diff against the imported baseline, whatever the command commits", () => {
     const script = runScript();
+    expect(script).toContain("base=$(git rev-parse HEAD)");
+    expect(script).toContain('g diff --cached --binary "$base"');
+    expect(script).toContain('g diff --cached --numstat "$base"');
+    expect(script).not.toMatch(/diff --cached [^\n]*HEAD/);
     expect(script).toContain('"$@" "$(cat "$work/brief.md")"');
     expect(script.indexOf("diff.patch")).toBeGreaterThan(script.indexOf("code=$?"));
     expect(script.indexOf('echo "$code" > "$work/exit"')).toBeGreaterThan(
@@ -223,7 +237,15 @@ describe("computer cloud agent provider", () => {
       "Fix the bug in issue 12",
     );
     const start = sandbox.commands.at(-1)!;
-    expect(start.argv).toEqual(["setsid", "-f", "bash", ".rakazo-coding/run.sh", "claude", "-p"]);
+    // Detached, with every inherited stream closed, so the exec returns at once.
+    expect(start.argv).toEqual([
+      "bash",
+      "-c",
+      'setsid -f bash "$0" "$@" </dev/null >/dev/null 2>&1',
+      ".rakazo-coding/run.sh",
+      "claude",
+      "-p",
+    ]);
     expect(start.env).toMatchObject({
       CLAUDE_CODE_USE_BEDROCK: "1",
       ANTHROPIC_BEDROCK_BASE_URL: "http://model-relay:8790",
@@ -260,7 +282,7 @@ describe("computer cloud agent provider", () => {
     sandbox.probeOutput = "ROUTE\n";
     await expect(launch(provider())).rejects.toBeInstanceOf(CloudAgentRequestRejected);
     expect(sandbox.destroyed).toEqual(["computer-1"]);
-    expect(sandbox.commands.some((command) => command.argv[0] === "setsid")).toBe(false);
+    expect(sandbox.commands.some((c) => c.argv.includes(".rakazo-coding/run.sh"))).toBe(false);
   });
 
   it("stays running until the command exits, then keeps the diff and destroys the computer", async () => {
@@ -293,10 +315,10 @@ describe("computer cloud agent provider", () => {
     expect(state.capability).toBeUndefined();
   });
 
-  it("fails a run whose diff is binary, too large or unreadable", async () => {
+  it("fails a run whose diff is binary or too large", async () => {
     for (const [numstat, diff, reason] of [
       ["-\t-\tlogo.png\n", "binary", "binary"],
-      ["1\t0\ta\n", undefined, "could not be read"],
+      ["1\t0\ta\n", "x".repeat(1024 * 1024 + 10), "exceeds the size limit"],
     ] as const) {
       sandbox = new FakeSandbox();
       const agent = provider();
@@ -325,6 +347,76 @@ describe("computer cloud agent provider", () => {
     const second = provider();
     await launch(second);
     await expect(second.cancel("agent-1", context)).resolves.toMatchObject({ status: "cancelled" });
+    expect(sandbox.destroyed).toEqual(["computer-1"]);
+  });
+
+  it("refuses image attachments instead of ignoring them", async () => {
+    await expect(
+      provider().launch(
+        {
+          idempotencyKey: "agent-1",
+          prompt: "Fix it",
+          repository: "https://github.com/example/repo",
+          images: [{ data: "aGk=", mimeType: "image/png" }],
+        },
+        context,
+      ),
+    ).rejects.toBeInstanceOf(CloudAgentRequestRejected);
+    expect(sandbox.provisioned).toHaveLength(0);
+  });
+
+  it("refuses a snapshot over the limit while reading it, with no length declared", async () => {
+    const config = { ...computerCloudAgentConfigFromEnv(ENV), maxSnapshotBytes: 1024 };
+    const agent = new ComputerCloudAgentProvider(config, {
+      sandbox: sandbox as unknown as SandboxProvider,
+      dataDir,
+      forgeToken: async () => FORGE_TOKEN,
+      fetch: forgeFetch(log) as unknown as typeof fetch,
+      now: () => now,
+    });
+    await expect(launch(agent)).rejects.toBeInstanceOf(CloudAgentRequestRejected);
+    expect(sandbox.provisioned).toHaveLength(0);
+  });
+
+  it("retries an unreadable result instead of reporting an empty diff", async () => {
+    const agent = provider();
+    await launch(agent);
+    sandbox.put("exit", "0");
+    // Neither numstat nor the diff can be read: still running, computer kept.
+    await expect(agent.get("agent-1", context)).resolves.toMatchObject({ status: "running" });
+    expect(sandbox.destroyed).toEqual([]);
+    sandbox.put("numstat.txt", "1\t0\ta.ts\n");
+    sandbox.put("diff.patch", "+fixed\n");
+    await expect(agent.get("agent-1", context)).resolves.toMatchObject({ status: "finished" });
+    await expect(agent.result("agent-1")).resolves.toMatchObject({ diff: "+fixed\n" });
+  });
+
+  it("keeps the run open until its computer is really gone", async () => {
+    const agent = provider();
+    await launch(agent);
+    const destroy = vi
+      .spyOn(sandbox, "destroy")
+      .mockRejectedValueOnce(new Error("supervisor down"));
+    await expect(agent.cancel("agent-1", context)).resolves.toMatchObject({ status: "running" });
+    // The retry has its own signal, so an aborted poll context can't fail it.
+    const aborted = { ...context, signal: AbortSignal.abort() };
+    await expect(agent.get("agent-1", aborted)).resolves.toMatchObject({ status: "cancelled" });
+    expect(destroy).toHaveBeenCalledTimes(2);
+    expect(
+      (destroy.mock.calls[1] as unknown as [ComputerRef, AdapterContext])[1].signal.aborted,
+    ).toBe(false);
+  });
+
+  it("recovers a lost computer reference by its bot id before giving up the run", async () => {
+    const agent = provider();
+    await launch(agent);
+    const statePath = path.join(dataDir, "cloud-agents", "agent-1", "state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    delete state.computer;
+    delete state.runStarted;
+    await writeFile(statePath, JSON.stringify(state));
+    await expect(agent.get("agent-1", context)).resolves.toMatchObject({ status: "failed" });
+    expect(sandbox.provisioned.at(-1)).toMatchObject({ botId: "coding-agent-1", egress: "none" });
     expect(sandbox.destroyed).toEqual(["computer-1"]);
   });
 

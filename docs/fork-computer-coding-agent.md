@@ -15,7 +15,8 @@ It builds on two other patch sets:
 ## A run
 
 1. `cloud_agent_launch` (normal tool approval) with a `repository` URL on the allowlist and
-   a prompt. The prompt is the task brief.
+   a prompt. The prompt is the task brief. Image attachments are refused, since the run
+   could never see them.
 2. In the **worker**, the provider reads the run owner's own forge token: the OAuth token
    their MCP connection already holds for the forge's authorization server
    (`CLOUD_AGENT_COMPUTER_FORGE_ISSUER`, default `https://github.com/login/oauth`). If the
@@ -28,11 +29,13 @@ It builds on two other patch sets:
    the computer. Otherwise the computer is destroyed and the run fails.
 6. The worker writes three things into the computer: the snapshot (in chunks), the brief and
    a run script. It issues a relay capability bound to the run, the user, one model, the
-   deadline and a request allowance. Then it starts the command detached (`setsid -f`).
+   deadline and a request allowance. Then it starts the command detached (`setsid -f`),
+   with every inherited stream closed so the exec returns at once.
 7. **The run script** does the following:
-   - unpacks the snapshot and commits it as a baseline;
+   - unpacks the snapshot and commits it as a baseline, keeping its SHA;
    - runs the command with the brief as its last argument, under `timeout`;
-   - then records `git diff --binary` and `--numstat` and the exit code.
+   - then records `git diff --binary` and `--numstat` against that baseline (so work the
+     command committed itself is kept) and the exit code.
 8. `get` polls for the exit file. When the command has finished, the worker keeps the diff
    and the summary (the tail of the command's output) under
    `DATA_DIR/cloud-agents/<id>/`. Then it:
@@ -40,12 +43,18 @@ It builds on two other patch sets:
    - destroys the computer;
    - deletes its home.
 
-   The run fails, and nothing is kept as a reviewable diff, when:
+   The run fails when:
    - the diff changes a binary file;
-   - the diff exceeds `CLOUD_AGENT_COMPUTER_MAX_DIFF_BYTES`, or can't be read;
+   - the diff exceeds `CLOUD_AGENT_COMPUTER_MAX_DIFF_BYTES`;
    - the command exits non-zero;
    - the deadline passes.
-9. `cloud_agent_status` returns the snapshot plus `result`: the status, the repository, the
+
+   A result that can't be read is never reported as an empty diff. The computer is kept
+   and the read is retried, until an hour past the deadline.
+9. **Teardown** has its own bounded signal. The run turns terminal only once the computer
+   is gone; until then the intent is kept and every poll or cancel retries. A lost computer
+   reference is recovered by provisioning the run's bot id, which is idempotent.
+10. `cloud_agent_status` returns the snapshot plus `result`: the status, the repository, the
    base SHA, the summary, and the diff, truncated at 60 kB, with its full size.
 
 `cloud_agent_reply` isn't supported, because each computer is single-use; a follow-up is a
