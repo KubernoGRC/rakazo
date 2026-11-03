@@ -28,6 +28,7 @@ import {
   computerDnsMatches,
   computerHomeStorage,
   computerNetworkCreateOptions,
+  computerNetworkEgressMatches,
   computerNetworkNameFor,
   computerNetworkNamesForCleanup,
   computerNetworkOwnerFor,
@@ -36,6 +37,7 @@ import {
   controlPortPublicationMatches,
   homeVolumeMatches,
   hostComputerUser,
+  isolatedGatewaySupported,
   legacyNetworkOwnedSolelyBy,
   parseMemoryBytes,
   publishedLoopbackControlHostPort,
@@ -43,6 +45,7 @@ import {
   resolveComputerDns,
   resolveComputerEgressMode,
   resolveComputerImage,
+  resolveIsolatedPeers,
   resolveScreenNetworkMode,
   resolveScreenPublishTarget,
   resolveSpaceComputerLimit,
@@ -2002,5 +2005,69 @@ describe("computer home storage", () => {
     );
     // Steady state waits on Xvfb instead of polling, so the trap runs immediately.
     expect(start).toMatch(/^wait "\$XVFB_PID"$/m);
+  });
+});
+
+describe("isolated computer egress (fork patch)", () => {
+  it("creates an internal, labelled network only for egress none", () => {
+    const none = computerNetworkCreateOptions("bot_1", "owner", "open", "none");
+    expect(none).toMatchObject({
+      Name: computerNetworkNameFor("bot_1"),
+      Internal: true,
+      Labels: { "rakazo.computerOwner": "owner", "rakazo.botId": "bot_1", "rakazo.egress": "none" },
+    });
+    const restrictedNone = computerNetworkCreateOptions("bot_1", "owner", "restricted", "none");
+    expect(restrictedNone.Internal).toBe(true);
+    expect(restrictedNone.Options).toEqual({
+      "com.docker.network.bridge.name": computerBridgeNameFor("bot_1"),
+    });
+    expect(computerNetworkCreateOptions("bot_1", "owner", "open", "default")).not.toHaveProperty(
+      "Internal",
+    );
+  });
+
+  it("isolates the gateway of an egress none network when the engine supports it", () => {
+    const gateway = {
+      "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+      "com.docker.network.bridge.gateway_mode_ipv6": "isolated",
+    };
+    expect(
+      computerNetworkCreateOptions("bot_1", "owner", "open", "none", { isolatedGateway: true })
+        .Options,
+    ).toEqual(gateway);
+    expect(
+      computerNetworkCreateOptions("bot_1", "owner", "restricted", "none", {
+        isolatedGateway: true,
+      }).Options,
+    ).toEqual({ "com.docker.network.bridge.name": computerBridgeNameFor("bot_1"), ...gateway });
+    // Never on a default network, even when asked.
+    expect(
+      computerNetworkCreateOptions("bot_1", "owner", "open", "default", { isolatedGateway: true }),
+    ).not.toHaveProperty("Options");
+    expect(isolatedGatewaySupported("1.50")).toBe(true);
+    expect(isolatedGatewaySupported("1.51")).toBe(true);
+    expect(isolatedGatewaySupported("2.0")).toBe(true);
+    for (const version of ["1.49", "1.9", "", undefined, "v1.50", "1.50.1"]) {
+      expect(isolatedGatewaySupported(version), String(version)).toBe(false);
+    }
+  });
+
+  it("matches a network's egress only when both the flag and the label agree", () => {
+    const labels = { "rakazo.egress": "none" };
+    expect(computerNetworkEgressMatches({ Internal: true, Labels: labels }, "none")).toBe(true);
+    expect(computerNetworkEgressMatches({ Internal: true, Labels: {} }, "none")).toBe(false);
+    expect(computerNetworkEgressMatches({ Internal: false, Labels: labels }, "none")).toBe(false);
+    expect(computerNetworkEgressMatches(undefined, "none")).toBe(false);
+    expect(computerNetworkEgressMatches({ Internal: false, Labels: {} }, "default")).toBe(true);
+    expect(computerNetworkEgressMatches({ Labels: null }, "default")).toBe(true);
+    expect(computerNetworkEgressMatches({ Internal: true, Labels: labels }, "default")).toBe(false);
+  });
+
+  it("reads operator-named isolated peers and refuses malformed names", () => {
+    expect(resolveIsolatedPeers(undefined)).toEqual([]);
+    expect(resolveIsolatedPeers(" relay , relay,proxy.1 ")).toEqual(["relay", "proxy.1"]);
+    for (const value of ["-relay", "relay;rm", "a b", "../x"]) {
+      expect(() => resolveIsolatedPeers(value)).toThrow(/SANDBOX_ISOLATED_PEERS/);
+    }
   });
 });

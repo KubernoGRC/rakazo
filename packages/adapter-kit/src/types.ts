@@ -250,6 +250,8 @@ export interface SandboxCapabilities {
   persistentHome: boolean;
   /** Distinct graphical screens for concurrent Team bots on one computer. */
   multiScreen?: boolean;
+  /** Fork patch: provision accepts `egress: "none"` (no route off the host). */
+  isolatedEgress?: boolean;
 }
 
 export interface ConnectorTool {

@@ -127,6 +127,12 @@ export interface SandboxProvider {
        * reports it gone instead, so the newer save wins.
        */
       savedAt?: Date;
+      /**
+       * Fork patch: `none` asks for a computer with no route off the host, reaching only
+       * operator-named peers. Only providers with `isolatedEgress` accept it, and they
+       * fail the provision rather than return a computer that isn't isolated.
+       */
+      egress?: "default" | "none";
     },
     context: AdapterContext,
   ): Promise<ComputerRef>;
