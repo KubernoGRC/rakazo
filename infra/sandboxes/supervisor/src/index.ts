@@ -22,7 +22,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { computerMatchesCreateSpec } from "./computer-hardening.js";
-import type { ComputerEgressMode } from "./computer-spec.js";
+import type { ComputerEgressMode, ComputerNetworkEgress } from "./computer-spec.js";
 import {
   assertVolumeSubpathSupport,
   COMPUTER_GID,
@@ -30,7 +30,6 @@ import {
   COMPUTER_IMAGE_CONTEXT_FILES,
   COMPUTER_UID,
   COMPUTER_USER,
-  type ComputerNetworkEgress,
   computerBridgeNameFor,
   computerDnsMatches,
   computerHomeStorage,
