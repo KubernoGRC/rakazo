@@ -28,6 +28,7 @@ import {
   computerDnsMatches,
   computerHomeStorage,
   computerNetworkCreateOptions,
+  computerNetworkEgressMatches,
   computerNetworkNameFor,
   computerNetworkNamesForCleanup,
   computerNetworkOwnerFor,
@@ -43,6 +44,7 @@ import {
   resolveComputerDns,
   resolveComputerEgressMode,
   resolveComputerImage,
+  resolveIsolatedPeers,
   resolveScreenNetworkMode,
   resolveScreenPublishTarget,
   resolveSpaceComputerLimit,
@@ -2002,5 +2004,43 @@ describe("computer home storage", () => {
     );
     // Steady state waits on Xvfb instead of polling, so the trap runs immediately.
     expect(start).toMatch(/^wait "\$XVFB_PID"$/m);
+  });
+});
+
+describe("isolated computer egress (fork patch)", () => {
+  it("creates an internal, labelled network only for egress none", () => {
+    const none = computerNetworkCreateOptions("bot_1", "owner", "open", "none");
+    expect(none).toMatchObject({
+      Name: computerNetworkNameFor("bot_1"),
+      Internal: true,
+      Labels: { "rakazo.computerOwner": "owner", "rakazo.botId": "bot_1", "rakazo.egress": "none" },
+    });
+    const restrictedNone = computerNetworkCreateOptions("bot_1", "owner", "restricted", "none");
+    expect(restrictedNone.Internal).toBe(true);
+    expect(restrictedNone.Options).toEqual({
+      "com.docker.network.bridge.name": computerBridgeNameFor("bot_1"),
+    });
+    expect(computerNetworkCreateOptions("bot_1", "owner", "open", "default")).not.toHaveProperty(
+      "Internal",
+    );
+  });
+
+  it("matches a network's egress only when both the flag and the label agree", () => {
+    const labels = { "rakazo.egress": "none" };
+    expect(computerNetworkEgressMatches({ Internal: true, Labels: labels }, "none")).toBe(true);
+    expect(computerNetworkEgressMatches({ Internal: true, Labels: {} }, "none")).toBe(false);
+    expect(computerNetworkEgressMatches({ Internal: false, Labels: labels }, "none")).toBe(false);
+    expect(computerNetworkEgressMatches(undefined, "none")).toBe(false);
+    expect(computerNetworkEgressMatches({ Internal: false, Labels: {} }, "default")).toBe(true);
+    expect(computerNetworkEgressMatches({ Labels: null }, "default")).toBe(true);
+    expect(computerNetworkEgressMatches({ Internal: true, Labels: labels }, "default")).toBe(false);
+  });
+
+  it("reads operator-named isolated peers and refuses malformed names", () => {
+    expect(resolveIsolatedPeers(undefined)).toEqual([]);
+    expect(resolveIsolatedPeers(" relay , relay,proxy.1 ")).toEqual(["relay", "proxy.1"]);
+    for (const value of ["-relay", "relay;rm", "a b", "../x"]) {
+      expect(() => resolveIsolatedPeers(value)).toThrow(/SANDBOX_ISOLATED_PEERS/);
+    }
   });
 });

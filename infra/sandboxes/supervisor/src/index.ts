@@ -30,10 +30,12 @@ import {
   COMPUTER_IMAGE_CONTEXT_FILES,
   COMPUTER_UID,
   COMPUTER_USER,
+  type ComputerNetworkEgress,
   computerBridgeNameFor,
   computerDnsMatches,
   computerHomeStorage,
   computerNetworkCreateOptions,
+  computerNetworkEgressMatches,
   computerNetworkNameFor,
   computerNetworkNamesForCleanup,
   computerNetworkOwnerFor,
@@ -48,6 +50,7 @@ import {
   resolveComputerControlEndpoint,
   resolveComputerDns,
   resolveComputerEgressMode,
+  resolveIsolatedPeers,
   resolveScreenNetworkMode,
   resolveScreenPublishTarget,
   resolveSpaceComputerLimit,
@@ -120,6 +123,8 @@ const computerEgressSetting = resolveComputerEgressMode();
 let computerEgressMode: ComputerEgressMode =
   computerEgressSetting === "restricted" ? "restricted" : "open";
 const computerDns = resolveComputerDns();
+// Fork patch: containers joined to every `egress: none` computer network.
+const isolatedPeers = resolveIsolatedPeers();
 const teamScreenLimit = resolveTeamScreenLimit();
 // Host-run supervisors on Docker Desktop (macOS/Windows) cannot reach container
 // IPs, so computer control must use a published loopback port instead.
@@ -207,8 +212,13 @@ app.post("/computers", async (c) => {
       botId: z.string().min(1),
       homePath: z.string().min(1),
       spaceId: z.string().min(1),
+      // Fork patch: `none` isolates this computer on an internal network.
+      egress: z.enum(["default", "none"]).default("default"),
     })
     .parse(await c.req.json());
+  if (body.egress === "none" && screenNetworkMode !== "isolated") {
+    return c.json({ error: "egress none requires SANDBOX_SCREEN_NETWORK=isolated" }, 400);
+  }
   try {
     assertRequestIdentity(c.req.header("x-rakazo-bot-id"), c.req.header("x-rakazo-space-id"), {
       botId: body.botId,
@@ -257,10 +267,22 @@ app.post("/computers", async (c) => {
         const botNetwork =
           networkMode === computerNetworkNameFor(body.botId) ? networkMode : undefined;
         const endpoint = botNetwork ? info.NetworkSettings?.Networks?.[botNetwork] : undefined;
+        const isolated = body.egress === "none";
         const botNetworkInfo =
-          botNetwork && (computerEgressMode === "restricted" || !info.State.Running)
+          botNetwork && (computerEgressMode === "restricted" || !info.State.Running || isolated)
             ? await inspectNetworkIfPresent(botNetwork)
             : undefined;
+        // Fork patch: an isolated computer resumes only on a network that is isolated
+        // (or, when stopped, one the reconnect below recreates isolated). A default
+        // request left on an isolated network keeps less egress, never more, so it is
+        // only checked when the network was inspected anyway.
+        const networkEgressOk =
+          !botNetwork ||
+          (isolated
+            ? botNetworkInfo
+              ? computerNetworkEgressMatches(botNetworkInfo, "none")
+              : !info.State.Running
+            : !botNetworkInfo || computerNetworkEgressMatches(botNetworkInfo, "default"));
         // A stop gives the network back after disconnecting the computer, and a
         // network removed or recreated under a stopped computer leaves its endpoint
         // on the old network ID. Either way it rejoins the network before starting:
@@ -287,6 +309,7 @@ app.post("/computers", async (c) => {
             (info.HostConfig.NetworkMode === networkMode &&
               (reconnect || Boolean(info.NetworkSettings?.Networks?.[networkMode])))) &&
           restrictedBridgeOk &&
+          networkEgressOk &&
           info.Config.User === computerUser &&
           // DNS is fixed when a container is created, so a changed setting replaces it.
           computerDnsMatches(info.HostConfig.Dns, computerDns) &&
@@ -296,8 +319,16 @@ app.post("/computers", async (c) => {
           (!storage.homeVolume || homeVolumeMatches(info.HostConfig.Mounts, storage.homeVolume)) &&
           // A computer that cannot rejoin its network is replaced below instead.
           (!reconnect ||
-            (await reconnectBotComputer(existing, body.botId, networkOwner, Boolean(endpoint))))
+            (await reconnectBotComputer(
+              existing,
+              body.botId,
+              networkOwner,
+              Boolean(endpoint),
+              body.egress,
+            )))
         ) {
+          // Fork patch: a peer recreated since the last provision rejoins.
+          if (isolated && botNetwork) await joinIsolatedPeers(botNetwork);
           const started = !info.State.Running;
           if (started) await existing.start();
           return c.json({
@@ -305,6 +336,7 @@ app.post("/computers", async (c) => {
             image: COMPUTER_IMAGE,
             resumed: true,
             started,
+            egress: body.egress,
           });
         }
       }
@@ -341,7 +373,7 @@ app.post("/computers", async (c) => {
         const createdNetwork =
           screenNetworkMode === "internal"
             ? undefined
-            : await ensureBotNetwork(body.botId, networkOwner);
+            : await ensureBotNetwork(body.botId, networkOwner, body.egress);
         let container: Docker.Container | undefined;
         try {
           if (existing) {
@@ -365,6 +397,7 @@ app.post("/computers", async (c) => {
           id: container.id,
           image: COMPUTER_IMAGE,
           resumed: false,
+          egress: body.egress,
         });
       };
 
@@ -1686,8 +1719,9 @@ async function reconnectBotComputer(
   botId: string,
   owner: string,
   staleEndpoint: boolean,
+  networkEgress: ComputerNetworkEgress = "default",
 ) {
-  await ensureBotNetwork(botId, owner);
+  await ensureBotNetwork(botId, owner, networkEgress);
   const network = docker.getNetwork(computerNetworkNameFor(botId));
   if (staleEndpoint) {
     await network.disconnect({ Container: container.id, Force: true }).catch((error) => {
@@ -1739,7 +1773,16 @@ export async function reclaimIdleComputerNetworks() {
 // screens and rejoin lazily, so they do not keep a network in use.
 async function screenPeerIds() {
   const runtime = screenNetworkMode === "isolated" ? await inspectSupervisorContainer() : undefined;
-  return runtime ? await composeScreenPeerIds(runtime) : new Set<string>();
+  const ids = runtime ? await composeScreenPeerIds(runtime) : new Set<string>();
+  // Fork patch: isolated peers join but don't keep a computer network in use.
+  for (const peer of isolatedPeers) {
+    const info = await docker
+      .getContainer(peer)
+      .inspect()
+      .catch(() => undefined);
+    if (info) ids.add(info.Id);
+  }
+  return ids;
 }
 
 // Removes a computer network used by nothing but screen peers and, when given,
@@ -1776,16 +1819,74 @@ async function reclaimComputerNetwork(container: Docker.Container, botId: string
   });
 }
 
-async function ensureBotNetwork(botId: string, owner: string) {
-  return docker
-    .createNetwork(computerNetworkCreateOptions(botId, owner, computerEgressMode))
+async function ensureBotNetwork(
+  botId: string,
+  owner: string,
+  networkEgress: ComputerNetworkEgress = "default",
+) {
+  const created = await docker
+    .createNetwork(computerNetworkCreateOptions(botId, owner, computerEgressMode, networkEgress))
     .catch(async (error) => {
       // Existing networks and concurrent provision requests are both safe.
       if (!/already exists/i.test(String(error))) throw error;
       if (computerEgressMode === "restricted") {
-        await rekeyRestrictedBotNetwork(computerNetworkNameFor(botId), botId, owner);
+        await rekeyRestrictedBotNetwork(computerNetworkNameFor(botId), botId, owner, networkEgress);
       }
+      // Fork patch: only an isolated request replaces an existing network. A default
+      // request on an isolated network is left with less egress, never more.
+      if (networkEgress === "none") await replaceMismatchedEgressNetwork(botId, owner, "none");
+      return undefined;
     });
+  if (networkEgress === "none") await joinIsolatedPeers(computerNetworkNameFor(botId));
+  return created;
+}
+
+// Fork patch: a provision whose egress differs from the existing network's gets
+// a new network, never the old one. Failing to replace it fails the provision and
+// stops this bot's containers, because attaching to the old network would give
+// an isolated computer a route out.
+async function replaceMismatchedEgressNetwork(
+  botId: string,
+  owner: string,
+  networkEgress: ComputerNetworkEgress,
+) {
+  const name = computerNetworkNameFor(botId);
+  const info = await inspectNetworkIfPresent(name);
+  if (!info || computerNetworkEgressMatches(info, networkEgress)) return;
+  const network = docker.getNetwork(name);
+  const containerIds = Object.keys(info.Containers ?? {});
+  for (const containerId of containerIds) {
+    await network.disconnect({ Container: containerId, Force: true }).catch(() => undefined);
+  }
+  const removed = await network.remove().then(
+    () => true,
+    () => false,
+  );
+  if (!removed) {
+    await stopBotContainers(containerIds, botId);
+    throw new Error(`cannot change computer egress: failed to replace network ${name}`);
+  }
+  await docker
+    .createNetwork(computerNetworkCreateOptions(botId, owner, computerEgressMode, networkEgress))
+    .catch((error) => {
+      if (!/already exists/i.test(String(error))) throw error;
+    });
+  if (!computerNetworkEgressMatches(await inspectNetworkIfPresent(name), networkEgress)) {
+    throw new Error(`cannot change computer egress: network ${name} has the wrong egress`);
+  }
+}
+
+// Fork patch: the operator-named peers (SANDBOX_ISOLATED_PEERS) are the only
+// addresses an `egress: none` computer can reach besides the supervisor and
+// screen peers. A peer that can't be joined fails the provision.
+async function joinIsolatedPeers(name: string) {
+  const network = docker.getNetwork(name);
+  for (const peer of isolatedPeers) {
+    await network.connect({ Container: peer }).catch((error) => {
+      if (/already exists|already connected|endpoint with name/i.test(String(error))) return;
+      throw new Error(`cannot join isolated peer ${peer} to ${name}: ${String(error)}`);
+    });
+  }
 }
 
 // A network created before SANDBOX_COMPUTER_EGRESS=restricted has a generic br-*
@@ -1793,7 +1894,12 @@ async function ensureBotNetwork(botId: string, owner: string) {
 // callers attach the computer afterwards (the create path replaces it, a resume
 // reconnects it), and supervisor/web screen peers rejoin lazily via
 // connectComposeScreenPeers.
-async function rekeyRestrictedBotNetwork(name: string, botId: string, owner: string) {
+async function rekeyRestrictedBotNetwork(
+  name: string,
+  botId: string,
+  owner: string,
+  networkEgress: ComputerNetworkEgress = "default",
+) {
   const expectedBridge = computerBridgeNameFor(botId);
   const inspect = () =>
     docker
@@ -1823,7 +1929,7 @@ async function rekeyRestrictedBotNetwork(name: string, botId: string, owner: str
   }
   if (!info || !hasNamedBridge(info)) {
     await docker
-      .createNetwork(computerNetworkCreateOptions(botId, owner, "restricted"))
+      .createNetwork(computerNetworkCreateOptions(botId, owner, "restricted", networkEgress))
       .catch((error) => {
         if (!/already exists/i.test(String(error))) throw error;
       });

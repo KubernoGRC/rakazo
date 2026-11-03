@@ -261,21 +261,71 @@ export function computerNetworkOwnerFor(
   return createHash("sha256").update(root).digest("hex").slice(0, 32);
 }
 
+/**
+ * Per-computer network egress a provision asks for. `default` follows the
+ * supervisor's SANDBOX_COMPUTER_EGRESS. `none` puts the computer on an internal
+ * Docker network: no route off the host at all, so the only reachable
+ * addresses are the network's peers (this supervisor, the screen peers and the
+ * containers named in SANDBOX_ISOLATED_PEERS). It needs per-bot networks
+ * (SANDBOX_SCREEN_NETWORK=isolated).
+ */
+export type ComputerNetworkEgress = "default" | "none";
+
+export const COMPUTER_NETWORK_EGRESS_LABEL = "rakazo.egress";
+
 /** docker.createNetwork payload for a bot's computer network. */
 export function computerNetworkCreateOptions(
   botId: string,
   owner: string,
   egress: ComputerEgressMode = "open",
+  networkEgress: ComputerNetworkEgress = "default",
 ) {
   return {
     Name: computerNetworkNameFor(botId),
     Driver: "bridge",
     CheckDuplicate: true,
-    Labels: { "rakazo.computerOwner": owner, "rakazo.botId": botId },
+    Labels: {
+      "rakazo.computerOwner": owner,
+      "rakazo.botId": botId,
+      ...(networkEgress === "none" ? { [COMPUTER_NETWORK_EGRESS_LABEL]: "none" } : {}),
+    },
+    ...(networkEgress === "none" ? { Internal: true } : {}),
     ...(egress === "restricted"
       ? { Options: { "com.docker.network.bridge.name": computerBridgeNameFor(botId) } }
       : {}),
   };
+}
+
+/**
+ * Whether an existing computer network has the egress a provision asks for.
+ * `none` requires both Docker's internal flag and the label, so a network some
+ * other tool marked internal is not mistaken for one this supervisor isolated;
+ * `default` requires a network that is not internal.
+ */
+export function computerNetworkEgressMatches(
+  info: { Internal?: boolean; Labels?: Record<string, string> | null } | undefined,
+  networkEgress: ComputerNetworkEgress,
+) {
+  if (!info) return false;
+  if (networkEgress === "none") {
+    return info.Internal === true && info.Labels?.[COMPUTER_NETWORK_EGRESS_LABEL] === "none";
+  }
+  return info.Internal !== true;
+}
+
+/**
+ * Containers joined to every `egress: none` computer network, from
+ * SANDBOX_ISOLATED_PEERS (comma-separated container names), e.g. a model relay.
+ * Only the operator names them: a provision request can't add a peer.
+ */
+export function resolveIsolatedPeers(value = process.env.SANDBOX_ISOLATED_PEERS): string[] {
+  const peers = (value ?? "")
+    .split(",")
+    .map((peer) => peer.trim())
+    .filter(Boolean);
+  const invalid = peers.find((peer) => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(peer));
+  if (invalid) throw new Error(`Unsupported SANDBOX_ISOLATED_PEERS name: ${invalid}`);
+  return [...new Set(peers)];
 }
 
 /**
