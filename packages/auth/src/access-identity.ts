@@ -394,11 +394,30 @@ export function accessReauthentication(
   verifier: AccessVerifier,
   { now = () => Date.now() }: { now?: () => number } = {},
 ) {
-  return async (ctx: GenericEndpointContext, userId: string): Promise<boolean> => {
-    const verdict = await verifier.verify(ctx.headers ?? new Headers());
-    if (!verdict.ok || verdict.issuedAt === undefined) return false;
-    const age = now() / 1_000 - verdict.issuedAt;
-    if (age > ACCESS_FRESH_AGE_SECONDS || age < -ACCESS_CLOCK_SKEW_SECONDS) return false;
-    return (await linkedAccessSubject(ctx.context.internalAdapter, userId)) === verdict.subject;
-  };
+  return async (ctx: GenericEndpointContext, userId: string): Promise<boolean> =>
+    freshAccessAssertionFor(
+      verifier,
+      ctx.context.internalAdapter,
+      ctx.headers ?? new Headers(),
+      userId,
+      now,
+    );
+}
+
+/**
+ * True when these headers carry a freshly issued access assertion whose subject is the one
+ * this user is linked to. It stands in for a password or emailed code in access mode.
+ */
+export async function freshAccessAssertionFor(
+  verifier: AccessVerifier,
+  adapter: Pick<Adapter, "findAccounts">,
+  headers: Headers,
+  userId: string,
+  now: () => number = () => Date.now(),
+): Promise<boolean> {
+  const verdict = await verifier.verify(headers);
+  if (!verdict.ok || verdict.issuedAt === undefined) return false;
+  const age = now() / 1_000 - verdict.issuedAt;
+  if (age > ACCESS_FRESH_AGE_SECONDS || age < -ACCESS_CLOCK_SKEW_SECONDS) return false;
+  return (await linkedAccessSubject(adapter, userId)) === verdict.subject;
 }

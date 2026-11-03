@@ -911,12 +911,19 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         }),
     );
   }
+  // Fork: under access identity a session counts only for the access subject it belongs to.
+  const boundSession = async (request: Request) => {
+    const session = await auth.api.getSession({ headers: request.headers });
+    if (!session?.user) return null;
+    if (accessSessionBound && !(await accessSessionBound(request, session))) return null;
+    return session;
+  };
   app.route(
     "/",
     monitoringRoutes(
       env.browserMonitoring,
       fetch,
-      async (request) => (await auth.api.getSession({ headers: request.headers }))?.user.id,
+      async (request) => (await boundSession(request))?.user.id,
     ),
   );
   app.route("/", cspReportRoutes(requestClientIp));
@@ -968,9 +975,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   });
   const requestSession = async (request: Request) => {
     // The bearer plugin turns a signed `Authorization: Bearer` into the session cookie.
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (!session?.user) return null;
-    if (accessSessionBound && !(await accessSessionBound(request, session))) return null;
+    const session = await boundSession(request);
+    if (!session) return null;
     const actor = await actorFromMembership(
       requireMembership(prisma, session.user.id, request.headers.get("x-rakazo-space-id")),
     );
@@ -983,8 +989,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       hub: userDeviceHub,
       devices: userDevices,
       forwardSecret: userDeviceSecret,
-      sessionUserId: async (request) =>
-        (await auth.api.getSession({ headers: request.headers }))?.user.id ?? null,
+      sessionUserId: async (request) => (await boundSession(request))?.user.id ?? null,
       trustedOrigin: (origin) => isTrustedOrigin(origin, env),
     });
   }
@@ -1014,6 +1019,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       context: {
         actor,
         sessionId: session?.sessionId,
+        headers: c.req.raw.headers,
         signal: c.req.raw.signal,
         // Same user in the same space, so leaving the space also ends a stream.
         // A database failure rejects this check; only a missing membership is unauthorized.

@@ -97,6 +97,11 @@ deployment's own compose overlay has to pass these to `api`.
   account control. The proxy sets `iat` when it authenticates the user, so an older Access
   session has to sign in to the proxy again before deleting. Without a fresh, matching
   assertion, deletion is refused.
+- **Step-up confirmation accepts the same fresh assertion.** Procedures that reveal
+  sensitive data, such as revealing a vault secret or issuing an account export token, need
+  a recent identity confirmation. Upstream offers a password, an emailed code or a fresh SSO
+  sign-in for that. In this mode, a fresh assertion for the session's own linked subject
+  counts too, on the request that carries it.
 - **Other ways in are closed.** These auth routes answer `403` with code
   `ACCESS_IDENTITY_ONLY`:
   - password sign-in, sign-up, reset and change;
@@ -145,20 +150,23 @@ file is refused.
   - the `accessIdentity` option and `assertAccessIdentityConfig`;
   - the closed-path check in the `before` hook;
   - the `validateUserInfo` and `user.create` refusals;
-  - the session `create` hook's access branch.
+  - the session `create` hook's access branch;
+  - `hasRecentIdentityConfirmation`, which also accepts a fresh, matching assertion.
 - `apps/api/src/app.ts`: building the verifier, mounting the gate, binding sessions in
-  `requestSession` and on `/api/auth/*`, and the `accessIdentity` and `accessLogoutUrl`
-  capabilities.
+  `boundSession` (used by `requestSession`, the device routes and browser monitoring) and
+  on `/api/auth/*`, passing request headers into the RPC context, and the `accessIdentity`
+  and `accessLogoutUrl` capabilities.
+- `apps/api/src/identity-confirmation.ts` and `apps/api/src/routes/context.ts`: the request
+  headers reach the identity-confirmation lookup.
 - `apps/api/src/env.ts`: `accessIdentityFromEnv` and its fail-closed checks.
 - `packages/contracts/src/auth.ts`: the optional `accessIdentity` and `accessLogoutUrl`
   capabilities.
-- `apps/web/src/pages/Shell.tsx` and `Paywall.tsx`: the Log out buttons continue to the
-  proxy's logout after a successful sign-out.
+- `apps/web/src/lib/sign-out.ts`: a successful sign-out continues to the proxy's logout,
+  for every Log out button.
 - `packages/auth/src/account-security.ts`: an optional fresh re-authentication check, used
   by `/account-security` and the `/delete-user` hook.
 - `apps/web/src/pages/Auth.tsx`: the access branch of the sign-in page.
-- `apps/mobile/app/sign-in.tsx` and its `de`, `ru` and `zh` catalogs: the browser-only
-  message.
+- `apps/mobile/app/sign-in.tsx` and its non-English catalogs: the browser-only message.
 - `apps/desktop/src/setup-config.ts` and `main.ts`: setup refuses an access-identity server
   with the same browser-only message.
 - `apps/api/src/health.ts`: an optional readiness check; `/ready` is 503 until a usable

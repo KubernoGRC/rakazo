@@ -29,6 +29,7 @@ import {
   accessIdentity,
   accessIdentityClosesPath,
   accessReauthentication,
+  freshAccessAssertionFor,
 } from "./access-identity.js";
 import {
   ACCOUNT_EXPORT_TOKEN_PREFIX,
@@ -721,8 +722,25 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     encryptStoredOAuthTokens: async () => encryptStoredOAuthTokens(prisma, await tokenKey()),
     ssoAvailability: () => discovery?.availability(),
     passkeyRpId: relyingParty?.rpID ?? null,
-    hasRecentIdentityConfirmation: async (session: { sessionId: string; userId: string }) =>
-      hasRecentIdentityConfirmation((await auth.$context).internalAdapter, session),
+    hasRecentIdentityConfirmation: async (session: {
+      sessionId: string;
+      userId: string;
+      /** Fork: the request's headers, so a fresh access assertion counts as confirmation. */
+      headers?: Headers;
+    }) => {
+      const adapter = (await auth.$context).internalAdapter;
+      if (await hasRecentIdentityConfirmation(adapter, session)) return true;
+      return Boolean(
+        env.accessIdentity &&
+          session.headers &&
+          (await freshAccessAssertionFor(
+            env.accessIdentity,
+            adapter,
+            session.headers,
+            session.userId,
+          )),
+      );
+    },
     issueAccountExportToken: async (userId: string) =>
       issueAccountExportToken((await auth.$context).internalAdapter, userId),
     consumeAccountExportToken: async (token: string) =>
