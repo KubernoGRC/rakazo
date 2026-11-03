@@ -298,6 +298,31 @@ describe("sandbox supervisor HTTP boundary", () => {
   });
 });
 
+describe("isolated computer egress (fork patch)", () => {
+  it("refuses egress none outside the per-bot network topology before touching Docker", async () => {
+    const response = await supervisorApp.request("/computers", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-rakazo-bot-id": "bot",
+        "x-rakazo-space-id": "workspace",
+      },
+      body: JSON.stringify({
+        botId: "bot",
+        spaceId: "workspace",
+        homePath: "/tmp/never-used",
+        egress: "none",
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "egress none requires SANDBOX_SCREEN_NETWORK=isolated",
+    });
+  });
+});
+
 describe("sandbox supervisor input containment", () => {
   it("normalizes portable paths and rejects lexical traversal", () => {
     expect(normalizeWorkspaceRelative("/notes\\result.txt")).toBe("notes/result.txt");

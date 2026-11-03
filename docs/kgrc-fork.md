@@ -106,5 +106,9 @@ images **by digest** from the job summary, never by tag.
   registers once, for authorization servers without dynamic registration.
 - [Per-call tool events](fork-tool-call-events.md): a content-free `tool.called` security
   event for every agent tool call.
+- [Isolated computer egress](fork-isolated-computer-egress.md): an opt-in computer with no
+  route off the host, reaching only operator-named peers.
+- [Model relay for isolated computers](fork-computer-model-relay.md): a per-run capability
+  lets an isolated computer call one model, without the deployment's credential entering it.
 - [Microsoft Teams](fork-teams.md): a single-tenant Teams surface that refuses other tenants
   and links each sender by their directory identity.

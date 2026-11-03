@@ -119,6 +119,7 @@ export class DockerSandboxProvider implements SandboxProvider {
         takeover: true,
         persistentHome: true,
         multiScreen: true,
+        isolatedEgress: true,
       },
     };
   }
@@ -140,9 +141,10 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   async provision(
-    request: { botId: string; homePath: string },
+    request: { botId: string; homePath: string; egress?: "default" | "none" },
     context: AdapterContext,
   ): Promise<ComputerRef> {
+    const isolated = request.egress === "none";
     const res = await fetch(this.url("/computers"), {
       method: "POST",
       headers: { ...this.headers(context, request.botId), "content-type": "application/json" },
@@ -150,6 +152,8 @@ export class DockerSandboxProvider implements SandboxProvider {
         botId: request.botId,
         homePath: request.homePath,
         spaceId: context.spaceId,
+        // Fork patch: sent only when asked, so other requests are unchanged.
+        ...(isolated ? { egress: "none" } : {}),
       }),
       signal: context.signal,
     });
@@ -162,10 +166,16 @@ export class DockerSandboxProvider implements SandboxProvider {
       }
       throw new Error(`sandbox provision failed: ${res.status} ${detail}`.trim());
     }
-    const body = await readSandboxJson<{ id: string; resumed?: boolean; started?: boolean }>(
-      res,
-      context.signal,
-    );
+    const body = await readSandboxJson<{
+      id: string;
+      resumed?: boolean;
+      started?: boolean;
+      egress?: string;
+    }>(res, context.signal);
+    // Fork patch: a supervisor that ignored the field would return an open computer.
+    if (isolated && body.egress !== "none") {
+      throw new Error("sandbox provision failed: the supervisor did not isolate the computer");
+    }
     return {
       id: body.id,
       botId: request.botId,

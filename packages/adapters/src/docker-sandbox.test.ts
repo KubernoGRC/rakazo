@@ -202,6 +202,35 @@ describe("Docker sandbox", () => {
     });
   });
 
+  it("asks for an isolated computer and fails closed if the supervisor ignores it", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ id: "computer", resumed: false }));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new DockerSandboxProvider("http://supervisor.test", "test-token");
+
+    await expect(
+      provider.provision({ botId: "bot", homePath: "/tmp/bot", egress: "none" }, context),
+    ).rejects.toThrow("the supervisor did not isolate the computer");
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(JSON.parse(String(init.body))).toMatchObject({ egress: "none" });
+
+    fetchMock.mockImplementation(async () =>
+      Response.json({ id: "computer", resumed: false, egress: "none" }),
+    );
+    await expect(
+      provider.provision({ botId: "bot", homePath: "/tmp/bot", egress: "none" }, context),
+    ).resolves.toMatchObject({ id: "computer", fresh: true });
+  });
+
+  it("leaves the provision body unchanged when no egress is asked for", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ id: "computer", resumed: false }));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new DockerSandboxProvider("http://supervisor.test", "test-token");
+
+    await provider.provision({ botId: "bot", homePath: "/tmp/bot" }, context);
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(JSON.parse(String(init.body))).not.toHaveProperty("egress");
+  });
+
   it("translates a 429 computer limit reached error from the supervisor", async () => {
     vi.stubGlobal(
       "fetch",
