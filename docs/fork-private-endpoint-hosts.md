@@ -21,8 +21,14 @@ row could then point at any private address, including the deployment's own serv
   address it resolves to must be RFC 1918 IPv4 or fd00::/8. Cloud metadata, link-local,
   loopback and shared address space stay refused. The check runs both before the request
   and in the connection's DNS lookup.
-- The list applies when a user saves a remote server and when the API or the worker
-  connects to one. `MCP_ALLOW_PRIVATE_ENDPOINT` is unchanged and still off by default.
+- The list applies when a user saves a remote server, when an agent adds one
+  (`add_mcp_server`), and when the API or the worker connects to one.
+  `MCP_ALLOW_PRIVATE_ENDPOINT` is unchanged and still off by default.
+- **Static credentials only.** A listed host serves servers that take a bearer token or
+  headers from the user's row. The MCP OAuth flow (`McpOAuthBroker`) still follows
+  `MCP_ALLOW_PRIVATE_ENDPOINT` alone, so connecting an OAuth account to a listed private
+  host fails. Extending the list to OAuth would also have to cover the authorization
+  server's own endpoints, which is a larger change than this one needs.
 
 ## Files
 
@@ -32,3 +38,5 @@ row could then point at any private address, including the deployment's own serv
   pass the list to the session's fetch.
 - `apps/api/src/mcp-servers.ts`, `apps/api/src/router.ts`, `apps/api/src/app.ts`: the
   save-time check.
+- `packages/adapters/src/mcp-server-tool.ts`, `packages/adapters/src/executor-deps.ts`,
+  `apps/worker/src/index.ts`: the `add_mcp_server` agent tool's check.

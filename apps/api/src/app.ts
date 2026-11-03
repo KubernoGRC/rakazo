@@ -686,6 +686,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     secretStore: secrets,
     secretHttp: remoteConnectors,
     mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
+    mcpPrivateEndpointHosts: env.mcpStdio.privateEndpointHosts,
     deploymentModelKey: env.deploymentModelKey,
     deploymentModelConfigured: env.deploymentModelConfigured,
     dataDir: env.dataDir,

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { ExecutorDeps } from "./executor-deps.js";
 import { mcpStdioOptionsFromEnv } from "./mcp-connector.js";
 import { mcpPrivateEndpointHostsFromEnv } from "./mcp-private-endpoint-hosts.js";
+import { addMcpServerFromTool } from "./mcp-server-tool.js";
 import { secureFetch } from "./mcp-transport.js";
 import { assertSafeRemoteUrl, createSafeLookup } from "./remote-mcp.js";
 
@@ -120,5 +122,31 @@ describe("pinned private endpoint list", () => {
       /private address/,
     );
     expect(seen).toEqual(["https://runner.example.test/mcp"]);
+  });
+});
+
+describe("add_mcp_server on a pinned private host", () => {
+  const run = { id: "r", spaceId: "s", userId: "u", threadId: "t", botId: "b" };
+  const args = {
+    name: "Runner",
+    transport: "streamable_http",
+    endpoint: "https://runner.example.test/mcp",
+  };
+  const deps = (mcpPrivateEndpointHosts?: readonly string[]) =>
+    ({
+      secretHttp: { resolveHostname: resolvesTo("10.0.4.20") },
+      mcpPrivateEndpointHosts,
+    }) as unknown as ExecutorDeps;
+
+  it("refuses the endpoint when the host isn't listed", async () => {
+    await expect(addMcpServerFromTool(deps(), run, "b", args, "e")).resolves.toEqual({
+      error: "Connector URL resolves to a private address",
+    });
+  });
+
+  it("gets past the endpoint check when the host is listed", async () => {
+    // The stub deps stop the tool at its next step; only the endpoint refusal matters here.
+    const result = await addMcpServerFromTool(deps(["runner.example.test"]), run, "b", args, "e");
+    expect(JSON.stringify(result)).not.toMatch(/private/);
   });
 });

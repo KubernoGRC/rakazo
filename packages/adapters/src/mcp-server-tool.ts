@@ -147,6 +147,7 @@ export async function addMcpServerFromTool(
   try {
     await assertSafeRemoteUrl(parsed.endpoint, deps.secretHttp?.resolveHostname, {
       allowPrivateEndpoint: deps.mcpAllowPrivateEndpoint === true,
+      privateEndpointHosts: deps.mcpPrivateEndpointHosts,
     });
     assertNoMcpEndpointCredential(parsed.endpoint);
   } catch (error) {
