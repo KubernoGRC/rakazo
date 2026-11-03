@@ -42,7 +42,11 @@ doesn't ask.
     Only the computer, the supervisor and the screen peers stay.
   - A peer that can't be joined, or an endpoint that can't be removed, fails the
     provision. A network created by that provision is removed again.
-  - Peers don't keep a stopped computer's network in use.
+  - Peers don't keep a stopped computer's network in use, but a computer on it, running or
+    stopped, always does.
+  - If a provision fails after its network was created, the network and its peers'
+    endpoints are removed, unless a computer is on it (a lost start response may hide a
+    running one).
 - **Resume:** an isolated request resumes a computer only when its network's internal flag
   and label match. Otherwise its network is replaced. If the old network can't be removed,
   the bot's containers are stopped and the provision fails, because attaching to it would

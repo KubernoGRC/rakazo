@@ -403,7 +403,15 @@ app.post("/computers", async (c) => {
           // Never force removal: a lost start response may hide a running computer.
           // Docker also refuses network removal while any endpoint is attached.
           await container?.remove().catch(() => undefined);
-          await createdNetwork?.remove().catch(() => undefined);
+          // Fork patch: an isolated network holds its peers' endpoints too, which
+          // block a plain remove. It goes only while no computer is left on it.
+          if (createdNetwork && body.egress === "none") {
+            await removeNetworkWithEndpoints(computerNetworkNameFor(body.botId), {
+              keepWithComputer: true,
+            });
+          } else {
+            await createdNetwork?.remove().catch(() => undefined);
+          }
           throw error;
         }
         return c.json({
@@ -1806,13 +1814,21 @@ async function screenPeerIds() {
 async function removeUnusedComputerNetwork(name: string, computerId?: string) {
   const users = await docker.listContainers({ all: true, filters: { network: [name] } });
   const peerIds = await screenPeerIds();
-  // Fork patch: an isolated network belongs to one computer, so anything else on it is a
-  // peer, including one the operator has since removed from SANDBOX_ISOLATED_PEERS.
+  // Fork patch: on an isolated network, anything that isn't a computer is a peer,
+  // including one the operator has since removed from SANDBOX_ISOLATED_PEERS.
   const isolatedNetwork = computerNetworkEgressMatches(
     await inspectNetworkIfPresent(name).catch(() => undefined),
     "none",
   );
-  if (!isolatedNetwork && users.some((user) => user.Id !== computerId && !peerIds.has(user.Id)))
+  // A computer still on it (running or stopped, labelled with its bot) always keeps it.
+  if (
+    users.some(
+      (user) =>
+        user.Id !== computerId &&
+        !peerIds.has(user.Id) &&
+        (!isolatedNetwork || Boolean(user.Labels?.["rakazo.botId"])),
+    )
+  )
     return;
   const network = docker.getNetwork(name);
   // The computer goes first: it must be able to rejoin when it resumes.
@@ -1884,9 +1900,20 @@ async function ensureBotNetwork(
   return created;
 }
 
-async function removeNetworkWithEndpoints(name: string) {
+async function removeNetworkWithEndpoints(
+  name: string,
+  options: { keepWithComputer?: boolean } = {},
+) {
   const info = await inspectNetworkIfPresent(name).catch(() => undefined);
   if (!info) return;
+  // A computer (a container labelled with its bot) may be running behind a lost
+  // start response; its network stays for the next provision to settle.
+  if (options.keepWithComputer) {
+    const users = await docker
+      .listContainers({ all: true, filters: { network: [name] } })
+      .catch(() => undefined);
+    if (!users || users.some((user) => user.Labels?.["rakazo.botId"])) return;
+  }
   const network = docker.getNetwork(name);
   for (const containerId of Object.keys(info.Containers ?? {})) {
     await network.disconnect({ Container: containerId, Force: true }).catch(() => undefined);
