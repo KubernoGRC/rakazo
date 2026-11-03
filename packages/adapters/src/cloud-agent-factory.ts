@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import type { CloudAgentProvider } from "@rakazo/adapter-kit";
 import { EmulatorCloudAgentProvider } from "./cloud-agent-emulator.js";
 import { resolveCloudAgentProvider } from "./cloud-agent-provider-env.js";
+import type { ComputerCloudAgentDeps } from "./computer-cloud-agent.js";
 import {
-  type ComputerCloudAgentDeps,
   ComputerCloudAgentProvider,
   computerCloudAgentConfigFromEnv,
 } from "./computer-cloud-agent.js";
