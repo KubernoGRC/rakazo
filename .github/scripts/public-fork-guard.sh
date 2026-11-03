@@ -15,6 +15,9 @@
 # which is scanned the same way as a commit message.
 # UPSTREAM_REF, when set, excludes commits already published by upstream: they
 # are not this fork's to leak, and upstream's own test fixtures trip gitleaks.
+# For the same reason a tree match is skipped in a file whose content is
+# byte-identical to upstream's file at the same path; the fork's copy of
+# upstream's own fixtures would otherwise fail every commit after a sync.
 # GITLEAKS is the gitleaks binary (default: gitleaks on PATH). GITLEAKS_CONFIG
 # is its config (default: .gitleaks.toml beside this script's repository root),
 # which extends the default rules.
@@ -52,9 +55,24 @@ fi
 mapfile -t commits < <(git rev-list "${range[@]}")
 echo "Scanning ${#commits[@]} commit(s)"
 
+# True when the file at this path is byte-identical to upstream's file there.
+same_as_upstream() { # same_as_upstream <commit> <path>
+  [ -n "${UPSTREAM_REF:-}" ] || return 1
+  local upstream
+  upstream=$(git rev-parse -q --verify "$UPSTREAM_REF:$2" 2>/dev/null) || return 1
+  [ "$upstream" = "$(git rev-parse "$1:$2")" ]
+}
+
 found=0
 for c in "${commits[@]}"; do
-  if git grep -nIiE "${patterns[@]}" "$c" --; then
+  hit=0
+  while IFS= read -r -d '' path; do
+    path=${path#"$c":}
+    same_as_upstream "$c" "$path" && continue
+    git grep -nIiE "${patterns[@]}" "$c" -- ":(literal)$path"
+    hit=1
+  done < <(git grep -lzIiE "${patterns[@]}" "$c" --)
+  if [ "$hit" -eq 1 ]; then
     echo "::error::Commit $c tracks deployment-specific values"
     found=1
   fi
