@@ -518,3 +518,21 @@ it("returns an existing session to the pending share", async () => {
   await render();
   expect(route.redirect).toHaveBeenCalledWith("/share");
 });
+
+// Fork: access identity (docs/fork-access-identity.md).
+it("tells an access-identity server's users to sign in in a web browser", async () => {
+  vi.mocked(loadSessionToken).mockResolvedValue("");
+  vi.mocked(passwordResetCapabilities).mockResolvedValue({
+    passwordAuth: false,
+    passwordReset: false,
+    resetUrl: null,
+    sso: null,
+    accessIdentity: true,
+  });
+  await render();
+  expect(host.textContent).toContain(
+    "This server uses your organisation's sign-in in a web browser",
+  );
+  expect(host.querySelector("input")).toBeNull();
+  expect(ssoButtons()).toHaveLength(0);
+});

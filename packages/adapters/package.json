@@ -25,6 +25,7 @@
     "@boxd-sh/sdk": "0.2.20",
     "@chat-adapter/slack": "4.43.0",
     "@chat-adapter/state-memory": "4.43.0",
+    "@chat-adapter/teams": "4.43.0",
     "@chat-adapter/telegram": "4.43.0",
     "@chat-adapter/whatsapp": "4.43.0",
     "@composio/core": "0.18.1",

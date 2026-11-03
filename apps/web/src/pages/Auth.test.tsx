@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { signInWithAccessIdentity } from "../lib/access-identity";
 import { authClient } from "../lib/auth";
 import type { AuthCapabilities } from "../lib/auth-capabilities";
 import { fetchAuthCapabilities } from "../lib/auth-capabilities";
@@ -66,6 +67,7 @@ vi.mock("../lib/auth", () => ({
   },
 }));
 vi.mock("../lib/rpc", () => ({ clearSpaceSelection: vi.fn() }));
+vi.mock("../lib/access-identity", () => ({ signInWithAccessIdentity: vi.fn() }));
 const capabilities: AuthCapabilities = {
   passwordAuth: false,
   sso: { name: "Example", availability: "unavailable" },
@@ -318,4 +320,49 @@ it("leaves the password form unchanged without email codes", async () => {
   expect(host.querySelector('input[type="password"]')).not.toBeNull();
   expect(host.querySelector<HTMLInputElement>('input[type="password"]')!.required).toBe(true);
   expect(host.querySelector('button[type="submit"]')!.textContent).toBe("Sign in");
+});
+
+// Fork: access identity (docs/fork-access-identity.md).
+const accessCapabilities: AuthCapabilities = {
+  passwordAuth: false,
+  sso: null,
+  passwordReset: false,
+  resetUrl: null,
+  accessIdentity: true,
+};
+it("signs in through the access proxy without showing a form", async () => {
+  const notify = vi.fn();
+  Object.assign(authClient, { $store: { notify } });
+  vi.mocked(fetchAuthCapabilities).mockResolvedValue(accessCapabilities);
+  vi.mocked(signInWithAccessIdentity).mockResolvedValue({ kind: "signed-in", created: false });
+  await render();
+  expect(signInWithAccessIdentity).toHaveBeenCalledTimes(1);
+  expect(notify).toHaveBeenCalledWith("$sessionSignal");
+  expect(host.querySelector("input")).toBeNull();
+  expect(host.textContent).not.toContain("Continue with");
+});
+it("points at the organisation's portal when the access sign-in is refused", async () => {
+  vi.mocked(fetchAuthCapabilities).mockResolvedValue(accessCapabilities);
+  vi.mocked(signInWithAccessIdentity).mockResolvedValue({ kind: "refused" });
+  await render();
+  expect(host.textContent).toContain("Sign in through your organisation's portal");
+  expect(host.querySelector("input")).toBeNull();
+  expect(host.querySelector("button")).toBeNull();
+});
+it("offers a retry when the access sign-in fails transiently", async () => {
+  const notify = vi.fn();
+  Object.assign(authClient, { $store: { notify } });
+  vi.mocked(fetchAuthCapabilities).mockResolvedValue(accessCapabilities);
+  vi.mocked(signInWithAccessIdentity)
+    .mockResolvedValueOnce({ kind: "unavailable" })
+    .mockResolvedValueOnce({ kind: "signed-in", created: false });
+  await render();
+  expect(host.textContent).toContain("Could not reach the server");
+  expect(host.textContent).not.toContain("organisation's portal");
+  const retry = [...host.querySelectorAll("button")].find(
+    (button) => button.textContent === "Retry",
+  )!;
+  await act(async () => retry.click());
+  expect(signInWithAccessIdentity).toHaveBeenCalledTimes(2);
+  expect(notify).toHaveBeenCalledWith("$sessionSignal");
 });

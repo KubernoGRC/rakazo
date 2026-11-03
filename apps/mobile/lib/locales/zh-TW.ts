@@ -889,6 +889,8 @@ export const ZH_TW_MESSAGES: Record<string, string> = {
   "Privacy policy": "隱私權政策",
   "Continue with {name}": "透過 {name} 繼續",
   "Could not load sign-in options": "無法載入登入選項",
+  "This server uses your organisation's sign-in in a web browser":
+    "此伺服器使用貴組織的登入方式，請在網頁瀏覽器中登入",
   "Deletion code": "刪除驗證碼",
   "Email is not allowed to register": "該電子信箱不允許註冊",
   "Email verification required": "需要驗證電子信箱",

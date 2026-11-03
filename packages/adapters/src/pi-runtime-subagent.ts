@@ -44,12 +44,25 @@ export function helperResultText(text: string, tail: string | undefined, limit: 
   return text && room > 1 ? `${clipTo(text, room)}\n\n${tail}` : tail;
 }
 
+export const SUBAGENT_FAILURE_PREFIX = "Subagent failed: ";
+export const SUBAGENT_NESTING_REFUSAL = "Subagents cannot nest further.";
+export const SUBAGENT_STOPPED = "stopped";
+
+/** How a delegation ended, read from the text `executeSubagent` returns. */
+export function subagentOutcome(result: unknown): "ok" | "error" | "refused" | "cancelled" {
+  if (typeof result !== "string") return "ok";
+  if (result.startsWith(SUBAGENT_FAILURE_PREFIX)) return "error";
+  if (result === SUBAGENT_NESTING_REFUSAL) return "refused";
+  if (result === SUBAGENT_STOPPED) return "cancelled";
+  return "ok";
+}
+
 export async function executeSubagent(
   host: ToolHost,
   executionId: string,
   args: Record<string, unknown>,
 ) {
-  if (host.depth > 0) return "Subagents cannot nest further.";
+  if (host.depth > 0) return SUBAGENT_NESTING_REFUSAL;
   await host.subagentGate.acquire();
   const agentId = executionId;
   const name =
@@ -92,7 +105,7 @@ export async function executeSubagent(
       result: message,
     });
     host.subagentGate.release();
-    return `Subagent failed: ${message}`;
+    return `${SUBAGENT_FAILURE_PREFIX}${message}`;
   }
 
   const selectedModel =
@@ -114,7 +127,7 @@ export async function executeSubagent(
       result: message,
     });
     host.subagentGate.release();
-    return `Subagent failed: ${message}`;
+    return `${SUBAGENT_FAILURE_PREFIX}${message}`;
   }
   const subagentModel = modelForCompletion(selectedModel.model, requestModel.maxTokens);
 
@@ -331,7 +344,7 @@ export async function executeSubagent(
         status: "failed",
         result: "stopped",
       });
-      return "stopped";
+      return SUBAGENT_STOPPED;
     }
     const onAbort = () => nested.abort();
     host.signal.addEventListener("abort", onAbort);
@@ -370,7 +383,7 @@ export async function executeSubagent(
         status: "failed",
         result: message,
       });
-      return `Subagent failed: ${message}`;
+      return `${SUBAGENT_FAILURE_PREFIX}${message}`;
     }
     const budgetMessage = budgetExceeded
       ? toolCallBudgetExceededMessage(host.toolCallBudget.limit)
@@ -403,7 +416,7 @@ export async function executeSubagent(
       status: "failed",
       result: message,
     });
-    return `Subagent failed: ${message}`;
+    return `${SUBAGENT_FAILURE_PREFIX}${message}`;
   } finally {
     host.nestedAgents.delete(nested);
     host.subagentGate.release();

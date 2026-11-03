@@ -31,6 +31,15 @@ import type { Prisma, PrismaClient } from "@rakazo/db";
 import { availableInSpace, itemSecretIn, runAsSystem } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { sanitizeConnectorError } from "./connector-safety.js";
+import type {
+  DeploymentOAuthClient,
+  DeploymentOAuthClients,
+} from "./mcp-oauth-deployment-clients.js";
+import {
+  deploymentClientFor,
+  deploymentOAuthClientSecrets,
+  processDeploymentOAuthClients,
+} from "./mcp-oauth-deployment-clients.js";
 import { MCP_DYNAMIC_REGISTRATION_UNSUPPORTED, needsMcpOAuthClient } from "./mcp-server-health.js";
 import { secureFetch, validateUrl, withEndpointOriginFallback } from "./mcp-transport.js";
 import type { RemoteTransportDependencies } from "./remote-mcp.js";
@@ -75,6 +84,7 @@ export function oauthMaterialSecrets(material: OAuthMaterial): string[] {
   add(material.oauth?.tokens?.access_token);
   add(material.oauth?.tokens?.refresh_token);
   add(material.oauthClient?.client_secret);
+  for (const secret of deploymentOAuthClientSecrets()) add(secret);
   const client = material.oauth?.clientInformation;
   if (client && "client_secret" in client && typeof client.client_secret === "string") {
     add(client.client_secret);
@@ -205,6 +215,87 @@ type PreRegisteredClient = OAuthClientInformation & {
   authorization_params?: string;
 };
 
+/** A deployment client, bound to the issuer it was configured for. */
+function deploymentPreRegistered(client: DeploymentOAuthClient): PreRegisteredClient {
+  return {
+    client_id: client.client_id,
+    ...(client.client_secret ? { client_secret: client.client_secret } : {}),
+    ...(client.scope ? { scope: client.scope } : {}),
+    ...(client.authorization_params ? { authorization_params: client.authorization_params } : {}),
+    authorization_server: client.issuer,
+  };
+}
+
+/**
+ * The client a flow uses: the deployment's for an authorization server it configures,
+ * which overrides any client the user stored (the deployment decides which app, and so
+ * which permissions, a user can grant there); otherwise the user's own.
+ */
+function effectiveClient(
+  material: OAuthMaterial,
+  deploymentClients: DeploymentOAuthClients | undefined,
+): { client: PreRegisteredClient | undefined; deployment: boolean } {
+  const issuer =
+    material.oauth?.discoveryState?.authorizationServerUrl ??
+    material.oauthClient?.authorization_server;
+  const deployment = deploymentClients && deploymentClientFor(deploymentClients, issuer);
+  if (!deployment) return { client: material.oauthClient, deployment: false };
+  assertIssuerMetadata(deployment, material.oauth?.discoveryState);
+  return { client: deploymentPreRegistered(deployment), deployment: true };
+}
+
+/**
+ * A deployment client's secret goes only where its configured issuer says. Discovery can
+ * fall back to metadata the MCP endpoint itself serves, and an endpoint can name the
+ * configured issuer there while pointing the token endpoint at itself. So the metadata's
+ * issuer must be the configured one, and its endpoints must be on the issuer's origin,
+ * however the metadata was obtained. Without metadata, the SDK derives the endpoints from
+ * the issuer itself.
+ */
+function assertIssuerMetadata(
+  client: DeploymentOAuthClient,
+  discovery: OAuthDiscoveryState | undefined,
+): void {
+  const metadata = discovery?.authorizationServerMetadata;
+  if (!metadata) return;
+  const origin = new URL(client.issuer).origin;
+  const sameOrigin = (value: unknown) => {
+    if (value === undefined) return true;
+    if (typeof value !== "string") return false;
+    try {
+      return new URL(value).origin === origin;
+    } catch {
+      return false;
+    }
+  };
+  let issuer: string | undefined;
+  try {
+    issuer = new URL(metadata.issuer).href;
+  } catch {
+    issuer = undefined;
+  }
+  if (
+    issuer !== client.issuer ||
+    !sameOrigin(metadata.authorization_endpoint) ||
+    !sameOrigin(metadata.token_endpoint)
+  )
+    throw new McpOAuthDeploymentMetadataError();
+}
+
+/** The client values a stdio server's `{{oauth.*}}` templates may read. A deployment
+ * client's secret is never handed to a server process; only its id is. */
+export function launchOAuthClient(
+  material: OAuthMaterial,
+  deploymentClients: DeploymentOAuthClients = processDeploymentOAuthClients(),
+): { client_id?: string; client_secret?: string; scope?: string } {
+  const { client, deployment } = effectiveClient(material, deploymentClients);
+  return {
+    client_id: client?.client_id,
+    ...(deployment ? {} : { client_secret: client?.client_secret }),
+    scope: client?.scope,
+  };
+}
+
 function boundClient(
   client: PreRegisteredClient,
   authorizationServerUrl: string | undefined,
@@ -253,6 +344,16 @@ export class McpOAuthClientRequiredError extends Error {
   }
 }
 
+/** Discovered metadata that does not belong to the issuer a deployment client was configured for. */
+export class McpOAuthDeploymentMetadataError extends McpOAuthServerMismatchError {
+  constructor() {
+    super();
+    this.message =
+      "MCP OAuth authorization server metadata does not belong to the deployment's configured issuer";
+    this.name = "McpOAuthDeploymentMetadataError";
+  }
+}
+
 export class McpReauthorizationRequiredError extends Error {
   readonly code = "MCP_REAUTHORIZATION_REQUIRED";
   constructor(readonly serverId: string) {
@@ -284,6 +385,8 @@ type ProviderOptions = {
   refresh?: (heldRefreshToken: string) => Promise<TokenGrant>;
   /** The instance opt-in that lets OAuth URLs use plain HTTP on a private network. */
   allowPrivateEndpoint?: boolean;
+  /** Clients the deployment registered, by authorization server. */
+  deploymentClients?: DeploymentOAuthClients;
 };
 
 /** Refresh before expiry to cover clock skew and request time. */
@@ -400,18 +503,28 @@ export class StoredMcpOAuthProvider implements OAuthClientProvider {
 
   /** The scope configured with the pre-registered client, if any. */
   get configuredScope(): string | undefined {
-    return this.material.oauthClient?.scope;
+    return this.client().client?.scope;
+  }
+
+  /** The pre-registered client in effect: the deployment's, or the user's own. */
+  private client() {
+    return effectiveClient(this.material, this.options.deploymentClients);
   }
 
   state(): string {
     return this.options.state ?? this.runtimeState;
   }
   clientInformation(): OAuthClientInformationMixed | undefined {
+    // The SDK saves discovery before asking for the client, so this is the server
+    // about to receive it.
+    const server = this.material.oauth?.discoveryState?.authorizationServerUrl;
+    const effective = this.client();
+    // A deployment client is bound to its issuer by configuration, and is never written
+    // into the user's material.
+    if (effective.deployment && effective.client) return boundClient(effective.client, server);
     const client = this.material.oauthClient;
     if (!client) return this.material.oauth?.clientInformation;
-    // The SDK saves discovery before asking for the client, so this is the server
-    // about to receive it. The first one is kept and written with the next persist.
-    const server = this.material.oauth?.discoveryState?.authorizationServerUrl;
+    // The first server is kept and written with the next persist.
     const information = boundClient(client, server);
     if (!client.authorization_server && server)
       this.material.oauthClient = { ...client, authorization_server: new URL(server).href };
@@ -532,7 +645,7 @@ export class StoredMcpOAuthProvider implements OAuthClientProvider {
       }
       throw error;
     }
-    const extra = this.material.oauthClient?.authorization_params;
+    const extra = this.client().client?.authorization_params;
     if (extra) {
       for (const [key, value] of Object.entries(parseMcpOAuthAuthorizationParams(extra)))
         if (!authorizationUrl.searchParams.has(key)) authorizationUrl.searchParams.set(key, value);
@@ -628,6 +741,7 @@ function oauthFetch(
   network: RemoteTransportDependencies,
   material: OAuthMaterial = {},
   allowPrivateEndpoint = false,
+  deploymentClients?: DeploymentOAuthClients,
 ): {
   fetch: typeof fetch;
   close: () => Promise<void>;
@@ -683,7 +797,10 @@ function oauthFetch(
     close: () => safeFetch.close(),
     publicError: (error, message) => {
       if (error instanceof Error && networkErrors.has(error)) return error;
-      const secrets = oauthMaterialSecrets(material);
+      const secrets = [
+        ...oauthMaterialSecrets(material),
+        ...deploymentOAuthClientSecrets(deploymentClients),
+      ];
       const sdk = sanitizeConnectorError(error, secrets);
       const surfaced = rejection ? formatOAuthRejection(rejection, sdk, secrets) : undefined;
       getLogger().warn(`${message}: ${surfaced ?? sdk}`);
@@ -864,10 +981,12 @@ async function requestRefresh(
   refreshToken: string,
   fetchFn: typeof fetch,
   allowPrivateEndpoint: boolean,
+  deploymentClients?: DeploymentOAuthClients,
 ): Promise<OAuthTokens> {
   const discovery = material.oauth?.discoveryState;
-  const clientInformation = material.oauthClient
-    ? boundClient(material.oauthClient, discovery?.authorizationServerUrl)
+  const { client } = effectiveClient(material, deploymentClients);
+  const clientInformation = client
+    ? boundClient(client, discovery?.authorizationServerUrl)
     : material.oauth?.clientInformation;
   if (!discovery?.authorizationServerUrl || !clientInformation)
     throw new Error("MCP OAuth state cannot refresh");
@@ -933,6 +1052,7 @@ export class McpOAuthBroker {
     private readonly secrets: SecretStore,
     private readonly network: RemoteTransportDependencies = {},
     private readonly allowPrivateEndpoint = false,
+    private readonly deploymentClients: DeploymentOAuthClients = processDeploymentOAuthClients(),
   ) {}
 
   async statusFor(server: ServerRef, context: ActorRef): Promise<McpOAuthSummary["status"]> {
@@ -1017,6 +1137,7 @@ export class McpOAuthBroker {
       this.network,
       server.endpoint ? loaded.material : withoutRequestCredentials(loaded.material),
       this.allowPrivateEndpoint,
+      this.deploymentClients,
     );
     try {
       if (server.endpoint)
@@ -1176,6 +1297,7 @@ export class McpOAuthBroker {
       // the server's static headers.
       { oauth: { clientInformation: pending.provider.clientInformation() } },
       this.allowPrivateEndpoint,
+      this.deploymentClients,
     );
     try {
       if (pending.stdio)
@@ -1285,6 +1407,7 @@ export class McpOAuthBroker {
             }
           : {}),
         allowPrivateEndpoint: this.allowPrivateEndpoint,
+        deploymentClients: this.deploymentClients,
         ...options,
       },
     );
@@ -1306,7 +1429,13 @@ export class McpOAuthBroker {
     onPersisted?: ProviderOptions["onPersisted"],
   ): Promise<TokenGrant> {
     // Resolve the network before taking a connection for the lock.
-    const network = oauthFetch(target, this.network, {}, this.allowPrivateEndpoint);
+    const network = oauthFetch(
+      target,
+      this.network,
+      {},
+      this.allowPrivateEndpoint,
+      this.deploymentClients,
+    );
     let stored: { id: string; ciphertext: string } | undefined;
     let rotated: { material: OAuthMaterial; grant: TokenGrant; spent: string } | undefined;
     try {
@@ -1335,6 +1464,7 @@ export class McpOAuthBroker {
                     current,
                     network.fetch,
                     this.allowPrivateEndpoint,
+                    this.deploymentClients,
                   ),
                 };
                 grant.obtainedAt = Date.now();

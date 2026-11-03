@@ -234,6 +234,8 @@ export interface AgentToolCompletion {
   name: string;
   executionId: string;
   durationMs: number;
+  /** The arguments the runtime ran the tool with. */
+  args?: Record<string, unknown>;
   result?: unknown;
   error?: unknown;
   paused?: boolean;

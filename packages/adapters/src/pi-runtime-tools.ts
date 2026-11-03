@@ -601,6 +601,7 @@ function toAgentTool(
               name: tool.name,
               executionId,
               durationMs: Math.max(0, Date.now() - startedAt),
+              args,
               ...(result === undefined ? {} : { result }),
               ...(failure === undefined ? {} : { error: failure }),
               ...(host.pausePending ? { paused: true } : {}),

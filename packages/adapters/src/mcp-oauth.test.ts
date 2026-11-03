@@ -9,6 +9,7 @@ import {
   oauthMaterialSecrets,
   StoredMcpOAuthProvider,
 } from "./mcp-oauth.js";
+import type { DeploymentOAuthClients } from "./mcp-oauth-deployment-clients.js";
 import { McpSession } from "./mcp-transport.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -314,13 +315,18 @@ describe("MCP OAuth", () => {
     };
     const context = { spaceId: "workspace-1", userId: "user-1" };
     /** A process of its own: a broker with nothing in memory but the database. */
-    const startProcess = async (network: typeof fetch, allowPrivateEndpoint = false) => {
+    const startProcess = async (
+      network: typeof fetch,
+      allowPrivateEndpoint = false,
+      deploymentClients: DeploymentOAuthClients = new Map(),
+    ) => {
       await ready;
       const broker = new McpOAuthBroker(
         prisma as never,
         secrets as never,
         { fetch: network, resolveHostname: TEST_NETWORK.resolveHostname },
         allowPrivateEndpoint,
+        deploymentClients,
       );
       const provider = await broker.providerFor(server, context);
       if (!(provider instanceof StoredMcpOAuthProvider)) throw new Error("expected a provider");
@@ -1547,6 +1553,7 @@ describe("MCP OAuth", () => {
     function brokerWithMaterial(
       material: OAuthMaterial,
       server: { transport?: string; endpoint?: string | null } = {},
+      deploymentClients: DeploymentOAuthClients = new Map(),
     ) {
       const tables = {
         mcpServer: {
@@ -1579,7 +1586,13 @@ describe("MCP OAuth", () => {
         put: vi.fn(async () => ({ id: "session-secret", ciphertext: "session-encrypted" })),
       };
       return {
-        broker: new McpOAuthBroker(prisma as never, secrets as never, TEST_NETWORK),
+        broker: new McpOAuthBroker(
+          prisma as never,
+          secrets as never,
+          TEST_NETWORK,
+          false,
+          deploymentClients,
+        ),
         prisma,
         secrets,
       };
@@ -1721,6 +1734,214 @@ describe("MCP OAuth", () => {
       expect(warn).toHaveBeenCalled();
       for (const call of warn.mock.calls) expect(String(call)).not.toContain("registered-secret");
       warn.mockRestore();
+    });
+
+    describe("and a deployment client for its authorization server", () => {
+      const deployment: DeploymentOAuthClients = new Map([
+        [
+          "https://auth.example.test/",
+          {
+            issuer: "https://auth.example.test/",
+            client_id: "deployment-client",
+            client_secret: "deployment-secret",
+            scope: "repo:read",
+          },
+        ],
+      ]);
+
+      it("authorizes with the deployment client and never stores its secret", async () => {
+        const requested = nonRegisteringAuthServer(() => undefined);
+        const { broker, secrets } = brokerWithMaterial({}, {}, deployment);
+
+        const started = await broker.begin({
+          serverId: "server-1",
+          spaceId: "workspace-1",
+          userId: "user-1",
+          redirectUri: "https://app.example.test/mcp/oauth/callback",
+        });
+
+        const url = authorizationUrlOf(started);
+        expect(url.searchParams.get("client_id")).toBe("deployment-client");
+        expect(url.searchParams.get("scope")).toBe("repo:read");
+        expect(requested.some((request) => request.includes("/register"))).toBe(false);
+        for (const [plaintext] of secrets.put.mock.calls as unknown as [string][])
+          expect(plaintext).not.toContain("deployment-secret");
+      });
+
+      it("overrides a client the user stored for that authorization server", async () => {
+        nonRegisteringAuthServer(() => undefined);
+        const { broker } = brokerWithMaterial({ oauthClient }, {}, deployment);
+
+        const started = await broker.begin({
+          serverId: "server-1",
+          spaceId: "workspace-1",
+          userId: "user-1",
+          redirectUri: "https://app.example.test/mcp/oauth/callback",
+        });
+
+        expect(authorizationUrlOf(started).searchParams.get("client_id")).toBe("deployment-client");
+      });
+
+      it("leaves the user's client in place for other authorization servers", async () => {
+        nonRegisteringAuthServer(() => undefined);
+        const elsewhere: DeploymentOAuthClients = new Map([
+          [
+            "https://other-auth.example.test/",
+            {
+              issuer: "https://other-auth.example.test/",
+              client_id: "other-deployment-client",
+            },
+          ],
+        ]);
+        const { broker } = brokerWithMaterial({ oauthClient }, {}, elsewhere);
+
+        const started = await broker.begin({
+          serverId: "server-1",
+          spaceId: "workspace-1",
+          userId: "user-1",
+          redirectUri: "https://app.example.test/mcp/oauth/callback",
+        });
+
+        expect(authorizationUrlOf(started).searchParams.get("client_id")).toBe("registered-client");
+      });
+
+      it("exchanges the code with the deployment client's secret", async () => {
+        let authorization: string | null = null;
+        nonRegisteringAuthServer(async (request) => {
+          authorization = request.headers.get("authorization");
+        });
+        const sessionId = "6c2e9a41-7d3b-4e5f-8a1c-2b3d4e5f6a70";
+        const { broker, prisma } = brokerWithMaterial(
+          {
+            oauth: {
+              redirectUri: "https://app.example.test/mcp/oauth/callback",
+              codeVerifier: "verifier",
+              discoveryState: {
+                authorizationServerUrl: "https://auth.example.test",
+                authorizationServerMetadata: {
+                  issuer: "https://auth.example.test",
+                  authorization_endpoint: "https://auth.example.test/authorize",
+                  token_endpoint: "https://auth.example.test/token",
+                  response_types_supported: ["code"],
+                },
+              },
+            },
+          },
+          {},
+          deployment,
+        );
+        prisma.mcpOAuthSession.findFirst.mockResolvedValue({
+          id: sessionId,
+          serverId: "server-1",
+          endpoint: "https://mcp.example.test/mcp",
+          redirectUri: "https://app.example.test/mcp/oauth/callback",
+          oauthCiphertext: "session-encrypted",
+          createdAt: new Date(),
+        });
+
+        await broker
+          .complete({
+            sessionId,
+            code: "authorization-code",
+            state: sessionId,
+            spaceId: "workspace-1",
+            userId: "user-1",
+          })
+          .catch(() => undefined);
+
+        expect(authorization).toBe(
+          `Basic ${Buffer.from("deployment-client:deployment-secret").toString("base64")}`,
+        );
+      });
+
+      it.each([
+        [
+          "a token endpoint off the issuer's origin",
+          {
+            issuer: "https://auth.example.test",
+            authorization_endpoint: "https://auth.example.test/authorize",
+            token_endpoint: "https://mcp.example.test/token",
+          },
+        ],
+        [
+          "another issuer",
+          {
+            issuer: "https://mcp.example.test",
+            authorization_endpoint: "https://auth.example.test/authorize",
+            token_endpoint: "https://auth.example.test/token",
+          },
+        ],
+      ])("never sends the deployment secret to metadata naming %s", async (_case, metadata) => {
+        const tokenRequests: string[] = [];
+        nonRegisteringAuthServer((request) => {
+          tokenRequests.push(request.url);
+          return undefined;
+        });
+        const sessionId = "7d3f0b52-8e4c-4f6a-9b2d-3c4e5f6a7b81";
+        const { broker, prisma } = brokerWithMaterial(
+          {
+            oauth: {
+              redirectUri: "https://app.example.test/mcp/oauth/callback",
+              codeVerifier: "verifier",
+              discoveryState: {
+                // What a user-controlled endpoint can serve when discovery falls back to it.
+                authorizationServerUrl: "https://auth.example.test",
+                authorizationServerMetadata: { ...metadata, response_types_supported: ["code"] },
+              },
+            },
+          },
+          {},
+          deployment,
+        );
+        prisma.mcpOAuthSession.findFirst.mockResolvedValue({
+          id: sessionId,
+          serverId: "server-1",
+          endpoint: "https://mcp.example.test/mcp",
+          redirectUri: "https://app.example.test/mcp/oauth/callback",
+          oauthCiphertext: "session-encrypted",
+          createdAt: new Date(),
+        });
+        const fetchSpy = vi.mocked(globalThis.fetch);
+
+        const outcome = await broker
+          .complete({
+            sessionId,
+            code: "authorization-code",
+            state: sessionId,
+            spaceId: "workspace-1",
+            userId: "user-1",
+          })
+          .then(
+            () => "completed",
+            () => "refused",
+          );
+
+        expect(outcome).toBe("refused");
+        expect(tokenRequests).toEqual([]);
+        for (const [input, init] of fetchSpy.mock.calls) {
+          const request = input instanceof Request ? input : new Request(input, init);
+          expect(request.headers.get("authorization") ?? "").not.toContain(
+            Buffer.from("deployment-client:deployment-secret").toString("base64"),
+          );
+        }
+      });
+
+      it("refreshes with the deployment client, not the one the user registered", async () => {
+        const server = rotatingAuthServer();
+        const shared = sharedCredentials(expiringMaterial(EXPIRED()));
+        const publicDeployment: DeploymentOAuthClients = new Map([
+          [
+            "https://auth.example.test/",
+            { issuer: "https://auth.example.test/", client_id: "deployment-client" },
+          ],
+        ]);
+        const { provider } = await shared.startProcess(server.fetch, false, publicDeployment);
+
+        await expect(provider.tokens()).resolves.toMatchObject({ access_token: "access-1" });
+
+        expect(server.requests[0]?.get("client_id")).toBe("deployment-client");
+        expect(JSON.stringify(await shared.stored())).not.toContain("deployment-client");
+      });
     });
 
     it("refreshes an expired grant with the configured client", async () => {

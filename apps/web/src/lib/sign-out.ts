@@ -1,5 +1,6 @@
 import { t } from "@lingui/core/macro";
 import { useEffect, useRef, useState } from "react";
+import { leaveThroughAccessLogout } from "./access-identity";
 import { authClient } from "./auth";
 import { endCallBeforeSignOut, forgetSignedInUser, sessionChangedUnderPage } from "./call-session";
 import { clearComposerDrafts } from "./composer-draft";
@@ -27,6 +28,8 @@ export async function signOut(destination: string): Promise<void> {
     forgetSignedInUser();
     clearSpaceSelection();
     clearComposerDrafts();
+    // Fork: continue to the access proxy's logout when the deployment names one.
+    if (await leaveThroughAccessLogout(true)) return;
     window.location.assign(destination);
   } else {
     try {

@@ -82,6 +82,7 @@ import { revealSecondInstanceWindow, secondInstanceWindow } from "./second-insta
 import { installServerHeaders } from "./server-request-headers.js";
 import { installSessionPermissions } from "./session-permissions.js";
 import {
+  ACCESS_IDENTITY_DESKTOP_MESSAGE,
   DEFAULT_LOCAL_WEB_URL,
   desktopStackImageTag,
   isRakazoHealth,
@@ -97,6 +98,7 @@ import {
   serverHeadersFor,
   servesBundledRenderer,
   sessionPartitionForServerUrl,
+  usesAccessIdentity,
 } from "./setup-config.js";
 import { clearSetup, readSetup, readUiLocale, writeSetup, writeUiLocale } from "./setup-store.js";
 import { createSystemSpeech } from "./system-speech.js";
@@ -939,6 +941,22 @@ async function probeServer(
   const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS);
 
   try {
+    // Fork: refuse a server whose only sign-in is an access proxy's browser flow. First,
+    // because that mode answers the health probe below with 401; capabilities is exempt.
+    const capabilities = await net.fetch(`${url}/api/auth/capabilities`, {
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "manual",
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
+    });
+    if (capabilities.ok && usesAccessIdentity(await readProbeJson(capabilities))) {
+      return {
+        ok: false,
+        status: capabilities.status,
+        url,
+        error: ACCESS_IDENTITY_DESKTOP_MESSAGE,
+      };
+    }
     const response = await net.fetch(`${url}/rpc/health`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
