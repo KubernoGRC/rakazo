@@ -127,6 +127,12 @@ export interface SandboxProvider {
        * reports it gone instead, so the newer save wins.
        */
       savedAt?: Date;
+      /**
+       * Fork patch: `none` asks for a computer with no route off the host, reaching only
+       * operator-named peers. Only providers with `isolatedEgress` accept it, and they
+       * fail the provision rather than return a computer that isn't isolated.
+       */
+      egress?: "default" | "none";
     },
     context: AdapterContext,
   ): Promise<ComputerRef>;
@@ -597,6 +603,11 @@ export interface CloudAgentProvider {
     context: AdapterContext,
   ): Promise<CloudAgentHandle>;
   cancel(id: string, context: AdapterContext, runId?: string): Promise<CloudAgentSnapshot>;
+  /**
+   * Fork patch: a provider that keeps its result locally (the computer provider) returns
+   * it here for `cloud_agent_status`. It never throws.
+   */
+  result?(id: string): Promise<unknown>;
 }
 
 /**

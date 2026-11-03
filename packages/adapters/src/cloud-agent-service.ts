@@ -140,9 +140,15 @@ export async function executeCloudAgentTool(
   }
   if (agent.nextPollAt) await enqueueCloudAgent(deps, agent.id);
   const { kind: _kind, agentId, ...snapshot } = cloudAgentBlock(agent);
+  // Fork patch: a locally kept result (the computer provider's summary and diff).
+  const result =
+    name === "cloud_agent_status" && agent.remoteId && connection.provider.result
+      ? await connection.provider.result(agent.remoteId).catch(() => undefined)
+      : undefined;
   return {
     id: agentId,
     ...snapshot,
+    ...(result ? { result } : {}),
     ...(agent.cancelRequested ? { cancellationPending: true } : {}),
     ...(agent.followupDispatchedAt ? { followupPending: true } : {}),
   };

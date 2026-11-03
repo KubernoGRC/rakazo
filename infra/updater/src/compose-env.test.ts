@@ -71,7 +71,7 @@ const NOT_PASSED: Record<string, string> = {
   KUBERNETES_SANDBOX_RUNTIME_CLASS_NAME: KUBERNETES_SANDBOX,
   // Fork: the deployment adds these itself (docs/fork-access-identity.md,
   // docs/fork-deployment-connectors.md, docs/fork-deployment-oauth-clients.md,
-  // docs/fork-teams.md); the
+  // docs/fork-teams.md, docs/fork-computer-coding-agent.md); the
   // compose files never carry them. MCP_OAUTH_CLIENT_<LABEL>_* are read by name from
   // the labels MCP_OAUTH_CLIENTS lists, so the scan sees only the list.
   ACCESS_IDENTITY_ENABLED: FORK_DEPLOYMENT,
@@ -87,6 +87,14 @@ const NOT_PASSED: Record<string, string> = {
   TEAMS_APP_ID: FORK_DEPLOYMENT,
   TEAMS_APP_PASSWORD: FORK_DEPLOYMENT,
   TEAMS_APP_TENANT_ID: FORK_DEPLOYMENT,
+  CLOUD_AGENT_COMPUTER_COMMAND: FORK_DEPLOYMENT,
+  CLOUD_AGENT_COMPUTER_ENV: FORK_DEPLOYMENT,
+  CLOUD_AGENT_COMPUTER_FORGE_API: FORK_DEPLOYMENT,
+  CLOUD_AGENT_COMPUTER_FORGE_ISSUER: FORK_DEPLOYMENT,
+  CLOUD_AGENT_COMPUTER_MODEL: FORK_DEPLOYMENT,
+  CLOUD_AGENT_COMPUTER_RELAY_URL: FORK_DEPLOYMENT,
+  CLOUD_AGENT_COMPUTER_REPOS: FORK_DEPLOYMENT,
+  MODEL_RELAY_SIGNING_KEY: FORK_DEPLOYMENT,
 };
 
 /**

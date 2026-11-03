@@ -560,11 +560,15 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       })
     : undefined;
   // One provider instance so emulator launches and polls share the same Map.
-  const cloudAgent = createCloudAgentConnection({
-    CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
-    CURSOR_API_KEY: env.cursorApiKey,
-    CLOUD_AGENT_SPACE_ID: env.cloudAgentSpaceId,
-  });
+  const cloudAgent = createCloudAgentConnection(
+    {
+      CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
+      CURSOR_API_KEY: env.cursorApiKey,
+      CLOUD_AGENT_SPACE_ID: env.cloudAgentSpaceId,
+    },
+    // Fork patch: the API only reads results, so it holds none of the runtime's settings.
+    { dataDir: env.dataDir },
+  );
   const shutdown = new AbortController();
   // One cache serves models.list, selection validation, and run-time model
   // resolution alike, so a list call warms the run path in this process.
