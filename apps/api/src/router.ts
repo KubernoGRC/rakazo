@@ -134,6 +134,8 @@ export interface RouterDeps {
     gitSha?: string;
     integrationsCatalogUrl?: string;
     mcpAllowPrivateEndpoint?: boolean;
+    /** Exact DNS names user MCP servers may reach on private addresses. */
+    mcpPrivateEndpointHosts?: readonly string[];
     desktopHostChoiceEnabled?: boolean;
     mcpStdioEnabled?: boolean;
     mcpStdioAllowedCommands?: string[];

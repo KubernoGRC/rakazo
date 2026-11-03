@@ -52,6 +52,9 @@ export interface RemoteUrlPolicy {
    * the default policy.
    */
   privateEndpointHost?: string;
+  /** Exact DNS names an operator lets user-configured servers reach on private
+   * addresses, each under the same rules as `privateEndpointHost`. */
+  privateEndpointHosts?: readonly string[];
 }
 
 export interface RemoteTransportDependencies {
@@ -273,6 +276,7 @@ async function withRemoteMcpClient<T>(
   const policy = {
     allowPrivateEndpoint: options.allowPrivateEndpoint,
     privateEndpointHost: options.privateEndpointHost,
+    privateEndpointHosts: options.privateEndpointHosts,
   };
   const endpoint = await assertSafeRemoteUrl(
     options.endpoint,
@@ -800,9 +804,11 @@ function normalizeHostname(hostname: string): string {
 
 /** Exact match only: no suffix, wildcard or IP-literal pins. */
 function isPinnedPrivateHost(hostname: string, policy: RemoteUrlPolicy): boolean {
-  const pin = policy.privateEndpointHost ? normalizeHostname(policy.privateEndpointHost) : "";
-  if (!pin || ipVersion(pin) !== 0) return false;
-  return normalizeHostname(hostname) === pin;
+  const host = normalizeHostname(hostname);
+  return [policy.privateEndpointHost, ...(policy.privateEndpointHosts ?? [])].some((entry) => {
+    const pin = entry ? normalizeHostname(entry) : "";
+    return pin !== "" && ipVersion(pin) === 0 && host === pin;
+  });
 }
 
 /** RFC 1918 IPv4 or locally assigned IPv6 unique-local (fd00::/8) only. Cloud

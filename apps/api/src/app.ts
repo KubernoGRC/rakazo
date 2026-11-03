@@ -844,6 +844,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       gitSha: env.gitSha,
       integrationsCatalogUrl: env.integrationsCatalogUrl,
       mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
+      mcpPrivateEndpointHosts: env.mcpStdio.privateEndpointHosts,
       desktopHostChoiceEnabled: Boolean(env.desktopStackToken),
       mcpStdioEnabled: env.mcpStdioEnabled,
       mcpStdioAllowedCommands: env.mcpStdioAllowedCommands,
