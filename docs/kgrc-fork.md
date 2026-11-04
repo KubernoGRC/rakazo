@@ -106,5 +106,7 @@ images **by digest** from the job summary, never by tag.
   registers once, for authorization servers without dynamic registration.
 - [Per-call tool events](fork-tool-call-events.md): a content-free `tool.called` security
   event for every agent tool call.
+- [Private endpoint hosts](fork-private-endpoint-hosts.md): exact DNS names user MCP servers may
+  reach on private addresses, instead of the instance-wide private-endpoint escape.
 - [Microsoft Teams](fork-teams.md): a single-tenant Teams surface that refuses other tenants
   and links each sender by their directory identity.
