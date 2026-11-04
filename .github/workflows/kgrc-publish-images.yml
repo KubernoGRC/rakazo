@@ -8,7 +8,8 @@ name: kgrc-publish-images
 #   * source   - push to `kgrc`, a `kgrc-v*` tag, or dispatch without
 #                base_image: build upstream's infra/compose/Dockerfile from this
 #                commit unmodified, then infra/compose/Dockerfile.kgrc on top.
-#                The computer image is built from source unmodified.
+#                The computer image is built from source unmodified, then
+#                infra/sandboxes/computer/Dockerfile.kgrc on top.
 #   * overlay  - dispatch with base_image (a digest-pinned app image): apply
 #                Dockerfile.kgrc to that image only. Used to fix an already
 #                deployed release without moving its code.
@@ -21,6 +22,8 @@ on:
     branches: [kgrc]
     paths:
       - "infra/compose/Dockerfile.kgrc"
+      - "infra/sandboxes/computer/Dockerfile.kgrc"
+      - "infra/sandboxes/computer/claude-code-managed-settings.json"
       - ".github/workflows/kgrc-publish-images.yml"
   workflow_dispatch:
     inputs:
@@ -95,7 +98,17 @@ jobs:
         run: |
           set -euo pipefail
           docker build --platform linux/amd64 -f infra/sandboxes/computer/Dockerfile \
+            -t kgrc-computer-base:ci infra/sandboxes/computer
+
+      - name: Apply the computer Dockerfile.kgrc
+        if: env.BASE_INPUT == ''
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 -f infra/sandboxes/computer/Dockerfile.kgrc \
+            --build-arg BASE_IMAGE=kgrc-computer-base:ci \
             -t kgrc-computer:ci infra/sandboxes/computer
+          # The CLI must run with no network, as it will in an isolated computer.
+          docker run --rm --network none --entrypoint claude kgrc-computer:ci --version
 
       - name: Log in to GHCR
         if: env.PUBLISH == 'true'
