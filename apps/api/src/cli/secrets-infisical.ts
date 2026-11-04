@@ -1,10 +1,12 @@
 import {
   ComposedSecretStore,
+  contentKeyProviderFromEnv,
   EncryptedSecretStore,
   InfisicalSecretStore,
   migrateSecrets,
   PostgresRealtimeFanout,
   secretStoreOptionsFromEnv,
+  unwrapEnvFromKeyManager,
 } from "@rakazo/adapters";
 import { resolveEncryptionKey } from "@rakazo/core";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
@@ -12,6 +14,7 @@ import { createDb, runAsSystem } from "@rakazo/db";
 import { createSecretMigrationRepository } from "../secret-migration.js";
 
 loadRootEnv();
+await unwrapEnvFromKeyManager();
 
 const args = process.argv.slice(2);
 if (args.some((arg) => !["--dry-run", "--reverse"].includes(arg)))
@@ -19,7 +22,9 @@ if (args.some((arg) => !["--dry-run", "--reverse"].includes(arg)))
 const options = secretStoreOptionsFromEnv({ ...process.env, SECRET_STORE: "infisical" });
 if (!options || !process.env.DATABASE_URL)
   throw new Error("Secret storage and database configuration are required");
-const { prisma, pool } = createDb(process.env.DATABASE_URL);
+const { prisma, pool } = createDb(process.env.DATABASE_URL, {
+  keyProvider: contentKeyProviderFromEnv(),
+});
 const encryptionKey = resolveEncryptionKey(process.env);
 const realtime = new PostgresRealtimeFanout({
   connectionString: process.env.REALTIME_DATABASE_URL ?? process.env.DATABASE_URL,

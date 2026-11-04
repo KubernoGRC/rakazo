@@ -1,4 +1,5 @@
 import type { BackgroundJob, BackgroundJobHandlers } from "@rakazo/adapter-kit";
+import { messagingDeliverJob, routineWakeupJob } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import { createPool, currentDbContext, runAsTenant } from "@rakazo/db";
 import { Pool } from "pg";
@@ -38,6 +39,7 @@ function handlers(overrides: Partial<BackgroundJobHandlers> = {}): BackgroundJob
     "messaging.deliver": vi.fn(async () => undefined),
     "messaging.credential-cleanup": vi.fn(async () => undefined),
     "cloud_agent.poll": vi.fn(async () => undefined),
+    "purchase.poll": vi.fn(async () => undefined),
     "push.receipt": vi.fn(async () => undefined),
     ...overrides,
   };
@@ -153,6 +155,66 @@ describePostgres("Graphile background jobs (PostgreSQL contract)", () => {
       await host.stop();
       await publisher.close();
       await legacy.close();
+    }
+  });
+
+  it("starts due maintenance jobs while others are still running", async () => {
+    const publisher = new GraphileJobPublisher(testPool());
+    const host = createReservedGraphileJobWorkerHost(testPool(), { pollInterval: 25 });
+    const release = deferred();
+    const sleeping: string[] = [];
+    const woken: string[] = [];
+    try {
+      await host.start(
+        handlers({
+          "computer.sleep": async ({ computerId }) => {
+            sleeping.push(computerId);
+            await release.promise;
+          },
+          "routine.wakeup": async ({ routineId }) => {
+            woken.push(routineId);
+          },
+        }),
+      );
+      for (const computerId of ["computer-a", "computer-b", "computer-c"]) {
+        await publisher.enqueue({ name: "computer.sleep", payload: { computerId } });
+      }
+      await waitFor(() => expect(sleeping).toHaveLength(3));
+      await publisher.enqueue(routineWakeupJob("routine-due", new Date()));
+      await waitFor(() => expect(woken).toEqual(["routine-due"]));
+    } finally {
+      release.resolve();
+      await host.stop();
+      await publisher.close();
+    }
+  });
+
+  it("runs outgoing message drains in parallel", async () => {
+    const publisher = new GraphileJobPublisher(testPool());
+    const host = createReservedGraphileJobWorkerHost(testPool(), { pollInterval: 25 });
+    const release = deferred();
+    const draining: string[] = [];
+    try {
+      await host.start(
+        handlers({
+          "messaging.deliver": async ({ runId }) => {
+            draining.push(runId ?? "drain");
+            await release.promise;
+          },
+        }),
+      );
+      await publisher.enqueue(messagingDeliverJob("run-first"));
+      await waitFor(() => expect(draining).toEqual(["run-first"]));
+      // The second drain starts while the first is still sending: one slow
+      // conversation must not hold back the rest of the outbox. Order inside a
+      // conversation is kept by the drain's claim, not by a shared queue.
+      await publisher.enqueue(messagingDeliverJob("run-second"));
+      await waitFor(() => expect(draining).toEqual(["run-first", "run-second"]));
+      release.resolve();
+    } finally {
+      release.resolve();
+      await host.stop();
+      await publisher.close();
     }
   });
 

@@ -29,15 +29,18 @@ function uiLocaleCandidate(raw: string | null | undefined): string {
   ) {
     return "zh-TW";
   }
-  if (
-    normalized === "zh" ||
-    normalized === "zh-cn" ||
-    normalized === "zh-hans" ||
-    normalized === "zh-sg" ||
-    normalized.startsWith("zh-hans-") ||
-    normalized.startsWith("zh-cn-")
-  ) {
-    return "zh-CN";
-  }
+  if (language === "zh") return "zh-CN";
   return normalized.split("-")[0] ?? "";
+}
+
+/** Repair a language write overtaken by a local choice while the request was in flight. */
+export async function reportUiLocale<L extends string>(
+  current: () => L,
+  write: (locale: L) => Promise<unknown>,
+): Promise<void> {
+  let locale: L;
+  do {
+    locale = current();
+    await write(locale);
+  } while (current() !== locale);
 }

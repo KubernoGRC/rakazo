@@ -76,6 +76,20 @@ printf 'key = sk-or-v1-%s\n' "$(openssl rand -hex 32)" > provider.txt
 git add provider.txt && git commit -qm "provider"
 expect fail "OpenRouter key" "$(git rev-parse HEAD)" "gitleaks found credentials in a commit"
 
+# Upstream's own file carrying a deployment-shaped value passes unchanged, and
+# fails once the fork changes it.
+git switch -q -c upstream "$base"
+arn="arn:aws:kms:eu-central-1:$(printf '%012d' 111122223333):key/example"
+printf 'const KEY = "%s";\n' "$arn" > fixture.ts
+git add fixture.ts && git commit -qm "upstream fixture"
+git switch -q -c on-upstream upstream
+echo fork > fork.txt && git add fork.txt && git commit -qm "fork change"
+export UPSTREAM_REF=upstream
+expect pass "upstream's unchanged file" "$(git rev-parse HEAD)"
+echo "// fork edit" >> fixture.ts && git add fixture.ts && git commit -qm "fork edits fixture"
+expect fail "fork-changed upstream file" "$(git rev-parse HEAD)" "Commit $(git rev-parse HEAD) tracks"
+unset UPSTREAM_REF
+
 # A credential in pull request text is caught.
 git switch -q main
 printf 'title\ntoken %s\n' "$aws_id" > pr.txt

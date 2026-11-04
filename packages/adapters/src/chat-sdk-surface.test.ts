@@ -574,8 +574,7 @@ describe("ChatSdkMessagingSurface webhook waitUntil drain", () => {
       "mock",
       webhookRequest({ threadId: "mock:Duser:1", id: "m-slow", text: "hello" }),
     );
-    // If the surface returned before draining waitUntil, sinkDone would still be false
-    // when the promise settles... we assert after await that sink completed first.
+    // The response must wait for the waitUntil sink to finish.
     const response = await responsePromise;
     sawSinkPendingAtResponse = !sinkDone;
     expect(sawSinkPendingAtResponse).toBe(false);
@@ -691,6 +690,17 @@ describe("ChatSdkMessagingSurface outbound", () => {
     await surface.sendToThread({ threadId, body }, context);
 
     expect(adapter.postMessage).toHaveBeenCalledExactlyOnceWith(threadId, { markdown: body });
+  });
+
+  it("posts Photon iMessage replies as Markdown under the adapter's own thread ids", async () => {
+    const { surface, adapter } = createSurface({ provider: "photon", adapterName: "imessage" });
+    const body = "**bold** and [link](https://example.test)";
+
+    await surface.sendToThread({ threadId: "photon:any;-;+15550001111", body }, context);
+
+    expect(adapter.postMessage).toHaveBeenCalledExactlyOnceWith("imessage:any;-;+15550001111", {
+      markdown: body,
+    });
   });
 
   it.each(["slack", "sendblue"])("keeps %s replies as strings", async (provider) => {

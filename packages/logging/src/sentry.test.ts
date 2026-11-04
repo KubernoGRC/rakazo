@@ -77,6 +77,21 @@ describe("sentry sink", () => {
     expect(JSON.stringify(events[0]?.exception)).not.toContain("ada@example.com");
   });
 
+  it("redacts user profile paths from reported errors", async () => {
+    const { events, transport } = recordingTransport();
+    const logger = createLogger({
+      service: "rakazo-api",
+      sinks: [createSentrySink("rakazo-api", { dsn: DSN }, transport)],
+    });
+    const error = new Error("cannot read /home/example-user/state.json");
+    error.stack =
+      "Error: cannot read /home/example-user/state.json\n    at run (/Users/example-user/app/index.js:1:1)";
+    logger.error("restore failed", error);
+    await logger.flush();
+
+    expect(JSON.stringify(events)).not.toContain("example-user");
+  });
+
   it("reports error logs with the exception chain, tags, and no log context", async () => {
     const { events, transport } = recordingTransport();
     const sink = createSentrySink(
@@ -260,5 +275,21 @@ describe("sentry sink", () => {
     // No synthetic stack: the collector titles and groups these by their message.
     expect(events.map((event) => event.exception)).toEqual([undefined, undefined]);
     expect(events[1]!.message).toBe("mail sync failed");
+  });
+
+  it("titles a failed request report by its method, route and status", async () => {
+    const { events, transport } = recordingTransport();
+    const logger = createLogger({
+      service: "rakazo-api",
+      sinks: [createSentrySink("rakazo-api", { dsn: DSN }, transport)],
+    });
+    logger.error("http.request.completed", {
+      "http.method": "POST",
+      "http.route": "/api/voice/speak",
+      "http.status": 502,
+    });
+    await logger.flush();
+
+    expect(events[0]?.message).toBe("http.request.completed POST /api/voice/speak 502");
   });
 });

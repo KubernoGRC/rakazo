@@ -36,7 +36,7 @@ const publishWorkflow = parse(readFileSync(publishWorkflowFile, "utf8")) as {
   };
 };
 
-const appServices = ["api", "worker", "web", "supervisor"] as const;
+const appServices = ["api", "worker", "web", "supervisor", "migrate"] as const;
 const FIRST_PARTY_IMAGE = /ghcr\.io\/elie222\/rakazo\/([a-z0-9][a-z0-9._-]*)/g;
 
 function firstPartyImageNames(value: unknown): string[] {
@@ -55,6 +55,7 @@ describe("the images compose file", () => {
       "api",
       "computer",
       "data-init",
+      "migrate",
       "postgres",
       "supervisor",
       "web",
@@ -126,6 +127,8 @@ describe("the images compose file", () => {
     for (const name of ["postgres", ...appServices]) {
       expect(compose.services[name]?.networks?.length).toBeGreaterThan(0);
     }
+    // Migrations only reach the database, never the internet.
+    expect(compose.services.migrate?.networks).toEqual(["data"]);
   });
 
   it("never builds from a checkout", () => {
@@ -168,8 +171,10 @@ describe("the images compose file", () => {
     }
   });
 
-  it("publishes the web UI on loopback only", () => {
-    expect(compose.services.web?.ports).toEqual(["127.0.0.1:${RAKAZO_WEB_PORT:-5173}:5173"]);
+  it("defaults the configurable web bind to loopback and keeps the API private", () => {
+    expect(compose.services.web?.ports).toEqual([
+      "${RAKAZO_WEB_BIND:-127.0.0.1}:${RAKAZO_WEB_PORT:-5173}:5173",
+    ]);
     expect(compose.services.api?.ports).toEqual(["127.0.0.1:${RAKAZO_API_PORT:-3100}:3100"]);
     for (const key of ["BETTER_AUTH_URL", "WEB_ORIGIN", "API_URL"]) {
       expect(compose.services.api?.environment?.[key]).toBe(`\${${key}:-http://127.0.0.1:5173}`);

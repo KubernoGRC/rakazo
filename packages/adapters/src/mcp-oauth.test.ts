@@ -1,8 +1,10 @@
+import { MCP_OAUTH_CLIENT_REQUIRED } from "@rakazo/contracts";
 import { getLogger } from "@rakazo/logging";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OAuthMaterial } from "./mcp-oauth.js";
 import {
   McpOAuthBroker,
+  McpOAuthClientRequiredError,
   McpReauthorizationRequiredError,
   oauthMaterialSecrets,
   StoredMcpOAuthProvider,
@@ -86,7 +88,7 @@ function chunkedBody(totalBytes: number, chunkBytes: number): ReadableStream<Uin
 }
 
 async function rejectedOAuthBegin(
-  register: () => Response | Promise<Response>,
+  register: (() => Response | Promise<Response>) | null,
   secret?: string,
 ): Promise<Error> {
   vi.stubGlobal(
@@ -115,13 +117,13 @@ async function rejectedOAuthBegin(
           issuer: "https://auth.example.test",
           authorization_endpoint: "https://auth.example.test/authorize",
           token_endpoint: "https://auth.example.test/token",
-          registration_endpoint: "https://auth.example.test/register",
+          ...(register ? { registration_endpoint: "https://auth.example.test/register" } : {}),
           response_types_supported: ["code"],
           grant_types_supported: ["authorization_code", "refresh_token"],
           code_challenge_methods_supported: ["S256"],
         });
       }
-      if (url === "https://auth.example.test/register" && request.method === "POST") {
+      if (register && url === "https://auth.example.test/register" && request.method === "POST") {
         return register();
       }
       throw new Error(`Unexpected request: ${request.method} ${url}`);
@@ -823,6 +825,46 @@ describe("MCP OAuth", () => {
     expect(server.fetch).not.toHaveBeenCalled();
   });
 
+  it("renews a token the server rejected inside its lifetime", async () => {
+    const server = rotatingAuthServer();
+    const shared = sharedCredentials(expiringMaterial(Date.now() - 10 * 60 * 1000));
+    const { provider, broker } = await shared.startProcess(server.fetch);
+
+    await provider.replaceRejectedToken();
+
+    expect(await provider.tokens()).toMatchObject({ access_token: "access-1" });
+    expect((await shared.stored()).oauth?.tokens).toMatchObject({ refresh_token: "refresh-1" });
+    expect(await broker.statusFor(shared.server, shared.context)).toBe("connected");
+  });
+
+  it("asks for a reconnect when a rejected token cannot be renewed", async () => {
+    const server = rotatingAuthServer();
+    server.revoke();
+    const shared = sharedCredentials(expiringMaterial(Date.now() - 10 * 60 * 1000));
+    const { provider, broker } = await shared.startProcess(server.fetch);
+
+    await expect(provider.replaceRejectedToken()).rejects.toBeInstanceOf(
+      McpReauthorizationRequiredError,
+    );
+
+    expect((await shared.stored()).oauth?.tokens).toBeUndefined();
+    expect(await broker.statusFor(shared.server, shared.context)).toBe("reconnect");
+  });
+
+  it("asks for a reconnect when a rejected token has no refresh token", async () => {
+    const material = expiringMaterial(Date.now());
+    delete (material.oauth.tokens as { refresh_token?: string }).refresh_token;
+    const shared = sharedCredentials(material);
+    const { provider, broker } = await shared.startProcess(vi.fn());
+
+    await expect(provider.replaceRejectedToken()).rejects.toBeInstanceOf(
+      McpReauthorizationRequiredError,
+    );
+
+    expect((await shared.stored()).oauth?.tokens).toBeUndefined();
+    expect(await broker.statusFor(shared.server, shared.context)).toBe("reconnect");
+  });
+
   it("rejects unsafe browser authorization URLs", async () => {
     const onAuthorization = vi.fn();
     const provider = new StoredMcpOAuthProvider(
@@ -1408,6 +1450,13 @@ describe("MCP OAuth", () => {
 
     expect(tracked.bytesRead()).toBe(0);
     expect(error.message).toBe("Could not start MCP OAuth");
+  });
+
+  it("asks for a pre-registered client when the server cannot register one", async () => {
+    const error = await rejectedOAuthBegin(null);
+
+    expect(error).toBeInstanceOf(McpOAuthClientRequiredError);
+    expect(error).toMatchObject({ code: MCP_OAUTH_CLIENT_REQUIRED });
   });
 
   describe("with a pre-registered client", () => {

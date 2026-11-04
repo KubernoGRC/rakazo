@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { InspectedComputer } from "./computer-hardening.js";
 import {
   computerMatchesCreateSpec,
   computerSpecMismatches,
   DOCKER_DEFAULT_MASKED_PATHS,
-  type InspectedComputer,
   SPEC_FIELDS,
   UNCHECKED_CREATE_FIELDS,
 } from "./computer-hardening.js";

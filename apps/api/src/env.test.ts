@@ -7,6 +7,21 @@ const base = {
 };
 
 describe("loadEnv", () => {
+  it("defaults the attachment count to four and accepts configured bounds", () => {
+    expect(loadEnv(base).maxAttachmentsPerMessage).toBe(4);
+    expect(loadEnv({ ...base, MAX_ATTACHMENTS_PER_MESSAGE: " " }).maxAttachmentsPerMessage).toBe(4);
+    for (const count of [1, 8, 100]) {
+      expect(
+        loadEnv({ ...base, MAX_ATTACHMENTS_PER_MESSAGE: ` ${count} ` }).maxAttachmentsPerMessage,
+      ).toBe(count);
+    }
+  });
+  it.each(["0", "1e2", "101"])("rejects invalid attachment count %s", (value) => {
+    expect(() => loadEnv({ ...base, MAX_ATTACHMENTS_PER_MESSAGE: value })).toThrow(
+      "MAX_ATTACHMENTS_PER_MESSAGE",
+    );
+  });
+
   it("keeps calls off unless explicitly enabled", () => {
     expect(loadEnv(base).phoneCallsEnabled).toBe(false);
     for (const value of ["false", "1", ""]) {
@@ -30,17 +45,33 @@ describe("loadEnv", () => {
     );
   });
 
-  it.each(["0", "-1", "1.5", "NaN", "Infinity", "1e3", "0x10", "9007199254740991"])(
-    "rejects invalid upload limit %s",
-    (value) => {
-      expect(() => loadEnv({ ...base, MAX_UPLOAD_SIZE_MB: value })).toThrow("MAX_UPLOAD_SIZE_MB");
-    },
-  );
+  it.each(["0", "1e3", "9007199254740991"])("rejects invalid upload limit %s", (value) => {
+    expect(() => loadEnv({ ...base, MAX_UPLOAD_SIZE_MB: value })).toThrow("MAX_UPLOAD_SIZE_MB");
+  });
   it("keeps the ticket board off unless explicitly enabled", () => {
     expect(loadEnv(base).ticketBoardEnabled).toBe(false);
     for (const value of ["false", "1", ""])
       expect(loadEnv({ ...base, TICKET_BOARD_ENABLED: value }).ticketBoardEnabled).toBe(false);
     expect(loadEnv({ ...base, TICKET_BOARD_ENABLED: "true" }).ticketBoardEnabled).toBe(true);
+  });
+  it("loads operator menu links and refuses to start on a bad value", () => {
+    expect(loadEnv(base).navLinks).toEqual([]);
+    expect(
+      loadEnv({
+        ...base,
+        RAKAZO_NAV_LINKS: '[{"id":"clients","label":"Clients","path":"/ext/clients/"}]',
+      }).navLinks,
+    ).toEqual([{ id: "clients", label: "Clients", path: "/ext/clients/", trusted: false }]);
+    expect(() =>
+      loadEnv({ ...base, RAKAZO_NAV_LINKS: '[{"id":"x","label":"X","path":"/api/me"}]' }),
+    ).toThrow("RAKAZO_NAV_LINKS");
+  });
+  it("keeps Crisp chat off unless a valid website ID is set", () => {
+    expect(loadEnv(base).crispWebsiteId).toBeNull();
+    expect(
+      loadEnv({ ...base, CRISP_WEBSITE_ID: "c2c27ea6-4fdb-4350-a9fc-4b5b052dc5ec" }).crispWebsiteId,
+    ).toBe("c2c27ea6-4fdb-4350-a9fc-4b5b052dc5ec");
+    expect(() => loadEnv({ ...base, CRISP_WEBSITE_ID: "nope" })).toThrow("CRISP_WEBSITE_ID");
   });
   it("defaults the product path to Pi, Docker, and Graphile Worker", () => {
     const env = loadEnv(base);
@@ -119,6 +150,24 @@ describe("loadEnv", () => {
       daytonaApiUrl: "https://daytona.test/api",
       daytonaTarget: "test-target",
     });
+  });
+
+  it("loads Novita credentials and the shared sandbox template", () => {
+    expect(
+      loadEnv({
+        ...base,
+        SANDBOX_PROVIDER: "novita",
+        NOVITA_API_KEY: "test-novita-key",
+        SANDBOX_TEMPLATE: "custom-desktop",
+      }),
+    ).toMatchObject({
+      sandboxProvider: "novita",
+      novitaApiKey: "test-novita-key",
+      sandboxTemplate: "custom-desktop",
+    });
+    expect(
+      loadEnv({ ...base, SANDBOX_PROVIDER: "novita", E2B_API_KEY: "test-e2b-key" }).sandboxProvider,
+    ).toBe("none");
   });
 
   it("loads provider-specific Boat configuration", () => {
@@ -458,5 +507,74 @@ describe("OIDC environment", () => {
         /requires ACCESS_IDENTITY_ENABLED=true/,
       );
     });
+  });
+});
+
+describe("web origin", () => {
+  it("drops trailing slashes so links never double up", () => {
+    expect(loadEnv({ ...base, WEB_ORIGIN: "https://app.example.com/" }).webOrigin).toBe(
+      "https://app.example.com",
+    );
+    expect(loadEnv({ ...base, WEB_ORIGIN: "https://app.example.com///" }).webOrigin).toBe(
+      "https://app.example.com",
+    );
+    expect(loadEnv({ ...base, WEB_ORIGIN: " https://app.example.com " }).webOrigin).toBe(
+      "https://app.example.com",
+    );
+  });
+
+  it("keeps the local default when none is set", () => {
+    expect(loadEnv(base).webOrigin).toBe("http://127.0.0.1:5173");
+    expect(loadEnv(base).authUrl).toBe("http://127.0.0.1:5173");
+  });
+
+  it.each(["", " \t "])("uses the local default for blank WEB_ORIGIN %j", (value) => {
+    const env = loadEnv({ ...base, WEB_ORIGIN: value });
+    expect(env.webOrigin).toBe("http://127.0.0.1:5173");
+    expect(env.authUrl).toBe("http://127.0.0.1:5173");
+  });
+
+  it.each(["", " \t "])("uses webOrigin for blank BETTER_AUTH_URL %j", (value) => {
+    const env = loadEnv({
+      ...base,
+      WEB_ORIGIN: "https://app.example.com/",
+      BETTER_AUTH_URL: value,
+    });
+    expect(env.authUrl).toBe("https://app.example.com");
+  });
+
+  it("normalises BETTER_AUTH_URL the same way and keeps a path", () => {
+    const env = loadEnv({
+      ...base,
+      WEB_ORIGIN: "https://app.example.com/",
+      BETTER_AUTH_URL: "https://auth.example.com/base/",
+    });
+    expect(env.authUrl).toBe("https://auth.example.com/base");
+    expect(env.webOrigin).toBe("https://app.example.com");
+  });
+
+  it("refuses something that is not an absolute URL", () => {
+    expect(() => loadEnv({ ...base, WEB_ORIGIN: "app.example.com" })).toThrow(
+      "WEB_ORIGIN must be an absolute http(s) URL",
+    );
+  });
+
+  it("names BETTER_AUTH_URL when it is invalid", () => {
+    expect(() => loadEnv({ ...base, BETTER_AUTH_URL: "app.example.com" })).toThrow(
+      "BETTER_AUTH_URL must be an absolute http(s) URL",
+    );
+  });
+
+  it.each(["WEB_ORIGIN", "BETTER_AUTH_URL"])("refuses non-HTTP URLs for %s", (name) => {
+    expect(() => loadEnv({ ...base, [name]: "app.example.com:5173" })).toThrow(
+      `${name} must be an absolute http(s) URL`,
+    );
+  });
+
+  it.each(["WEB_ORIGIN", "BETTER_AUTH_URL"])("does not expose invalid %s values", (name) => {
+    const value = "postgres://user:password@db.example.test/database";
+    const load = () => loadEnv({ ...base, [name]: value });
+    expect(load).toThrow(`${name} must be an absolute http(s) URL`);
+    expect(load).not.toThrow(value);
   });
 });

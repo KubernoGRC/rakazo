@@ -37,12 +37,14 @@ import {
 import type { ChatMarkdownProps } from "./markdown";
 import {
   inlineMarkdownImageSrc,
+  isProseFence,
   LinkFaviconsContext,
   LinkFaviconsPausedContext,
   linkFaviconOrigin,
   linkifyExplicitUrls,
   linkLabel,
-  markdownLinkRequiresConfirmation,
+  markdownLinkNeedsPrompt,
+  markdownLinkSite,
   markdownMentionId,
   markRemoteImageLoaded,
   plainTextLinkParts,
@@ -53,7 +55,11 @@ import {
   useLinkFavicon,
 } from "./markdown";
 
-import { useMarkdownLinkAppOrigin, useMarkdownLinkCopy } from "./markdown-link-prompt";
+import {
+  useMarkdownLinkAppOrigin,
+  useMarkdownLinkCopy,
+  useMarkdownLinkTrust,
+} from "./markdown-link-prompt";
 import { isMermaidFence } from "./mermaid";
 
 function keepMarkdownLinkToken(_url: string) {
@@ -216,11 +222,15 @@ function markdownStyles(palette: ColorTokens) {
       borderBottomColor: palette.border,
     },
     fence_token: codeText,
+    // Prose in a fence reads in the body font, not the monospaced one.
+    fence_prose: {
+      color: palette.foreground,
+      ...typeScale.body,
+    },
     fence_language_label: {
       color: palette.foreground,
       fontFamily: MONO_FONT,
     },
-    // Quotes read as secondary text behind a faint bar.
     blockquote: {
       backgroundColor: "transparent",
       color: palette.mutedForeground,
@@ -231,7 +241,6 @@ function markdownStyles(palette: ColorTokens) {
     bullet_list_icon: {
       color: palette.faintForeground,
     },
-    // Tables are rules only: secondary-text cells under a primary-text header.
     table: {
       borderColor: palette.input,
       borderWidth: StyleSheet.hairlineWidth,
@@ -338,20 +347,33 @@ const OpenLinkContext = createContext<(url: string) => void>(() => undefined);
 function useNativeLinkConfirm() {
   const appOrigin = useMarkdownLinkAppOrigin();
   const copy = useMarkdownLinkCopy();
+  const { sites, trust } = useMarkdownLinkTrust();
   return useCallback(
     (raw: string) => {
       const url = sanitizeMarkdownUrl(raw);
       if (!url) return;
-      if (!markdownLinkRequiresConfirmation(url, appOrigin)) {
+      if (!markdownLinkNeedsPrompt(url, appOrigin, sites)) {
         void openSafeLink(url);
         return;
       }
+      const site = trust ? markdownLinkSite(url) : undefined;
       // Keep the actual host visible even when userinfo or the path is very long.
       Alert.alert(
         copy.title,
         `${new URL(url).host}\n\n${url}`,
         [
           { text: copy.cancel, style: "cancel" },
+          ...(trust && site
+            ? [
+                {
+                  text: copy.alwaysOpen(site),
+                  onPress: () => {
+                    void openSafeLink(url);
+                    trust(url);
+                  },
+                },
+              ]
+            : []),
           {
             text: copy.open,
             onPress: () => {
@@ -362,7 +384,7 @@ function useNativeLinkConfirm() {
         { cancelable: true },
       );
     },
-    [appOrigin, copy],
+    [appOrigin, copy, sites, trust],
   );
 }
 
@@ -850,11 +872,7 @@ function CodeFence({
   const theme = colorScheme === "dark" ? themes.oneDark : themes.oneLight;
   return (
     <View style={styleMap._VIEW_SAFE_fence}>
-      {language ? (
-        <View style={styleMap._VIEW_SAFE_fence_header}>
-          <Text style={styleMap.fence_language_label}>{language}</Text>
-        </View>
-      ) : null}
+      <FenceHeader language={language} styleMap={styleMap} />
       <CodeScrollView code={code}>
         <Highlight theme={theme} code={code} language={language || "text"}>
           {({ tokens, getTokenProps }) => (
@@ -895,6 +913,59 @@ function CodeFence({
           )}
         </Highlight>
       </CodeScrollView>
+    </View>
+  );
+}
+
+/** A fence's language label, above its code. */
+function FenceHeader({ language, styleMap }: { language: string; styleMap: MarkdownStyleMap }) {
+  if (!language) return null;
+  return (
+    <View style={styleMap._VIEW_SAFE_fence_header}>
+      <Text style={styleMap.fence_language_label}>{language}</Text>
+    </View>
+  );
+}
+
+/**
+ * A fence marked as plain text. Its lines wrap in the body font instead of keeping their shape
+ * and scrolling sideways.
+ */
+function ProseFence({
+  code,
+  language,
+  styleMap,
+}: {
+  code: string;
+  language: string;
+  styleMap: MarkdownStyleMap;
+}) {
+  const CopyButton = useContext(CodeCopyButtonContext);
+  const prose = (
+    <View style={[styleMap._VIEW_SAFE_fence_code, layout.proseCode]}>
+      {code.split("\n").map((line, index) => (
+        // An empty line keeps its height through a space, as a blank code line does. Each line
+        // aligns by its own direction, as a paragraph does.
+        <Text
+          key={index}
+          style={[styleMap.fence_prose, contraryDirection(line) && layout.farSideText]}
+        >
+          {line || " "}
+        </Text>
+      ))}
+    </View>
+  );
+  return (
+    <View style={styleMap._VIEW_SAFE_fence}>
+      <FenceHeader language={language} styleMap={styleMap} />
+      {CopyButton && /\S/.test(code) ? (
+        <View style={layout.codeRow}>
+          {prose}
+          <CopyButton code={code} />
+        </View>
+      ) : (
+        prose
+      )}
     </View>
   );
 }
@@ -995,11 +1066,14 @@ const renderRules: RenderRules = {
   fence: (node, _children, _parents, styleMap, _onCopyCode, colorScheme) => {
     const info = typeof node.sourceInfo === "string" ? node.sourceInfo : "";
     const source = node.content.replace(/\n$/, "");
-    const codeBlock = (
+    const language = info.trim().split(/\s+/)[0] ?? "";
+    const codeBlock = isProseFence(language) ? (
+      <ProseFence key={node.key} code={source} language={language} styleMap={styleMap} />
+    ) : (
       <CodeFence
         key={node.key}
         code={source}
-        language={info.trim().split(/\s+/)[0] ?? ""}
+        language={language}
         colorScheme={colorScheme === "dark" ? "dark" : "light"}
         styleMap={styleMap}
       />
@@ -1458,6 +1532,12 @@ const layout = StyleSheet.create({
   codeRow: {
     flexDirection: "row",
     alignItems: "flex-start",
+  },
+  // A prose fence wraps, so its text takes the width the copy control leaves it.
+  proseCode: {
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
   codeFrame: {
     overflow: "hidden",

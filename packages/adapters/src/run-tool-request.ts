@@ -1,8 +1,9 @@
 import type { ConnectorCall, ConnectorTool } from "@rakazo/adapter-kit";
+import { BOT_INSTRUCTIONS_MAX_LENGTH } from "@rakazo/contracts";
 import { redactSecrets } from "@rakazo/core";
-import { reserveInstructionProposal, validateInstructionProposal } from "@rakazo/db";
 import { prepareAgentConnectionResponse } from "./agent-connections.js";
 import type { FleetCardSummary } from "./approval-ask.js";
+import type { TerminatingToolResult } from "./approval-effect.js";
 import {
   approvalReplayPathError,
   approvalReplayResourceError,
@@ -20,7 +21,14 @@ import { validCloudAgentArgs } from "./cloud-agent-tools.js";
 import { sanitizeConnectorError } from "./connector-safety.js";
 import { isFleetApprovalTool, prepareFleetRequest } from "./fleet-tools.js";
 import { assertConnectorToolArgs, CATALOG_EXECUTE } from "./lazy-tool-catalog.js";
+import { paidRequestEffect, restorePaidRequest } from "./paid-request.js";
 import type { RunContext } from "./run-context.js";
+import {
+  isRunTainted,
+  neverAsks,
+  OWN_INSTRUCTIONS_BASELINE_UNKNOWN_ERROR,
+  refuseOwnerSettingsChange,
+} from "./run-context.js";
 import {
   approvalReplayEffectToolName,
   CATALOG_APPROVAL_TOOL,
@@ -28,6 +36,7 @@ import {
 } from "./run-effects.js";
 import { fleetPrepareDeps } from "./run-model.js";
 import { BUILTIN_AGENT_TOOL_NAMES, FLEET_WRITE_TOOL_NAMES_SET } from "./run-tool-selection.js";
+import { USER_COMPUTER_TOOLS } from "./run-tools-user-computer.js";
 import { argumentGiven } from "./update-bot-patch.js";
 
 /** A tool call resolved to the tool it runs and the exact request an approval covers. */
@@ -46,9 +55,14 @@ export interface ToolRequest {
   approvedEffectKey: string | undefined;
   replayEffectToolName: string;
   fleetSummary: FleetCardSummary | undefined;
+  /** Gated like a consequential action, even when the tool alone is not. */
+  heldForApproval: boolean;
 }
 
 type ToolError = { error: string };
+
+/** A prepare-step refusal: a plain error, or a result that ends the turn on a repeat. */
+type PrepareRefusal = ToolError | TerminatingToolResult;
 
 /**
  * Resolve catalog and bound connector routes, and line the call up with the next approved
@@ -88,7 +102,7 @@ export async function resolveToolRequest(
       error: "Invalid cloud agent arguments. Raw environment variables are not supported.",
     };
   }
-  let effectRequest: unknown = args;
+  let effectRequest: unknown = name === "paid_request" ? paidRequestEffect(args) : args;
   if (connectorCall.route && deps.connector?.resolveCall) {
     try {
       const resolved = await deps.connector.resolveCall(connectorCall, context);
@@ -217,7 +231,14 @@ export async function resolveToolRequest(
     } else {
       // Catalog wrappers keep resolveCall's parsed args so Zod stripping/coercion
       // still matches the first-approval effect key and execute payload.
+      const live = args;
       args = approvedReplayArgs(approvedRequest, args, CATALOG_APPROVAL_TOOL);
+      if (name === "paid_request") {
+        const restored = restorePaidRequest(args, live);
+        if ("error" in restored && typeof restored.error === "string")
+          return { error: restored.error };
+        args = restored;
+      }
     }
     // Bound / shrink-direct approvals may skip catalog parse — reject before execute
     // if they no longer match the live schema.
@@ -247,6 +268,7 @@ export async function resolveToolRequest(
     approvedEffectKey,
     replayEffectToolName,
     fleetSummary: undefined,
+    heldForApproval: false,
   };
 }
 
@@ -257,10 +279,17 @@ export async function resolveToolRequest(
 export async function prepareToolRequest(
   ctx: RunContext,
   request: ToolRequest,
-): Promise<ToolError | undefined> {
-  const { deps, run, runId, bot } = ctx;
+): Promise<PrepareRefusal | undefined> {
+  const { deps, run, bot } = ctx;
   const { name, executionId, nextApprovedTool } = request;
   let { args } = request;
+  // Before the gate, so a run that may never reach the user's computer shows no approval card.
+  if (USER_COMPUTER_TOOLS.has(name)) {
+    if (!ctx.source.userComputerOwner || !deps.userDevices)
+      return { error: "The user's computer is not available in this run." };
+    if (isSubagentToolExecution(executionId))
+      return { error: "Helpers cannot use the user's computer." };
+  }
   const fleetWrite =
     FLEET_WRITE_TOOL_NAMES_SET.has(name) ||
     name === "archive_bot" ||
@@ -276,44 +305,22 @@ export async function prepareToolRequest(
     if (!live?.fleetManagement) return { error: "This tool is disabled for this bot." };
     if (!ctx.source.ownerStartedRun)
       return { error: "Bot management tools need a run you started." };
-    if (fleetWrite && (await ctx.trust.receivedOutsideMessage()))
+    if (fleetWrite && !(await neverAsks(ctx)) && (await ctx.trust.receivedOutsideMessage()))
       return {
         error:
           "Changes to the bots you manage are blocked for the rest of this run because it received a channel or webhook message.",
       };
   }
-  if (name === "propose_instructions_update") {
-    try {
-      if (run.trigger === "follow_up" && !ctx.source.ownerStartedRun)
-        return {
-          error: "Instruction updates are blocked for externally triggered runs.",
-        };
-      if (!nextApprovedTool) validateInstructionProposal(args, run.trigger);
-      else
-        validateInstructionProposal(
-          { instructions: args.instructions, reason: args.reason },
-          run.trigger,
-        );
-      if (
-        redactSecrets(String(args.instructions), ctx.secrets) !== args.instructions ||
-        redactSecrets(String(args.reason), ctx.secrets) !== args.reason
-      )
-        return { error: "Instruction proposals cannot contain credentials." };
-      const instructionProposalBot = await reserveInstructionProposal(deps.prisma, bot.id, runId);
-      if (!nextApprovedTool) {
-        args = { ...args, previousInstructions: instructionProposalBot.instructions };
-      }
-    } catch (error) {
-      return {
-        error: error instanceof Error ? error.message : "Invalid instruction proposal.",
-      };
-    }
+  if (name === "update_bot" && !argumentGiven(args.bot_id)) {
+    const refused = await prepareOwnBotUpdate(ctx, request);
+    if (refused) return refused;
+    args = request.args;
   }
   if (isFleetApprovalTool(name) && nextApprovedTool !== name) {
     // Resolve names, members, model and schedule now; an approved replay runs the stored
     // request above and never resolves them again.
     const prepared = await prepareFleetRequest(
-      fleetPrepareDeps(deps, run),
+      await fleetPrepareDeps(deps, run),
       ctx.fleetRun,
       name,
       args,
@@ -341,11 +348,88 @@ export async function prepareToolRequest(
     }
   }
   request.args = args;
-  if (
-    name === "propose_instructions_update" ||
-    name === "respond_agent_connection" ||
-    isFleetApprovalTool(name)
-  )
+  if (name === "respond_agent_connection" || name === "update_bot" || isFleetApprovalTool(name))
     request.effectRequest = args;
+  return undefined;
+}
+
+/** Settings that change what this bot runs on or how it speaks; only the owner's chat sets them. */
+const OWNER_SETTINGS = ["model", "thinkingLevel", "voice", "readAloud"];
+
+/** Everything a bot may change on itself. Credentials, tools and access stay in Settings. */
+const OWN_FIELDS = new Set([
+  ...OWNER_SETTINGS,
+  "name",
+  "description",
+  "instructions",
+  "color",
+  "artifact_id",
+  "use_attached_image",
+  "notifyOnFinish",
+  "notify_on_finish",
+  "bot_id",
+]);
+
+/**
+ * `update_bot` on this bot itself. Under Never ask instructions are written at once; otherwise
+ * they go through approval like any other action, and outside runs cannot change them.
+ */
+async function prepareOwnBotUpdate(
+  ctx: RunContext,
+  request: ToolRequest,
+): Promise<PrepareRefusal | undefined> {
+  const { run } = ctx;
+  const { executionId, nextApprovedTool } = request;
+  if (nextApprovedTool === "update_bot") {
+    // The approved replay runs the stored request.
+    request.heldForApproval = typeof request.args.previousInstructions === "string";
+    return undefined;
+  }
+  const { previousInstructions: _previous, reason: _reason, ...args } = request.args;
+  request.args = args;
+  const settingsOnly = Object.keys(args).filter(
+    (key) => !OWN_FIELDS.has(key) && argumentGiven(args[key]),
+  );
+  if (settingsOnly.length)
+    return { error: `Only the owner can change ${settingsOnly.join(", ")}, in Settings.` };
+  const unguarded = await neverAsks(ctx);
+  if (OWNER_SETTINGS.some((key) => argumentGiven(args[key]))) {
+    if (isSubagentToolExecution(executionId) || (!unguarded && !ctx.source.ownerStartedRun))
+      return {
+        error:
+          "Only the owner can change your model, thinking, voice or read-aloud, from their own chat.",
+      };
+    if (!unguarded && (await isRunTainted(ctx)))
+      return refuseOwnerSettingsChange(
+        ctx,
+        "Model, thinking, voice and read-aloud changes are blocked for the rest of this run because it read outside content.",
+      );
+  }
+  if (!argumentGiven(args.instructions)) return undefined;
+  if (isSubagentToolExecution(executionId)) return { error: "Helpers cannot set instructions." };
+  const instructions = String(args.instructions).trim();
+  if (instructions.length > BOT_INSTRUCTIONS_MAX_LENGTH)
+    return { error: `instructions must be at most ${BOT_INSTRUCTIONS_MAX_LENGTH} characters.` };
+  if (redactSecrets(instructions, ctx.secrets) !== instructions)
+    return { error: "Instructions cannot contain credentials." };
+  request.args = { ...args, instructions };
+  if (unguarded) return undefined;
+  if (!["created", "routine"].includes(run.trigger) && !ctx.source.ownerStartedRun)
+    return { error: "Instruction changes are blocked for runs someone else started." };
+  if (Object.keys(args).some((key) => key !== "instructions"))
+    return { error: "Change your instructions in their own update_bot call." };
+  // An older checkpoint predates the baseline; this attempt must not guess.
+  if (ctx.state.ownInstructionsBaseline === undefined)
+    return { error: OWN_INSTRUCTIONS_BASELINE_UNKNOWN_ERROR };
+  request.args = {
+    instructions,
+    reason: "Set in chat",
+    // The text the model worked from, not a fresh read: a change that landed since the
+    // attempt started conflicts at approval instead of being overwritten.
+    previousInstructions: ctx.state.ownInstructionsBaseline,
+    // Provenance the approved replay checks; requests stored before the baseline lack it.
+    previousInstructionsFromBaseline: true,
+  };
+  request.heldForApproval = true;
   return undefined;
 }

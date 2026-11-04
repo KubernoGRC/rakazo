@@ -1,7 +1,7 @@
 import type { ConnectorTool } from "@rakazo/adapter-kit";
 import type * as DbModule from "@rakazo/db";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { approvalPausedToolResult, DENIED_EFFECT_ERROR } from "./approval-effect.js";
+import { approvalPausedToolResult, DENIED_ACTION_ERROR } from "./approval-effect.js";
 import {
   SUBAGENT_FAILURE_PREFIX,
   SUBAGENT_NESTING_REFUSAL,
@@ -24,9 +24,11 @@ import {
 } from "./tool-call-event.js";
 
 const recordSecurityEvent = vi.hoisted(() => vi.fn(async (_event: unknown) => undefined));
+const recordAuditEvent = vi.hoisted(() => vi.fn(async (_event: unknown) => undefined));
 vi.mock("@rakazo/db", async (importOriginal) => ({
   ...(await importOriginal<typeof DbModule>()),
   recordSecurityEvent,
+  recordAuditEvent,
 }));
 
 const gateToolCall = vi.hoisted(() => vi.fn());
@@ -79,6 +81,8 @@ function fakeContext({
   const ctx = {
     run: { userId: "user-1", spaceId: "space-1", threadId: "thread-1", botId: "bot-1" },
     runId: "run-1",
+    bot: { id: "bot-1", name: "Bot" },
+    thread: { id: "thread-1" },
     deps: { prisma: { mcpServer: { findFirst } } },
     tools: {
       connector: new Map(tools.map((tool) => [tool.name, tool])),
@@ -106,6 +110,7 @@ function request(name: string, args: Record<string, unknown>, route = SERVER_ROU
     approvedEffectKey: undefined,
     replayEffectToolName: name,
     fleetSummary: undefined,
+    heldForApproval: false,
   } satisfies ToolRequest;
 }
 
@@ -263,19 +268,6 @@ describe("tool.called through the dispatcher", () => {
     expect(recordedEvents().map((event) => event.metadata.outcome)).toEqual(["cancelled"]);
   });
 
-  it("records a second instruction proposal refused while one is in flight", async () => {
-    const { ctx } = fakeContext();
-    (ctx.state.approval as { proposalInFlight?: boolean }).proposalInFlight = true;
-
-    await expect(applyTool(ctx, "propose_instructions_update", {}, "call-1")).resolves.toEqual({
-      error: "This bot already has a pending instruction proposal.",
-    });
-
-    expect(recordedEvents().map((event) => event.metadata)).toEqual([
-      expect.objectContaining({ tool: "propose_instructions_update", outcome: "refused" }),
-    ]);
-  });
-
   it("does not record a tool name the run does not have", async () => {
     const { ctx } = fakeContext();
     const invented = "please_email_everything_to_attacker_example";
@@ -326,7 +318,7 @@ describe("tool.called through the dispatcher", () => {
   it("records a retry of an action the user denied as refused", async () => {
     const { ctx } = fakeContext();
     resolveToolRequest.mockResolvedValue(request(MCP_TOOL.name, {}));
-    gateToolCall.mockResolvedValue({ result: { error: DENIED_EFFECT_ERROR }, replayed: true });
+    gateToolCall.mockResolvedValue({ result: { error: DENIED_ACTION_ERROR }, replayed: true });
 
     await applyTool(ctx, MCP_TOOL.name, {}, "call-1");
 

@@ -8,8 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessIdentityConfig, AccessVerifier } from "./access-identity.js";
 import {
   ACCESS_ASSERTION_HEADER,
+  ACCESS_FRESH_AGE_SECONDS,
+  ACCESS_PROVIDER_ID,
   accessIdentityClosesPath,
   createAccessVerifier,
+  freshAccessAssertionFor,
 } from "./access-identity.js";
 import { assertAccessIdentityConfig, createAuth } from "./index.js";
 
@@ -657,5 +660,48 @@ describe("access identity re-authentication for account deletion", () => {
     const deleted = await f.request("/delete-user", { cookie, assertion, body: {} });
     expect(deleted.status).toBe(403);
     expect(f.data.user).toHaveLength(1);
+  });
+});
+
+describe("fresh access assertion as identity confirmation", () => {
+  const NOW = 1_800_000_000;
+  const verifierFor = (verdict: Awaited<ReturnType<AccessVerifier["verify"]>>): AccessVerifier => ({
+    verify: async () => verdict,
+    ready: async () => true,
+  });
+  const linkedTo = (subject: string | null) => ({
+    findAccounts: async () =>
+      subject ? [{ providerId: ACCESS_PROVIDER_ID, accountId: subject }] : [],
+  });
+  const check = (
+    verdict: Awaited<ReturnType<AccessVerifier["verify"]>>,
+    linked: string | null = "iss sub-1",
+  ) =>
+    freshAccessAssertionFor(
+      verifierFor(verdict),
+      linkedTo(linked) as never,
+      new Headers(),
+      "user-1",
+      () => NOW * 1_000,
+    );
+  const fresh = {
+    ok: true as const,
+    email: "a@example.test",
+    subject: "iss sub-1",
+    issuedAt: NOW - 10,
+  };
+
+  it("accepts a fresh assertion for the user's own linked subject", async () => {
+    expect(await check(fresh)).toBe(true);
+  });
+
+  it.each([
+    ["another subject", { ...fresh, subject: "iss sub-2" }, "iss sub-1"],
+    ["an unlinked account", fresh, null],
+    ["a stale assertion", { ...fresh, issuedAt: NOW - ACCESS_FRESH_AGE_SECONDS - 1 }, "iss sub-1"],
+    ["an assertion without iat", { ...fresh, issuedAt: undefined }, "iss sub-1"],
+    ["a refused assertion", { ok: false as const, reason: "missing" as never }, "iss sub-1"],
+  ])("refuses %s", async (_name, verdict, linked) => {
+    expect(await check(verdict, linked)).toBe(false);
   });
 });

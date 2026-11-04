@@ -1,8 +1,21 @@
-import type { CSSProperties, MouseEvent, ReactNode } from "react";
-import { createContext, memo, useCallback, useContext, useRef, useState } from "react";
+import type { CSSProperties, MouseEvent, ReactNode, RefObject } from "react";
+import {
+  Component,
+  createContext,
+  Fragment,
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
 import type { HastNode } from "./table-utils";
 import "./markdown.web.css";
 import "./markdown-table.css";
@@ -22,11 +35,13 @@ import type { ChatMarkdownProps } from "./markdown";
 import {
   closeUnterminatedFence,
   inlineMarkdownImageSrc,
+  isProseFence,
   LinkFaviconsPausedContext,
   linkFaviconOrigin,
   linkLabel,
   markdownLinkDisplayParts,
-  markdownLinkRequiresConfirmation,
+  markdownLinkNeedsPrompt,
+  markdownLinkSite,
   markdownMentionId,
   markRemoteImageLoaded,
   plainTextLinkParts,
@@ -37,7 +52,7 @@ import {
   useLinkFavicon,
 } from "./markdown";
 import { useMarkdownCopy } from "./markdown-copy";
-import { useMarkdownLinkCopy } from "./markdown-link-prompt";
+import { useMarkdownLinkCopy, useMarkdownLinkTrust } from "./markdown-link-prompt";
 import { MarkdownTable, MarkdownTableSourceContext } from "./markdown-table";
 import { isMermaidFence, mermaidSvgImage } from "./mermaid";
 import { useMermaidSvg } from "./mermaid.web";
@@ -91,8 +106,9 @@ function CopyButton({ read, label }: { read: () => string; label: string }) {
 
 function CodeBlock({
   copyable,
+  prose,
   ...props
-}: React.ComponentPropsWithoutRef<"pre"> & { copyable: boolean }) {
+}: React.ComponentPropsWithoutRef<"pre"> & { copyable: boolean; prose: boolean }) {
   const copy = useMarkdownCopy();
   const preRef = useRef<HTMLPreElement>(null);
   // The parser ends a fence's code with a newline the author didn't write.
@@ -100,7 +116,7 @@ function CodeBlock({
 
   return (
     <div className="rk-chat-markdown-pre-wrap">
-      <pre {...props} ref={preRef} />
+      <pre {...props} className={prose ? "rk-chat-markdown-pre-prose" : undefined} ref={preRef} />
       {copyable ? <CopyButton read={readCode} label={copy.copyCode} /> : null}
     </div>
   );
@@ -117,14 +133,19 @@ function codeText(code: MarkdownHast | undefined) {
   return (code?.children ?? []).map((child) => child.value ?? "").join("");
 }
 
-/** The source of a ```mermaid fence, or undefined for any other block. */
-function mermaidFenceSource(node: MarkdownHast | undefined): string | undefined {
-  const code = codeElement(node);
-  const classNames = code?.properties?.className;
+/** The language a fence names, or "" when it names none. */
+function fenceLanguage(node: MarkdownHast | undefined): string {
+  const classNames = codeElement(node)?.properties?.className;
   const language = Array.isArray(classNames)
     ? classNames.find((name) => typeof name === "string" && name.startsWith("language-"))
     : undefined;
-  if (typeof language !== "string" || !isMermaidFence(language.slice("language-".length))) {
+  return typeof language === "string" ? language.slice("language-".length) : "";
+}
+
+/** The source of a ```mermaid fence, or undefined for any other block. */
+function mermaidFenceSource(node: MarkdownHast | undefined): string | undefined {
+  const code = codeElement(node);
+  if (!isMermaidFence(fenceLanguage(node))) {
     return undefined;
   }
   const source = codeText(code);
@@ -161,8 +182,12 @@ function MarkdownPre({
 }: React.ComponentPropsWithoutRef<"pre"> & { node?: MarkdownHast }) {
   const streamingSource = useContext(StreamingSourceContext);
   const diagram = mermaidFenceSource(node);
+  // Prose an author wrote in a fence reads as prose; code keeps the monospaced font.
+  const prose = diagram === undefined && isProseFence(fenceLanguage(node));
   // An empty fence has nothing to copy.
-  const codeBlock = <CodeBlock {...props} copyable={/\S/.test(codeText(codeElement(node)))} />;
+  const codeBlock = (
+    <CodeBlock {...props} copyable={/\S/.test(codeText(codeElement(node)))} prose={prose} />
+  );
   if (diagram === undefined) return codeBlock;
   // Parser offsets identify the fence inside quotes and lists too. Inspect the original source,
   // since a display-only closing fence must never trigger a diagram render.
@@ -198,10 +223,14 @@ function pageOrigin() {
   return origin && origin !== "null" ? origin : null;
 }
 
-function holdExternalLink(event: MouseEvent<HTMLAnchorElement>, request: (url: string) => void) {
+function holdExternalLink(
+  event: MouseEvent<HTMLAnchorElement>,
+  request: (url: string) => void,
+  trustedSites: readonly string[],
+) {
   if (event.button !== 0 && event.button !== 1) return;
   const destination = event.currentTarget.href;
-  if (!destination || !markdownLinkRequiresConfirmation(destination, pageOrigin())) return;
+  if (!destination || !markdownLinkNeedsPrompt(destination, pageOrigin(), trustedSites)) return;
   event.preventDefault();
   request(destination);
 }
@@ -218,8 +247,14 @@ function ExternalLinkUrl({ url }: { url: string }) {
   );
 }
 
+function openExternalLink(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 function ExternalLinkAlert({ url, onDismiss }: { url: string; onDismiss: () => void }) {
   const copy = useMarkdownLinkCopy();
+  const { trust } = useMarkdownLinkTrust();
+  const site = trust ? markdownLinkSite(url) : undefined;
   return (
     <AlertDialog
       open
@@ -236,9 +271,22 @@ function ExternalLinkAlert({ url, onDismiss }: { url: string; onDismiss: () => v
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>{copy.cancel}</AlertDialogCancel>
+          {trust && site ? (
+            <AlertDialogAction
+              variant="outline"
+              className="h-auto min-h-8 shrink whitespace-normal break-all"
+              onClick={() => {
+                openExternalLink(url);
+                trust(url);
+                onDismiss();
+              }}
+            >
+              {copy.alwaysOpen(site)}
+            </AlertDialogAction>
+          ) : null}
           <AlertDialogAction
             onClick={() => {
-              window.open(url, "_blank", "noopener,noreferrer");
+              openExternalLink(url);
               onDismiss();
             }}
           >
@@ -259,16 +307,44 @@ function useExternalLinkConfirm() {
   return { request, dialog };
 }
 
+/** Sends clicks on links drawn inside an element, such as a chart's SVG, through the prompt. */
+export function useLinkPrompt(container: RefObject<HTMLElement | null>): ReactNode {
+  const { request, dialog } = useExternalLinkConfirm();
+  const { sites } = useMarkdownLinkTrust();
+  useEffect(() => {
+    const element = container.current;
+    if (!element) return;
+    const hold = (event: globalThis.MouseEvent) => {
+      if (event.button !== 0 && event.button !== 1) return;
+      const anchor = event.target instanceof Element ? event.target.closest("a") : null;
+      const href = anchor && element.contains(anchor) ? anchor.getAttribute("href") : null;
+      if (!href) return;
+      event.preventDefault();
+      const url = new URL(href, document.baseURI).href;
+      if (markdownLinkNeedsPrompt(url, pageOrigin(), sites)) request(url);
+      else openExternalLink(url);
+    };
+    element.addEventListener("click", hold);
+    element.addEventListener("auxclick", hold);
+    return () => {
+      element.removeEventListener("click", hold);
+      element.removeEventListener("auxclick", hold);
+    };
+  }, [container, request, sites]);
+  return dialog;
+}
+
 function ConfirmableAnchor({ href, ...props }: React.ComponentPropsWithoutRef<"a">) {
   const request = useContext(ConfirmLinkContext);
+  const { sites } = useMarkdownLinkTrust();
   return (
     <a
       {...props}
       href={href}
       target="_blank"
       rel="noreferrer noopener"
-      onClick={(event) => holdExternalLink(event, request)}
-      onAuxClick={(event) => holdExternalLink(event, request)}
+      onClick={(event) => holdExternalLink(event, request, sites)}
+      onAuxClick={(event) => holdExternalLink(event, request, sites)}
     />
   );
 }
@@ -528,6 +604,29 @@ const components: Components = {
   },
 };
 
+type PlainTextState = { text: string; failed: boolean };
+
+/** The parser recurses, so a pathological message can exhaust the stack; show it as plain text. */
+class PlainTextOnFailure extends Component<{ text: string; children: ReactNode }, PlainTextState> {
+  override state = { text: this.props.text, failed: false };
+
+  static getDerivedStateFromProps(props: { text: string }, state: PlainTextState) {
+    return props.text === state.text ? null : { text: props.text, failed: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  override render() {
+    return this.state.failed ? (
+      <p className="whitespace-pre-wrap">{this.props.text}</p>
+    ) : (
+      this.props.children
+    );
+  }
+}
+
 export function LinkifiedText({ children }: { children: string }) {
   const { request, dialog } = useExternalLinkConfirm();
   return (
@@ -550,13 +649,94 @@ export function LinkifiedText({ children }: { children: string }) {
   );
 }
 
+const remarkPlugins = [remarkGfm];
+const rehypePlugins = [preserveSkippedTableText];
+
+// MarkdownImage decides what an image source may do, so it receives the source as written.
+function urlTransform(url: string, key: string) {
+  return key === "src" || markdownMentionId(url) ? url : (sanitizeMarkdownUrl(url, true) ?? "");
+}
+
+const MarkdownBlock = memo(function MarkdownBlock({
+  source,
+  streaming,
+}: {
+  source: string;
+  streaming: boolean;
+}) {
+  const parsed = streaming ? closeUnterminatedFence(source) : source;
+  return (
+    <StreamingSourceContext.Provider value={streaming ? source : undefined}>
+      <MarkdownTableSourceContext.Provider value={parsed}>
+        <ReactMarkdown
+          components={components}
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={rehypePlugins}
+          skipHtml
+          urlTransform={urlTransform}
+        >
+          {parsed}
+        </ReactMarkdown>
+      </MarkdownTableSourceContext.Provider>
+    </StreamingSourceContext.Provider>
+  );
+});
+
+type SourceBlock = { start: number; source: string };
+type SplitSource = { text: string; blocks: SourceBlock[] };
+
+const blockParser = unified().use(remarkParse).use(remarkGfm);
+// Link and footnote definitions apply to the whole document, so such text is never split.
+const definition = /\]:/;
+
+/**
+ * Top-level blocks of streamed text. Appended text can still change the last block, or join the
+ * one before it (a list continued after a blank line), so only those two are parsed again.
+ */
+function splitSource(text: string, previous: SplitSource | undefined): SplitSource {
+  const whole = { text, blocks: [{ start: 0, source: text }] };
+  if (definition.test(text)) return whole;
+  const kept = previous && text.startsWith(previous.text) ? previous.blocks.slice(0, -2) : [];
+  const from = previous?.blocks[kept.length]?.start ?? 0;
+  const tail = text.slice(from);
+  let starts: number[];
+  try {
+    starts = blockParser
+      .parse(tail)
+      .children.map((child, index) =>
+        index === 0 ? 0 : tail.lastIndexOf("\n", (child.position?.start.offset ?? 1) - 1) + 1,
+      );
+  } catch {
+    return whole;
+  }
+  if (starts.length === 0) starts = [0];
+  return {
+    text,
+    blocks: [
+      ...kept,
+      ...starts.map((start, index) => ({
+        start: from + start,
+        source: tail.slice(start, starts[index + 1] ?? tail.length),
+      })),
+    ],
+  };
+}
+
 export const ChatMarkdown = memo(function ChatMarkdown({
   children,
   streaming = false,
   renderMention,
 }: ChatMarkdownProps) {
   const { request, dialog } = useExternalLinkConfirm();
-  const source = streaming ? closeUnterminatedFence(children) : children;
+  // A streamed reply stays split once it finishes, so its blocks are not drawn again.
+  const [split, setSplit] = useState(streaming);
+  if (streaming && !split) setSplit(true);
+  const previousSplit = useRef<SplitSource | undefined>(undefined);
+  const blocks = useMemo(() => {
+    if (!split) return undefined;
+    previousSplit.current = splitSource(children, previousSplit.current);
+    return previousSplit.current.blocks;
+  }, [children, split]);
 
   return (
     <ConfirmLinkContext.Provider value={request}>
@@ -565,24 +745,22 @@ export const ChatMarkdown = memo(function ChatMarkdown({
           className={streaming ? "rk-chat-markdown rk-chat-markdown-streaming" : "rk-chat-markdown"}
         >
           <LinkFaviconsPausedContext.Provider value={streaming}>
-            <StreamingSourceContext.Provider value={streaming ? children : undefined}>
-              <MarkdownTableSourceContext.Provider value={source}>
-                <ReactMarkdown
-                  components={components}
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[preserveSkippedTableText]}
-                  skipHtml
-                  // MarkdownImage decides what an image source may do, so it receives the source as written.
-                  urlTransform={(url, key) =>
-                    key === "src" || markdownMentionId(url)
-                      ? url
-                      : (sanitizeMarkdownUrl(url, true) ?? "")
-                  }
-                >
-                  {source}
-                </ReactMarkdown>
-              </MarkdownTableSourceContext.Provider>
-            </StreamingSourceContext.Provider>
+            <PlainTextOnFailure text={children}>
+              {blocks ? (
+                blocks.map((block, index) => (
+                  <Fragment key={block.start}>
+                    {/* The line break react-markdown puts between blocks, so the DOM matches. */}
+                    {index > 0 ? "\n" : null}
+                    <MarkdownBlock
+                      source={block.source}
+                      streaming={streaming && index === blocks.length - 1}
+                    />
+                  </Fragment>
+                ))
+              ) : (
+                <MarkdownBlock source={children} streaming={streaming} />
+              )}
+            </PlainTextOnFailure>
           </LinkFaviconsPausedContext.Provider>
           {streaming ? <span aria-hidden="true" className="rk-chat-markdown-cursor" /> : null}
         </div>
@@ -593,7 +771,12 @@ export const ChatMarkdown = memo(function ChatMarkdown({
 });
 
 export type { ChatMarkdownProps, LinkFavicons } from "./markdown";
-export { LinkFaviconsContext, RemoteImagesContext, withBlockMentions } from "./markdown";
+export {
+  LinkFaviconsContext,
+  RemoteImagesContext,
+  useLinkFavicon,
+  withBlockMentions,
+} from "./markdown";
 export type { MarkdownCopy } from "./markdown-copy";
 export { defaultMarkdownCopy, MarkdownCopyProvider } from "./markdown-copy";
 export { MarkdownLinkPromptProvider } from "./markdown-link-prompt";

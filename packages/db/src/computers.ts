@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ComputerMode } from "@rakazo/contracts";
+import { isTerminal } from "@rakazo/core";
 import type { PrismaClient } from "./client.js";
 import { Prisma } from "./client.js";
 import { runAsSystem, runAsSystemInTransaction } from "./row-security.js";
@@ -127,12 +128,9 @@ async function lockUserForComputerQuota(
 }
 
 /**
- * Refuse a restore that would push a user past the cap.
- *
  * A restore re-links the bot to its Computer row, which reactivates the quota
  * if that row was only referenced by archived bots (the dedicated case; a team
- * row shared with live bots keeps counting). Throws ComputerLimitError when the
- * restore would exceed the configured SANDBOX_MAX_COMPUTERS_PER_USER.
+ * row shared with live bots keeps counting).
  */
 export async function assertComputerQuotaForRestore(
   prisma: ComputerDb,
@@ -198,6 +196,32 @@ export async function expireComputerExecutionLeases(
   });
 }
 
+type ExecutionBindingDb = Pick<PrismaClient, "computer" | "run">;
+
+/**
+ * Clear a legacy execution binding whose run can no longer execute. Pre-lease releases
+ * wrote Computer.executionRunId and only the run's own teardown cleared it, so a
+ * binding stranded by a missed cleanup blocks computer suspension forever: suspension
+ * requires a null binding. Bindings to runs that may still execute are left alone.
+ */
+export async function clearEndedExecutionRunBinding(
+  prisma: ExecutionBindingDb,
+  computerId: string,
+): Promise<void> {
+  const binding = await prisma.computer.findUnique({
+    where: { id: computerId },
+    select: { executionRunId: true },
+  });
+  const runId = binding?.executionRunId;
+  if (!runId) return;
+  const run = await prisma.run.findUnique({ where: { id: runId }, select: { status: true } });
+  if (run && !isTerminal(run.status)) return;
+  await prisma.computer.updateMany({
+    where: { id: computerId, executionRunId: runId },
+    data: { executionRunId: null, executionBotId: null, executionLeaseExpiresAt: null },
+  });
+}
+
 function upsertComputerRecord(
   prisma: ComputerDb,
   input: {
@@ -244,14 +268,10 @@ async function ensureComputerRecordWithQuota(
     select: { id: true },
   });
   if (!existing) {
-    // The bot being linked to this new computer is part of this same
-    // transaction; its old or intermediate reference is leaving the live set
-    // when this link commits. Exclude this bot's current reference so a
-    // transaction that ends with exactly one active computer is not refused
-    // at cap 1 (createBot links the team computer first, then re-links the
-    // bot to the new dedicated one; setBotComputer switches the same way).
-    // References from other active bots still count: a team computer another
-    // live bot keeps using stays in-use after the re-link.
+    // This bot's current reference leaves the live set when this link commits
+    // (createBot links the team computer first, then re-links the bot to the new
+    // dedicated one; setBotComputer switches the same way), so exclude it or a
+    // transaction ending with exactly one active computer is refused at cap 1.
     const inUse = await countInUseComputersForUser(tx, input.userId, input.botId);
     // The new row itself will be referenced by this bot after the link, so
     // the post-transaction set is one more than the remaining live set.

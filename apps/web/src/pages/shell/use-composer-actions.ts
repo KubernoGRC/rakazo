@@ -2,16 +2,18 @@ import { useLingui } from "@lingui/react/macro";
 import type {
   Bot,
   ComputerStatus,
+  LoginFieldInput,
   Me,
   MessageReaction,
   ThreadMessage,
   ThreadSnapshot,
 } from "@rakazo/contracts";
-import { ATTACHMENT_MAX_COUNT, attachmentMaxBytes, attachmentSizeLabel } from "@rakazo/contracts";
+import { attachmentMaxBytes, attachmentMaxCount, attachmentSizeLabel } from "@rakazo/contracts";
 import type { ComposerMention } from "@rakazo/core";
 import {
   attachmentsForThread,
   inferAttachmentMimeType,
+  isImageInputConfirmation,
   newClientId,
   resolveComposerSendPlan,
 } from "@rakazo/core";
@@ -90,12 +92,28 @@ export function useComposerActions({
   const [replyTarget, setReplyTarget] = useState<ThreadMessage | null>(null);
   const [replyQuote, setReplyQuote] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [sentCount, setSentCount] = useState(0);
   useEffect(() => {
     setComposerUnsavedWork(sending || pendingAttachments.length > 0);
     return () => setComposerUnsavedWork(false);
   }, [sending, pendingAttachments.length]);
   const sendingRef = useRef(false);
-  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendFailure, setSendFailure] = useState<{
+    message: string;
+    imageConfirmation: boolean;
+  } | null>(null);
+  // Counts real composer edits so a late rejection cannot confirm a newer draft.
+  const draftEdits = useRef(0);
+  const clearImageConfirmation = useCallback(() => {
+    draftEdits.current += 1;
+    setSendFailure((current) => (current?.imageConfirmation ? null : current));
+  }, []);
+  const imageConfirmation = sendFailure?.imageConfirmation === true;
+  const sendError = sendFailure?.message ?? null;
+  const setSendError = useCallback((message: string | null) => {
+    setSendFailure(message === null ? null : { message, imageConfirmation: false });
+  }, []);
+  const uploadedSendArtifacts = useRef(new Map<string, WeakMap<File, string>>());
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dismissedRunErrorIds, setDismissedRunErrorIds] =
@@ -185,7 +203,13 @@ export function useComposerActions({
   }, [activeId, clearReply, groupId, inGroup]);
 
   const answerMessage = useCallback(
-    async (message: ThreadMessage, text: string, username?: string, dismiss?: boolean) => {
+    async (
+      message: ThreadMessage,
+      text: string,
+      fields?: LoginFieldInput[],
+      dismiss?: boolean,
+      remember?: false,
+    ) => {
       const botId = activeBotId.current;
       const groupId = activeGroupId.current;
       if (!botId && !groupId) return;
@@ -195,7 +219,8 @@ export function useComposerActions({
         runId: message.runId ?? "",
         messageId: message.id,
         answer: text,
-        ...(username ? { username } : {}),
+        ...(fields ? { fields } : {}),
+        ...(remember === false ? { remember } : {}),
         ...(dismiss ? { dismiss: true as const } : {}),
       });
       // The answer is saved; live events can reconcile a failed refresh.
@@ -245,6 +270,7 @@ export function useComposerActions({
     (files: FileList | readonly File[] | null) => {
       const threadKey = activeGroupId.current ?? activeBotId.current;
       if (!threadKey || !files?.length) return false;
+      const ATTACHMENT_MAX_COUNT = attachmentMaxCount(bootstrapMe);
       const existing = attachmentsForThread(pendingAttachments, threadKey);
       const next: PendingAttachment[] = [];
       const skipped: string[] = [];
@@ -279,15 +305,24 @@ export function useComposerActions({
     },
     [pendingAttachments, bootstrapMe, t],
   );
+  useEffect(() => {
+    if (!pendingAttachments.length) uploadedSendArtifacts.current.clear();
+  }, [pendingAttachments]);
   const removeAttachment = useCallback((attachment: PendingAttachment) => {
     revokePendingAttachmentPreviews([attachment]);
     setPendingAttachments((current) => current.filter((item) => item.id !== attachment.id));
   }, []);
   const sendMessage = useCallback(
-    async (text: string, mentions: ComposerMention[], clientNonce: string) => {
+    async (
+      text: string,
+      mentions: ComposerMention[],
+      clientNonce: string,
+      imageHandling?: "file",
+    ) => {
       const initialBotTarget = activeBotId.current;
       const initialGroupTarget = activeGroupId.current;
       if ((!initialBotTarget && !initialGroupTarget) || sending) return false;
+      const editsAtSend = draftEdits.current;
       const originThreadKey = initialGroupTarget ?? initialBotTarget;
       const attachments = attachmentsForThread(pendingAttachments, originThreadKey);
       const plan = resolveComposerSendPlan({
@@ -313,34 +348,30 @@ export function useComposerActions({
       setSending(true);
       setSendError(null);
       clearReadBoundary();
+      setSentCount((count) => count + 1);
       const dropDelayedSetup = () => {
         // Only after successful engagement so a failed upload/send keeps the setup card.
         if (initialBotTarget && focusPromptBotIdRef.current === initialBotTarget) {
           cancelFocusPrompt();
         }
       };
-      // Keep the draft cleared once any part of the submission is confirmed accepted.
+      // Keep the draft cleared once the submission is confirmed accepted.
       let accepted = false;
       try {
-        if (plan.shouldRunRoutines) {
-          // Settle every run first so one that was accepted is never repeated.
-          const runs = await Promise.allSettled(
-            plan.routineIds.map((routineId) =>
-              rpc.routines.testRun({
-                routineId,
-                clientNonce: `routine-mention:${clientNonce}:${routineId}`,
-              }),
-            ),
-          );
-          accepted = runs.some((run) => run.status === "fulfilled");
-          for (const run of runs) if (run.status === "rejected") throw run.reason;
-        }
         if (!plan.shouldSend) {
+          if (plan.shouldRunRoutines) {
+            await rpc.threads.sendWithRoutines({
+              ...(groupTarget ? { groupId: groupTarget } : { botId: botTarget! }),
+              clientNonce,
+              routineIds: plan.routineIds,
+            });
+            accepted = true;
+          }
           dropDelayedSetup();
           clearReply();
           revokePendingAttachmentPreviews(attachments);
           setPendingAttachments((current) =>
-            current.filter((attachment) => attachment.threadKey !== originThreadKey),
+            current.filter((attachment) => !attachments.includes(attachment)),
           );
           setAttachmentNotice(null);
           if (reroutedToGroup && groupTarget) {
@@ -355,7 +386,15 @@ export function useComposerActions({
           return true;
         }
         const artifactIds: string[] = [];
+        const uploaded =
+          uploadedSendArtifacts.current.get(clientNonce) ?? new WeakMap<File, string>();
+        uploadedSendArtifacts.current.set(clientNonce, uploaded);
         for (const pending of attachments) {
+          const existing = uploaded.get(pending.file);
+          if (existing) {
+            artifactIds.push(existing);
+            continue;
+          }
           const mimeType = inferAttachmentMimeType(pending.file.name, pending.file.type);
           if (!mimeType) {
             throw new Error(t`Unsupported file type: ${pending.file.name}`);
@@ -367,49 +406,44 @@ export function useComposerActions({
               ? { groupId: groupTarget, name: pending.file.name, mimeType, contentBase64 }
               : { botId: botTarget!, name: pending.file.name, mimeType, contentBase64 },
           );
+          uploaded.set(pending.file, artifact.id);
           artifactIds.push(artifact.id);
         }
-        if (groupTarget) {
-          await rpc.threads.send({
-            groupId: groupTarget,
-            clientNonce,
-            text: trimmed || undefined,
-            mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
-            artifactIds: artifactIds.length ? artifactIds : undefined,
-            replyToMessageId: reroutedToGroup ? undefined : activeReplyTarget?.id,
-            replyQuote: reroutedToGroup ? undefined : (activeReplyQuote ?? undefined),
-          });
-          accepted = true;
-        } else if (botTarget) {
-          const sent = await rpc.threads.send({
-            botId: botTarget,
-            clientNonce,
-            text: trimmed || undefined,
-            mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
-            artifactIds: artifactIds.length ? artifactIds : undefined,
-            replyToMessageId: activeReplyTarget?.id,
-            replyQuote: activeReplyQuote ?? undefined,
-          });
-          accepted = true;
-          if (activeBotId.current === botTarget) {
-            updateSnapshot((current) =>
-              applyThreadSendReceipt(
-                current,
-                {
-                  botId: botTarget,
-                  runId: sent.runId,
-                  taskId: sent.taskId,
-                },
-                terminalRunReceipts.current,
-              ),
-            );
-          }
+        const payload = {
+          ...(groupTarget ? { groupId: groupTarget } : { botId: botTarget! }),
+          clientNonce,
+          imageHandling: imageHandling ?? "confirm",
+          text: trimmed || undefined,
+          mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
+          artifactIds: artifactIds.length ? artifactIds : undefined,
+          replyToMessageId: reroutedToGroup ? undefined : activeReplyTarget?.id,
+          replyQuote: reroutedToGroup ? undefined : (activeReplyQuote ?? undefined),
+        } as const;
+        // The routines run in the same server operation as the message: both or neither.
+        const sent = plan.shouldRunRoutines
+          ? (await rpc.threads.sendWithRoutines({ ...payload, routineIds: plan.routineIds })).send
+          : await rpc.threads.send(payload);
+        accepted = true;
+        if (sent && botTarget && activeBotId.current === botTarget) {
+          updateSnapshot((current) =>
+            applyThreadSendReceipt(
+              current,
+              {
+                botId: botTarget,
+                runId: sent.runId,
+                taskId: sent.taskId,
+              },
+              terminalRunReceipts.current,
+            ),
+          );
         }
+        uploadedSendArtifacts.current.delete(clientNonce);
         dropDelayedSetup();
         clearReply();
         revokePendingAttachmentPreviews(attachments);
+        // Keep files picked while this send was in flight.
         setPendingAttachments((current) =>
-          current.filter((attachment) => attachment.threadKey !== originThreadKey),
+          current.filter((attachment) => !attachments.includes(attachment)),
         );
         // Refresh sidebar status even when a bot→group reroute navigates away below.
         void refreshBots().catch(() => undefined);
@@ -423,14 +457,26 @@ export function useComposerActions({
         else if (botTarget) void refreshThreadRef.current(botTarget).catch(() => undefined);
         return true;
       } catch (error) {
-        if (reroutedToGroup && groupTarget) {
-          setSendError(errorText(error, t`Failed to send message`));
+        const isConfirmation = isImageInputConfirmation(error);
+        // Offer the file resend only for the unchanged draft this send carried.
+        const confirmation = isConfirmation && draftEdits.current === editsAtSend;
+        const failure = {
+          message: errorText(error, t`Failed to send message`),
+          imageConfirmation: confirmation,
+        };
+        if (
+          reroutedToGroup &&
+          groupTarget &&
+          activeBotId.current === initialBotTarget &&
+          activeGroupId.current === initialGroupTarget
+        ) {
+          setSendFailure(failure);
         } else if (groupTarget && activeGroupId.current === groupTarget) {
-          setSendError(errorText(error, t`Failed to send message`));
+          setSendFailure(failure);
         } else if (botTarget && activeBotId.current === botTarget) {
-          setSendError(errorText(error, t`Failed to send message`));
+          setSendFailure(failure);
         }
-        return accepted;
+        return isConfirmation ? false : accepted;
       } finally {
         sendingRef.current = false;
         setSending(false);
@@ -525,12 +571,15 @@ export function useComposerActions({
     setReplyQuote,
     clearReply,
     sending,
+    sentCount,
     sendMessage,
     stopRun,
     answerMessage,
     reactToMessage,
     sendError,
     setSendError,
+    imageConfirmation,
+    clearImageConfirmation,
     dismissedRunErrorIds,
     displayedRunError,
     displayedRunErrorId,

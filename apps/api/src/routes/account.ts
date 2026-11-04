@@ -1,6 +1,5 @@
 import { ORPCError } from "@orpc/server";
 import {
-  deploymentAutoReviewDefault,
   effectiveModelRole,
   hasHostedModelCredits,
   isAutoReviewCheckerConfigured,
@@ -8,22 +7,28 @@ import {
 } from "@rakazo/adapters";
 import type { ActionApprovalRule, Actor, Me, SettingsScope } from "@rakazo/contracts";
 import { approvalModeFromPreference, approvalPreferenceFromMode } from "@rakazo/core";
+import { urlSite } from "@rakazo/core/egress";
 import {
+  auditLogOrganization,
   findAutoReviewPreference,
   findDefaultVoiceCredential,
   findModelCredential,
   findModelCredentialById,
   listApprovalRules,
+  listAuditEvents,
   listVoicePreferences,
   lockSpaceSettings,
   newestVoiceCredentialOrder,
   Prisma,
   removeApprovalRule,
+  runAsSystem,
   saveApprovalRule,
   saveAutoReviewPreference,
   selectVoicePreference,
   voicePreferenceTarget,
 } from "@rakazo/db";
+import { createAccessGrant, listAccessGrants, revokeAccessGrant } from "../access-grants.js";
+import { requireAdmin } from "../admins.js";
 import { aiConsentStatus, allowAiConsent } from "../ai-consent.js";
 import type { BillingService } from "../billing.js";
 import { firstModelConnectAnalytics } from "../model-connect-analytics.js";
@@ -82,7 +87,7 @@ export function accountRoutes(ctx: RouterContext) {
           const record = await firstModelConnectAnalytics(deps, context.actor, "credits");
           record(undefined, { name: "model_connect_started" });
         }
-        return billing.selectFunding(context.actor, input.funding);
+        return billing.selectFunding(context.actor, input.funding, input.client);
       }),
       purchaseCredits: authed.billing.purchaseCredits.handler(async ({ context, input }) =>
         requireBilling(deps).purchaseCredits(context.actor, input),
@@ -93,19 +98,50 @@ export function accountRoutes(ctx: RouterContext) {
       status: authed.billing.status.handler(async ({ context }) =>
         requireBilling(deps).status(context.actor),
       ),
-      checkout: authed.billing.checkout.handler(async ({ context }) =>
-        requireBilling(deps).checkout(context.actor),
+      refresh: authed.billing.refresh.handler(async ({ context }) => {
+        const billing = requireBilling(deps);
+        await billing.syncForActor(context.actor);
+        return billing.status(context.actor);
+      }),
+      checkout: authed.billing.checkout.handler(async ({ context, input }) =>
+        requireBilling(deps).checkout(context.actor, input?.client),
       ),
-      portal: authed.billing.portal.handler(async ({ context }) =>
-        requireBilling(deps).portal(context.actor),
+      portal: authed.billing.portal.handler(async ({ context, input }) =>
+        requireBilling(deps).portal(context.actor, input?.client),
       ),
+      endTrial: authed.billing.endTrial.handler(async ({ context }) => {
+        const billing = requireBilling(deps);
+        await billing.endTrial(context.actor);
+        return billing.status(context.actor);
+      }),
+      claimReferral: authed.billing.claimReferral.handler(async ({ context, input }) => {
+        await requireBilling(deps).claimReferral(context.actor, input.code);
+        return { ok: true as const };
+      }),
+    },
+    accessGrants: {
+      list: authed.accessGrants.list.handler(async ({ context }) => {
+        await requireGrantAdmin(deps, context.actor);
+        return listAccessGrants(deps.prisma);
+      }),
+      create: authed.accessGrants.create.handler(async ({ context, input }) => {
+        await requireGrantAdmin(deps, context.actor);
+        return createAccessGrant(deps.prisma, context.actor.userId, input);
+      }),
+      revoke: authed.accessGrants.revoke.handler(async ({ context, input }) => {
+        await requireGrantAdmin(deps, context.actor);
+        return revokeAccessGrant(deps.prisma, input.id);
+      }),
     },
     preferences: {
       update: authed.preferences.update.handler(async ({ context, input }): Promise<Me> => {
         await deps.prisma.user.update({
           where: { id: context.actor.userId },
           // An avatar style from an older app is accepted and ignored: there is only one.
-          data: input.timezone === undefined ? {} : { timezone: input.timezone },
+          data: {
+            ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
+            ...(input.locale === undefined ? {} : { locale: input.locale }),
+          },
         });
         return meDto(deps, context.actor);
       }),
@@ -132,6 +168,15 @@ export function accountRoutes(ctx: RouterContext) {
     security: {
       events: authed.security.events.handler(() => {
         throw new ORPCError("FORBIDDEN");
+      }),
+    },
+    audit: {
+      events: authed.audit.events.handler(async ({ context, input }) => {
+        const organizationId = await auditLogOrganization(deps.prisma, context.actor);
+        if (!organizationId) throw new ORPCError("FORBIDDEN");
+        return runAsSystem("read the organization's audit log", () =>
+          listAuditEvents(deps.prisma, organizationId, input),
+        );
       }),
     },
     updater: {
@@ -163,6 +208,33 @@ export function accountRoutes(ctx: RouterContext) {
         return { ok: true as const };
       }),
     },
+    // The user's own list for the external-link prompt, kept apart from approval rules: a
+    // trusted link site never lets a bot fetch, and a site rule never skips the prompt.
+    trustedLinkSites: {
+      list: authed.trustedLinkSites.list.handler(async ({ context }) => {
+        const rows = await deps.prisma.trustedLinkSite.findMany({
+          where: { userId: context.actor.userId },
+          orderBy: { site: "asc" },
+        });
+        return rows.map((row) => row.site);
+      }),
+      trust: authed.trustedLinkSites.trust.handler(async ({ context, input }) => {
+        // The server names the site, so the list only ever holds sites.
+        const site = urlSite(input.url);
+        if (!site) throw new ORPCError("BAD_REQUEST", { message: "Not a web link." });
+        await deps.prisma.trustedLinkSite.createMany({
+          data: { userId: context.actor.userId, site },
+          skipDuplicates: true,
+        });
+        return { site };
+      }),
+      remove: authed.trustedLinkSites.remove.handler(async ({ context, input }) => {
+        await deps.prisma.trustedLinkSite.deleteMany({
+          where: { userId: context.actor.userId, site: input.site },
+        });
+        return { ok: true as const };
+      }),
+    },
     autoReview: {
       get: authed.autoReview.get.handler(async ({ context, input }) => {
         return loadAutoReviewSettings(deps, context.actor, input?.scope);
@@ -175,7 +247,7 @@ export function accountRoutes(ctx: RouterContext) {
             input.mode
               ? approvalPreferenceFromMode(input.mode)
               : { enabled: input.enabled, skipApprovals: input.skipApprovals },
-            { enabled: deploymentAutoReviewDefault(process.env), skipApprovals: false },
+            { enabled: true, skipApprovals: false },
             input.scope,
           ),
         );
@@ -278,7 +350,7 @@ export function accountRoutes(ctx: RouterContext) {
           ? await loadVoiceCredential(deps, context.actor, input.provider, input.scope)
           : await loadDefaultVoiceCredential(deps, context.actor, input.scope);
         if (!row) return [];
-        return (await voiceProviderFor(deps, context.actor, row.cred.provider)).listVoices(
+        return (await voiceProviderFor(deps, row.cred.provider)).listVoices(
           row.apiKey,
           voiceContext(context.actor, context.signal),
         );
@@ -319,7 +391,7 @@ async function loadAutoReviewSettings(deps: RouterDeps, actor: Actor, scope?: Se
     findAutoReviewPreference(deps.prisma, actor, scope),
   ]);
   const stored = {
-    enabled: preference?.enabled ?? deploymentAutoReviewDefault(process.env),
+    enabled: preference?.enabled ?? true,
     skipApprovals: preference?.skipApprovals ?? false,
   };
   const settings = { ...stored, mode: approvalModeFromPreference(stored) };
@@ -366,4 +438,10 @@ async function loadAutoReviewSettings(deps: RouterDeps, actor: Actor, scope?: Se
 function requireBilling(deps: RouterDeps): BillingService {
   if (!deps.billing) throw new ORPCError("NOT_FOUND", { message: "Billing is not enabled" });
   return deps.billing;
+}
+
+async function requireGrantAdmin(deps: RouterDeps, actor: Actor) {
+  await requireAdmin(deps, actor.userId);
+  if (!deps.billing?.modelCreditsEnabled)
+    throw new ORPCError("NOT_FOUND", { message: "Model credits are not enabled" });
 }

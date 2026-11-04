@@ -10,6 +10,8 @@ import {
   BOT_MESSAGE_WAKE_CUE,
   inferHandoffTargetName,
   MODEL_CONTEXT_TOO_SMALL_ERROR,
+  MODEL_OUTPUT_CUT_ERROR,
+  MODEL_REQUEST_LIMIT_ERROR,
   modelFallbackFailure,
   STEERING_CONTINUATION_PROMPT,
 } from "@rakazo/core";
@@ -50,8 +52,9 @@ export class ScriptedAgentRuntime implements AgentRuntime {
           ? steering.map((item) => item.historyText ?? item.text).join("\n")
           : undefined;
       const prompt = steeredPrompt ?? request.prompt;
-      // A peer's wake hangs on the peer's words, not on the quoted message it replies to.
-      const hangMs = hangDuration(peerMessage(prompt)?.text ?? prompt);
+      // A run hangs on its own words: a peer's wake on the peer's text, a reply without the
+      // message it quotes.
+      const hangMs = hangDuration(peerMessage(prompt)?.text ?? prompt.replace(REPLY_CONTEXT, ""));
       if (hangMs !== undefined) {
         // Long-running work happens on the computer, which starts it like any real run would.
         yield {
@@ -163,7 +166,10 @@ export function inferScript(
   prompt: string,
   resumeFromCheckpoint?: string,
 ): NonNullable<AgentRunRequest["script"]> {
-  const lower = prompt.toLowerCase();
+  // A bot-message wake embeds the sender's name and id around the peer's words, and an
+  // ordinary reply opens with the quoted target; a generated id can contain a journey
+  // keyword by chance ("crm" inside a cuid), so the branches key on the words alone.
+  const lower = (peerMessage(prompt)?.text ?? prompt.replace(REPLY_CONTEXT, "")).toLowerCase();
   if (lower.includes("can you check my gmail inbox?")) {
     return [
       {
@@ -212,6 +218,46 @@ export function inferScript(
       {
         assistant: "running it on my computer.",
         toolCalls: [{ name: "shell", args: { command: shellCommand } }],
+        complete: true,
+      },
+    ];
+  }
+  if (lower.includes("run hostname on my computer")) {
+    return [
+      {
+        assistant: "checking your computer's name.",
+        toolCalls: [{ name: "user_computer_shell", args: { command: "hostname" } }],
+        complete: true,
+      },
+    ];
+  }
+  const lookAt = /look at (.+?) on my computer/i.exec(prompt)?.[1]?.trim();
+  if (lookAt) {
+    return [
+      {
+        assistant: `looking at ${lookAt}.`,
+        toolCalls: [{ name: "user_computer_observe", args: { app: lookAt } }],
+        complete: true,
+      },
+    ];
+  }
+  const typeIn = /type "([^"]+)" in a new (.+?) document on my computer/i.exec(prompt);
+  if (typeIn) {
+    return [
+      {
+        assistant: `typing in ${typeIn[2]}.`,
+        toolCalls: [
+          {
+            name: "user_computer_act",
+            args: {
+              app: typeIn[2],
+              actions: [
+                { kind: "menu", path: ["File", "New"] },
+                { kind: "type", text: typeIn[1] },
+              ],
+            },
+          },
+        ],
         complete: true,
       },
     ];
@@ -284,6 +330,23 @@ export function inferScript(
                 origin: "https://login.example.test",
                 auth: { type: "login" },
               },
+            },
+          },
+        ],
+      },
+    ];
+  }
+  if (lower.includes("command variable secret card")) {
+    return [
+      {
+        assistant: "i need that key in a protected field.",
+        toolCalls: [
+          {
+            name: "request_secret",
+            args: {
+              label: "Deploy key",
+              purpose: "api_key",
+              credential: { name: "deploy-key", auth: { type: "command" } },
             },
           },
         ],
@@ -440,16 +503,12 @@ code-b
       },
     ];
   }
-  if (lower.includes("propose an instruction update")) {
+  const ownInstructions = /update your instructions to:\s*([^\n<&]+)/i.exec(prompt);
+  if (ownInstructions) {
     return [
       {
-        assistant: "",
-        toolCalls: [
-          {
-            name: "propose_instructions_update",
-            args: { instructions: "Draft only. Ask before sending.", reason: "Learned preference" },
-          },
-        ],
+        assistant: "updating my instructions.",
+        toolCalls: [{ name: "update_bot", args: { instructions: ownInstructions[1]!.trim() } }],
         complete: true,
       },
     ];
@@ -666,7 +725,9 @@ function shouldFail(prompt: string): boolean {
  */
 function scriptedFailure(prompt: string): string {
   if (/\bfixed context\b/i.test(prompt)) return MODEL_CONTEXT_TOO_SMALL_ERROR;
+  if (/\bconnection request limit\b/i.test(prompt)) return MODEL_REQUEST_LIMIT_ERROR;
   if (/\bunrun approval\b/i.test(prompt)) return APPROVED_ACTION_NOT_RUN_ERROR;
+  if (/\bcut reply\b/i.test(prompt)) return MODEL_OUTPUT_CUT_ERROR;
   if (/\bunreachable\b/i.test(prompt)) return "Connection error.";
   if (/\bout of credits\b/i.test(prompt)) {
     return '402: {"message":"You have no credits remaining. Add credits to continue."}';

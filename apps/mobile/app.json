@@ -4,7 +4,7 @@
     "slug": "rakazo",
     "owner": "inbox-zero",
     "scheme": "rakazo",
-    "version": "1.0.9",
+    "version": "1.0.12",
     "orientation": "default",
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
@@ -53,15 +53,43 @@
           "microphonePermission": "Rakazo uses the microphone for voice calls with your bots."
         }
       ],
-      "expo-sharing",
+      [
+        "expo-sharing",
+        {
+          "android": {
+            "enabled": true,
+            "singleShareMimeTypes": [
+              "text/*",
+              "image/*",
+              "audio/*",
+              "video/mp4",
+              "application/pdf",
+              "application/json",
+              "application/zip"
+            ],
+            "multipleShareMimeTypes": [
+              "image/*",
+              "audio/*",
+              "video/mp4",
+              "application/pdf",
+              "application/json",
+              "application/zip"
+            ]
+          }
+        }
+      ],
       "./plugins/with-worklets-headers",
       "./plugins/with-scene-lifecycle",
-      "./plugins/with-lan-cleartext"
+      "./plugins/with-lan-cleartext",
+      "./plugins/with-app-intents"
     ],
+    "locales": {
+      "es": "./locales/es.json"
+    },
     "ios": {
       "bundleIdentifier": "com.rakazo.app",
       "buildNumber": "1",
-      "supportsTablet": false,
+      "supportsTablet": true,
       "icon": "../../packages/ui-tokens/assets/Rakazo.icon",
       "config": {
         "usesNonExemptEncryption": false

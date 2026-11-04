@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const COMPOSE = "docker compose --env-file .env -f infra/compose/docker-compose.prod.yml";
@@ -16,7 +16,10 @@ const rolloutSteps = (revision: string) => [
   `${COMPOSE} config --quiet`,
   `${COMPOSE} config`,
   `${COMPOSE} build --build-arg GIT_SHA=${revision}`,
-  ...["api", "web"].flatMap((service) => [
+  // Only this container gets the database owner login; the old API keeps serving meanwhile.
+  `${COMPOSE} config --services`,
+  `${COMPOSE} run --rm -T migrate`,
+  ...["api", "web", "worker"].flatMap((service) => [
     `${COMPOSE} ps --all --quiet ${service}`,
     `${COMPOSE} up -d --no-deps --no-recreate --scale ${service}=2 ${service}`,
     `${COMPOSE} ps --all --quiet ${service}`,
@@ -65,7 +68,9 @@ function rollout(commands: string[]) {
     .map((line) => line.split(" @ ")[0] ?? line)
     .filter(
       (line) =>
-        / (config|build|up|ps) /.test(`${line} `) || /^docker (inspect|stop|rm) /.test(line),
+        / (config|build|up|ps) /.test(`${line} `) ||
+        line.endsWith(" run --rm -T migrate") ||
+        /^docker (inspect|stop|rm) /.test(line),
     );
 }
 
@@ -91,8 +96,9 @@ function fixture() {
   write(
     path.join(bin, "docker"),
     `#!/bin/bash
-echo "docker $* @ $(git rev-parse --short HEAD)" >> "$COMMAND_LOG"
-if [[ "$*" == *" build "* && "$(cat revision.txt)" == "\${FAIL_BUILD:-}" ]]; then exit 1; fi
+revision="$(<revision.txt)"
+echo "docker $* @ $revision" >> "$COMMAND_LOG"
+if [[ "$*" == *" build "* && "$revision" == "\${FAIL_BUILD:-}" ]]; then exit 1; fi
 if [[ "$1" == info ]]; then echo /var/lib/docker; fi
 if [[ "$*" == *" config" ]]; then printf "services:\\n  api:\\n    image: ${APP_IMAGE}\\n"; fi
 if [[ "$1" == inspect && "$*" == *"{{.Image}}"* ]]; then
@@ -104,6 +110,11 @@ if [[ "$*" == *" ps --quiet api" && -z "\${FRESH:-}" ]]; then echo api-old; fi
 if [[ "$*" == *" run --rm --no-deps -T --entrypoint sh postgres "* && -n "\${POSTGRES_16:-}" ]]; then
   echo upgrade
 fi
+if [[ "$*" == *" config --services" ]]; then
+  echo api
+  [[ "$revision" == "\${NO_MIGRATE_REVISION:-}" ]] || echo migrate
+fi
+if [[ "$*" == *" run --rm -T migrate" && ( -n "\${FAIL_MIGRATE:-}" || "$revision" == "\${NO_MIGRATE_REVISION:-}" ) ]]; then exit 1; fi
 if [[ "$1" == pull && -n "\${FAIL_PULL:-}" ]]; then exit 1; fi
 if [[ "$*" == *" images -q" ]]; then echo sha256:running; fi
 if [[ "$1" == tag && -n "\${FAIL_TAG:-}" ]]; then exit 1; fi
@@ -211,31 +222,16 @@ describe("production deploy script", () => {
     expect(rollout(deploy.commands())).toContain(`${COMPOSE} build --build-arg GIT_SHA=${pinned}`);
   });
 
-  it("deploys when the recorded revision is not the checkout", () => {
-    const deploy = fixture();
-    write(path.join(deploy.checkout, ".last-deployed-revision"), "outdated\n");
-    const result = deploy.run();
-    expect(result.status).toBe(0);
-    expect(result.stdout).not.toContain("already at");
-    expect(deploy.deployed()).toBe(deploy.first);
-    expect(deploy.commands().some((line) => line.includes(" up -d --remove-orphans"))).toBe(true);
-  });
-
-  it("builds, starts, and records the new revision under time limits", () => {
+  it("builds, starts, records, and prunes after a healthy rollout", () => {
     const deploy = fixture();
     const next = commit(deploy.upstream, "next");
-    const result = deploy.run();
+    const result = deploy.run({ RAKAZO_DEPLOY_BUILD_CACHE_GB: "3" });
     expect(result.status).toBe(0);
     expect(deploy.head()).toBe(next);
     expect(deploy.deployed()).toBe(next);
     expect(rollout(deploy.commands())).toEqual(rolloutSteps(next));
-  });
-
-  it("keeps the previous images and prunes the rest after a healthy rollout", () => {
-    const deploy = fixture();
-    commit(deploy.upstream, "next");
-    expect(deploy.run().status).toBe(0);
-    const commands = deploy.commands().map((line) => line.split(" @ ")[0]);
+    expect(deploy.commands().some((line) => line.includes(" caddy"))).toBe(false);
+    const commands = deploy.commands().map((line) => line.split(" @ ")[0]!);
     expect(
       commands.slice(commands.findIndex((line) => line.endsWith(" up -d --remove-orphans")) + 1),
     ).toEqual([
@@ -244,25 +240,19 @@ describe("production deploy script", () => {
       "docker rmi rakazo-rollback:old",
       "docker tag sha256:running rakazo-rollback:running",
       "docker image prune --force",
-      "docker builder prune --force --keep-storage 8GB",
+      "docker builder prune --force --keep-storage 3GB",
     ]);
   });
 
-  it("trims the build cache to the configured size", () => {
+  it("refuses malformed size settings before deploying", () => {
     const deploy = fixture();
     commit(deploy.upstream, "next");
-    expect(deploy.run({ RAKAZO_DEPLOY_BUILD_CACHE_GB: "3" }).status).toBe(0);
-    expect(deploy.commands()).toContainEqual(
-      expect.stringContaining("docker builder prune --force --keep-storage 3GB"),
-    );
-  });
-
-  it("refuses a build cache size that is not a whole number before deploying", () => {
-    const deploy = fixture();
-    commit(deploy.upstream, "next");
-    const result = deploy.run({ RAKAZO_DEPLOY_BUILD_CACHE_GB: "8GB" });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("RAKAZO_DEPLOY_BUILD_CACHE_GB must be a whole number");
+    const cache = deploy.run({ RAKAZO_DEPLOY_BUILD_CACHE_GB: "8GB" });
+    expect(cache.status).toBe(1);
+    expect(cache.stderr).toContain("RAKAZO_DEPLOY_BUILD_CACHE_GB must be a whole number");
+    const threshold = deploy.run({ RAKAZO_DEPLOY_MIN_FREE_GB: "08" });
+    expect(threshold.status).toBe(1);
+    expect(threshold.stderr).toContain("RAKAZO_DEPLOY_MIN_FREE_GB must be a whole number");
     expect(deploy.commands()).toEqual([]);
     expect(deploy.head()).toBe(deploy.first);
   });
@@ -274,13 +264,6 @@ describe("production deploy script", () => {
     expect(result.status).toBe(0);
     expect(result.stderr).toContain("skipping image prune");
     expect(deploy.commands().some((line) => line.startsWith("docker image prune"))).toBe(false);
-  });
-
-  it("rejects a threshold with a leading zero", () => {
-    const deploy = fixture();
-    const result = deploy.run({ RAKAZO_DEPLOY_MIN_FREE_GB: "08" });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("whole number");
   });
 
   it("refuses to build with too little free disk", () => {
@@ -311,14 +294,12 @@ describe("production deploy script", () => {
     const result = deploy.run({ FAIL_BUILD: "broken" });
     expect(result.status).toBe(1);
     expect(deploy.head()).toBe(deploy.first);
-    const commands = deploy.commands().map((line) => line.split(" @ ")[0]);
+    const commands = deploy.commands().map((line) => line.split(" @ ")[0]!);
     expect(commands.filter((line) => line.startsWith(`${COMPOSE} build`))).toEqual([
       `${COMPOSE} build --build-arg GIT_SHA=${broken}`,
     ]);
     expect(commands).toContain(`docker tag sha256:previous ${APP_IMAGE}`);
-    expect(deploy.commands().at(-1)).toMatch(
-      new RegExp(`up -d --remove-orphans @ ${deploy.first.slice(0, 7)}`),
-    );
+    expect(deploy.commands().at(-1)).toMatch(/ up -d --remove-orphans @ first$/);
   });
 
   it("rebuilds the previous revision when the running image is unknown", () => {
@@ -339,7 +320,7 @@ describe("production deploy script", () => {
     const REGISTRY = "registry.example.test/rakazo/app";
     const published = (revision: string) => `${REGISTRY}:sha-${revision}`;
     const commandsOf = (deploy: ReturnType<typeof fixture>) =>
-      deploy.commands().map((line) => line.split(" @ ")[0]);
+      deploy.commands().map((line) => line.split(" @ ")[0]!);
 
     it("pulls the image published for the commit instead of building", () => {
       const deploy = fixture();
@@ -356,7 +337,16 @@ describe("production deploy script", () => {
         `docker tag ${published(next)} ${APP_IMAGE}`,
         `docker rmi ${published(next)}`,
       ]);
-      expect(commands.indexOf(`${COMPOSE} up -d --remove-orphans`)).toBeGreaterThan(pull);
+      const up = commands.indexOf(`${COMPOSE} up -d --remove-orphans`);
+      expect(up).toBeGreaterThan(pull);
+      expect(commands.slice(up + 1)).toEqual([
+        "curl https://app.example.test/health",
+        "docker image ls --format {{.Repository}}:{{.Tag}} rakazo-rollback",
+        "docker rmi rakazo-rollback:old",
+        "docker tag sha256:running rakazo-rollback:running",
+        "docker image prune --force",
+        "docker builder prune --force --keep-storage 8GB",
+      ]);
     });
 
     it("uses the GHCR image of the GitHub repository the checkout tracks by default", () => {
@@ -387,11 +377,12 @@ describe("production deploy script", () => {
       expect(commands).not.toContain(`docker tag ${published(next)} ${APP_IMAGE}`);
     });
 
-    it("rolls back by retagging the previous image without the registry", () => {
+    it("rolls back by retagging the previous image when production never becomes healthy", () => {
       const deploy = fixture();
       commit(deploy.upstream, "unhealthy");
       const result = deploy.run({ RAKAZO_DEPLOY_IMAGE: REGISTRY, FAIL_HEALTH: "1" });
       expect(result.status).toBe(1);
+      expect(result.stderr).toContain("did not recover");
       expect(deploy.head()).toBe(deploy.first);
       const commands = commandsOf(deploy);
       expect(commands.filter((line) => line.startsWith("docker pull"))).toHaveLength(1);
@@ -414,24 +405,6 @@ describe("production deploy script", () => {
       ]);
       expect(commands.some((line) => line.startsWith(`${COMPOSE} build`))).toBe(false);
     });
-
-    it("keeps only the current and previous app images", () => {
-      const deploy = fixture();
-      const next = commit(deploy.upstream, "next");
-      expect(deploy.run({ RAKAZO_DEPLOY_IMAGE: REGISTRY }).status).toBe(0);
-      const commands = commandsOf(deploy);
-      expect(commands).toContain(`docker rmi ${published(next)}`);
-      expect(
-        commands.slice(commands.findIndex((line) => line.endsWith(" up -d --remove-orphans")) + 1),
-      ).toEqual([
-        "curl https://app.example.test/health",
-        "docker image ls --format {{.Repository}}:{{.Tag}} rakazo-rollback",
-        "docker rmi rakazo-rollback:old",
-        "docker tag sha256:running rakazo-rollback:running",
-        "docker image prune --force",
-        "docker builder prune --force --keep-storage 8GB",
-      ]);
-    });
   });
 
   it("starts the first containers directly when none are running", () => {
@@ -442,6 +415,29 @@ describe("production deploy script", () => {
     expect(commands).toContain(`${COMPOSE} up -d --wait api`);
     expect(commands).toContain(`${COMPOSE} up -d --wait web`);
     expect(commands.some((line) => line.includes("--scale"))).toBe(false);
+  });
+
+  it("starts no new container and keeps the old one serving when migrations fail", () => {
+    const deploy = fixture();
+    commit(deploy.upstream, "next");
+    expect(deploy.run({ FAIL_MIGRATE: "1" }).status).toBe(1);
+    const commands = rollout(deploy.commands());
+    expect(commands).toContain(`${COMPOSE} run --rm -T migrate`);
+    expect(commands.some((line) => line.includes(" up "))).toBe(false);
+    expect(commands.some((line) => line.startsWith("docker stop"))).toBe(false);
+    expect(deploy.head()).toBe(deploy.first);
+  });
+
+  it("rolls back to a release whose API still migrates on start", () => {
+    const deploy = fixture();
+    commit(deploy.upstream, "unhealthy");
+    const result = deploy.run({ FAIL_HEALTH: "1", NO_MIGRATE_REVISION: "first" });
+    expect(result.status).toBe(1);
+    expect(deploy.head()).toBe(deploy.first);
+    const commands = rollout(deploy.commands());
+    expect(commands.filter((line) => line.endsWith(" run --rm -T migrate"))).toHaveLength(1);
+    // The rollback still replaces the failed release's containers.
+    expect(commands.filter((line) => line === "docker stop --time 30 api-old")).toHaveLength(2);
   });
 
   it("keeps the old container serving when the new one fails its health check", () => {
@@ -471,12 +467,8 @@ describe("production deploy script", () => {
     expect(rollout(deploy.commands())).toContain("docker rm --force api-new");
   });
 
-  it("recreates Caddy only when its config changed", () => {
+  it("recreates Caddy when its config changed", () => {
     const deploy = fixture();
-    commit(deploy.upstream, "next");
-    expect(deploy.run().status).toBe(0);
-    expect(deploy.commands().some((line) => line.includes(" caddy"))).toBe(false);
-
     write(path.join(deploy.upstream, "infra/compose/Caddyfile.prod"), ":80\n");
     git(deploy.upstream, "add", "infra/compose/Caddyfile.prod");
     commit(deploy.upstream, "caddy");
@@ -485,23 +477,19 @@ describe("production deploy script", () => {
       expect.stringContaining(`${COMPOSE} up -d --no-deps --force-recreate caddy`),
     );
   });
-
-  it("rolls back when production never becomes healthy", () => {
-    const deploy = fixture();
-    commit(deploy.upstream, "unhealthy");
-    const result = deploy.run({ FAIL_HEALTH: "1" });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("did not recover");
-    expect(deploy.head()).toBe(deploy.first);
-  });
 });
 
 describe("production deploy launcher", () => {
-  it("runs the deploy script from origin/main, not the checkout", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "rakazo-launcher-"));
-    temporaryDirectories.push(root);
+  const launcher = path.join(repoRoot, "infra/compose/deploy-launcher.sh");
+  let root: string;
+  let checkout: string;
+  let tested: string;
+  let later: string;
+
+  beforeAll(() => {
+    root = mkdtempSync(path.join(os.tmpdir(), "rakazo-launcher-"));
     const upstream = path.join(root, "upstream");
-    const checkout = path.join(root, "checkout with spaces");
+    checkout = path.join(root, "checkout with spaces");
     const script = path.join("infra", "compose", "deploy-main.sh");
     mkdirSync(upstream);
     git(upstream, "init", "-q", "-b", "main");
@@ -509,89 +497,69 @@ describe("production deploy launcher", () => {
     git(upstream, "add", script);
     commit(upstream, "first");
     git(root, "clone", "-q", upstream, checkout);
-    write(path.join(upstream, script), 'echo "current $0 $* $RAKAZO_DEPLOY_REVISION"\n');
+    write(path.join(upstream, script), 'echo "deploy $RAKAZO_DEPLOY_REVISION $0 $*"\n');
     git(upstream, "add", script);
-    const next = commit(upstream, "next");
-
-    const result = spawnSync(
-      "/bin/bash",
-      [path.join(repoRoot, "infra/compose/deploy-launcher.sh"), "--flag"],
-      {
-        cwd: root,
-        env: { PATH: process.env.PATH, HOME: root, RAKAZO_DEPLOY_DIR: checkout },
-        encoding: "utf8",
-        timeout: 20_000,
-      },
-    );
-    expect(result.stderr).toBe("");
-    expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe(`current rakazo-deploy-main --flag ${next}`);
+    tested = commit(upstream, "tested");
+    later = commit(upstream, "merged after the green run");
   });
 
-  function launcherRepo() {
-    const root = mkdtempSync(path.join(os.tmpdir(), "rakazo-launcher-"));
-    temporaryDirectories.push(root);
-    const upstream = path.join(root, "upstream");
-    const checkout = path.join(root, "checkout");
-    const script = path.join("infra", "compose", "deploy-main.sh");
-    mkdirSync(upstream);
-    git(upstream, "init", "-q", "-b", "main");
-    write(path.join(upstream, script), 'echo "deploy $RAKAZO_DEPLOY_REVISION"\n');
-    git(upstream, "add", script);
-    const tested = commit(upstream, "tested");
-    const later = commit(upstream, "merged after the green run");
-    git(root, "clone", "-q", upstream, checkout);
-    const launch = (command: string) =>
-      spawnSync("/bin/bash", [path.join(repoRoot, "infra/compose/deploy-launcher.sh")], {
-        cwd: root,
-        env: {
-          PATH: process.env.PATH,
-          HOME: root,
-          RAKAZO_DEPLOY_DIR: checkout,
-          SSH_ORIGINAL_COMMAND: command,
-        },
-        encoding: "utf8",
-        timeout: 20_000,
-      });
-    return { checkout, tested, later, launch };
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  function launch(command?: string, ...args: string[]) {
+    return spawnSync("/bin/bash", [launcher, ...args], {
+      cwd: root,
+      env: {
+        PATH: process.env.PATH,
+        HOME: root,
+        RAKAZO_DEPLOY_DIR: checkout,
+        ...(command === undefined ? {} : { SSH_ORIGINAL_COMMAND: command }),
+      },
+      encoding: "utf8",
+      timeout: 20_000,
+    });
   }
 
-  it("deploys the commit CI tested, not a newer main", () => {
-    const repo = launcherRepo();
-    const result = repo.launch(`deploy-main ${repo.tested}`);
+  it("runs the deploy script from origin/main, not the checkout", () => {
+    const result = launch(undefined, "--flag");
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe(`deploy ${repo.tested}`);
+    expect(result.stdout.trim()).toBe(`deploy ${later} rakazo-deploy-main --flag`);
+  });
+
+  it("deploys the commit CI tested, not a newer main", () => {
+    const result = launch(`deploy-main ${tested}`);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(`deploy ${tested} rakazo-deploy-main`);
   });
 
   it("does not roll back to an older commit than production runs", () => {
-    const repo = launcherRepo();
-    write(path.join(repo.checkout, ".last-deployed-revision"), `${repo.later}\n`);
-    const result = repo.launch(`deploy-main ${repo.tested}`);
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain("nothing to deploy");
-    expect(result.stdout).not.toContain("deploy ");
+    const recorded = path.join(checkout, ".last-deployed-revision");
+    write(recorded, `${later}\n`);
+    try {
+      const result = launch(`deploy-main ${tested}`);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("nothing to deploy");
+      expect(result.stdout).not.toContain("deploy ");
+    } finally {
+      rmSync(recorded);
+    }
   });
 
   it("refuses a commit that is not on main or not a full SHA", () => {
-    const repo = launcherRepo();
-    const offMain = repo.launch(`deploy-main ${"a".repeat(40)}`);
+    const offMain = launch(`deploy-main ${"a".repeat(40)}`);
     expect(offMain.status).toBe(1);
     expect(offMain.stderr).toContain("not on main");
-    const short = repo.launch("deploy-main main");
+    const short = launch("deploy-main main");
     expect(short.status).toBe(1);
     expect(short.stderr).toContain("full commit SHA");
   });
 
   it("refuses a relative checkout path", () => {
-    const result = spawnSync(
-      "/bin/bash",
-      [path.join(repoRoot, "infra/compose/deploy-launcher.sh")],
-      {
-        env: { PATH: process.env.PATH, RAKAZO_DEPLOY_DIR: "relative" },
-        encoding: "utf8",
-      },
-    );
+    const result = spawnSync("/bin/bash", [launcher], {
+      env: { PATH: process.env.PATH, RAKAZO_DEPLOY_DIR: "relative" },
+      encoding: "utf8",
+    });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("absolute path");
   });

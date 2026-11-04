@@ -604,6 +604,105 @@ describe("native markdown code blocks", () => {
   });
 });
 
+describe("native markdown prose fences", () => {
+  const draft =
+    "Dear team, this line of prose is far wider than a bubble, so it wraps instead of scrolling.";
+
+  // Stands in for the app's copy button, as the code copy tests do.
+  function CopyProbe({ code }: { code: string }) {
+    return createElement("copy-probe", { "data-code": code });
+  }
+
+  it.each(["text", "txt", "plaintext", "Text"])(
+    "wraps a fence marked %j as prose in the body font",
+    (language) => {
+      const html = renderToStaticMarkup(
+        <ChatMarkdown palette={lightTokens} colorScheme="light">
+          {`\`\`\`${language}\n${draft}\n\`\`\``}
+        </ChatMarkdown>,
+      );
+      const document = new DOMParser().parseFromString(html, "text/html");
+      // No sideways scroll view: the line wraps inside the fence's card.
+      expect(document.querySelector("rn-scroll-view")).toBeNull();
+      expect(
+        document.querySelector(`[data-background-color="${lightTokens.secondary}"]`),
+      ).not.toBeNull();
+      expect(textStyle(html, draft)).toMatchObject({
+        "data-color": lightTokens.foreground,
+        "data-font-size": "17",
+        "data-line-height": "22",
+      });
+      expect(textStyle(html, draft)["data-font-family"]).toBeUndefined();
+    },
+  );
+
+  it.each(["ts", ""])(
+    "keeps a fence marked %j monospaced in a sideways scroll view",
+    (language) => {
+      const html = renderToStaticMarkup(
+        <ChatMarkdown colorScheme="light">{`\`\`\`${language}\nconst a = 1;\n\`\`\``}</ChatMarkdown>,
+      );
+      const document = new DOMParser().parseFromString(html, "text/html");
+      expect(document.querySelector("rn-scroll-view")).not.toBeNull();
+      expect(
+        document.querySelector("rn-scroll-view rn-text")?.getAttribute("data-font-family"),
+      ).toBe("ui-monospace");
+    },
+  );
+
+  it("preserves a prose fence's lines and blank lines", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown colorScheme="light">
+        {"```text\nDear team,\n\n  see you Monday.\n```"}
+      </ChatMarkdown>,
+    );
+    const document = new DOMParser().parseFromString(html, "text/html");
+    const lines = [...document.querySelectorAll("rn-text")]
+      .filter((text) => !text.querySelector("rn-view"))
+      .map((text) => text.textContent);
+    expect(lines).toEqual(["text", "Dear team,", " ", "  see you Monday."]);
+  });
+
+  it("gives a prose fence a copy button for its exact code, outside any scroll view", () => {
+    const code = "Dear team,\n\n  see you Monday.";
+    const html = renderToStaticMarkup(
+      <CodeCopyButtonContext.Provider value={CopyProbe}>
+        <ChatMarkdown
+          palette={lightTokens}
+          colorScheme="light"
+        >{`\`\`\`text\n${code}\n\`\`\``}</ChatMarkdown>
+      </CodeCopyButtonContext.Provider>,
+    );
+    const document = new DOMParser().parseFromString(html, "text/html");
+    const probes = document.querySelectorAll("copy-probe");
+    expect(probes).toHaveLength(1);
+    expect(probes[0]?.getAttribute("data-code")).toBe(code);
+    expect(probes[0]?.closest("rn-scroll-view")).toBeNull();
+    // The button sits inside the fence's frame, beside the prose.
+    const frame = probes[0]?.parentElement?.parentElement;
+    expect(frame?.getAttribute("data-border-width")).toBeTruthy();
+    expect(frame?.getAttribute("data-background-color")).toBe(lightTokens.secondary);
+  });
+
+  it("aligns each prose line by its own direction, like a paragraph", () => {
+    const align = (markdown: string, line: string) =>
+      textStyle(
+        renderToStaticMarkup(<ChatMarkdown colorScheme="light">{markdown}</ChatMarkdown>),
+        line,
+      )["data-text-align"];
+    expect(align("```text\nשלום רב.\nDear team,\n```", "שלום רב.")).toBe("right");
+    expect(align("```text\nשלום רב.\nDear team,\n```", "Dear team,")).toBeUndefined();
+    i18n.isRTL = true;
+    try {
+      // React Native mirrors `right` in a right-to-left layout, so it lands on the left.
+      expect(align("```text\nDear team,\n```", "Dear team,")).toBe("right");
+      expect(align("```text\nשלום רב.\n```", "שלום רב.")).toBeUndefined();
+    } finally {
+      i18n.isRTL = false;
+    }
+  });
+});
+
 describe("native markdown code copy", () => {
   // Stands in for the app's copy button, recording the code it would copy.
   function ProbeCopyButton({ code }: { code: string }) {
@@ -1477,7 +1576,7 @@ describe("native website links", () => {
         ?.querySelector("rn-view[data-background-color]")
         ?.getAttribute("data-background-color"),
     ).toBe(darkTokens.faviconPlate);
-    // Body colour, not the old blue; the underline sits on the label, not the tile.
+    // The underline sits on the label, not the tile.
     expect(link?.getAttribute("data-color")).toBe(darkTokens.foreground);
     expect(link?.getAttribute("data-text-decoration-line")).toBe("none");
     expect(load).toHaveBeenCalledWith("https://native-a.example.test");
@@ -1754,6 +1853,62 @@ describe("native external link confirmation", () => {
       expect(linking.openURL).toHaveBeenCalledWith("https://app.example.test/threads/1");
     });
     await view.cleanup();
+  });
+});
+
+describe("native trusted link sites", () => {
+  async function renderTrusted(markdown: string, trustedSites: string[], trustSite = vi.fn()) {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    linking.openURL.mockClear();
+    alert.mockClear();
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MarkdownLinkPromptProvider trustedSites={trustedSites} trustSite={trustSite}>
+          <ChatMarkdown>{markdown}</ChatMarkdown>
+        </MarkdownLinkPromptProvider>,
+      );
+    });
+    const link = () => container.querySelector<HTMLElement>("[data-accessibility-role='link']");
+    return { link, unmount: () => act(async () => root.unmount()) };
+  }
+
+  it("opens the link and trusts its site from the third button", async () => {
+    const trustSite = vi.fn(async () => {
+      throw new Error("offline");
+    });
+    const view = await renderTrusted("[Docs](https://docs.example.test/a)", [], trustSite);
+    await act(async () => {
+      view.link()?.click();
+    });
+    const buttons = alert.mock.calls.at(-1)![2] as Array<{ text: string; onPress?: () => void }>;
+    expect(buttons.map((button) => button.text)).toEqual([
+      "Cancel",
+      "Always open example.test",
+      "Open",
+    ]);
+    await act(async () => {
+      buttons[1]!.onPress?.();
+    });
+    // A failed save still opens the link.
+    await vi.waitFor(() => {
+      expect(linking.openURL).toHaveBeenCalledWith("https://docs.example.test/a");
+    });
+    expect(trustSite).toHaveBeenCalledWith("https://docs.example.test/a");
+    await view.unmount();
+  });
+
+  it("opens a link to a trusted site directly", async () => {
+    const view = await renderTrusted("[Docs](https://docs.example.test/a)", ["example.test"]);
+    await act(async () => {
+      view.link()?.click();
+    });
+    expect(alert).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(linking.openURL).toHaveBeenCalledWith("https://docs.example.test/a");
+    });
+    await view.unmount();
   });
 });
 

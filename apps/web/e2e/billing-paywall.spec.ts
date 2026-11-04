@@ -29,58 +29,7 @@ async function enableBilling(route: Route, path: "me" | "bootstrap") {
   await route.fulfill({ response, json: body });
 }
 
-test("billing paywall holds the app until the subscription is active", async ({
-  page,
-}, testInfo) => {
-  const stamp = Date.now();
-  await signup(page, `billing-${stamp}@rakazo.test`, "password12", `Billing ${stamp}`);
-  await completeOnboarding(page);
-
-  await page.route("**/api/auth/capabilities", async (route) => {
-    const response = await route.fetch();
-    await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
-  });
-  await page.route("**/rpc/me", (route) => enableBilling(route, "me"));
-  await page.route("**/rpc/bootstrap", (route) => enableBilling(route, "bootstrap"));
-  let status = billingStatus({});
-  await page.route("**/rpc/billing/status", (route) => route.fulfill({ json: { json: status } }));
-  await page.reload();
-
-  const paywall = page.getByTestId("billing-paywall");
-  await expect(paywall.getByRole("button", { name: "Start 7-day free trial" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "$12 / month" })).toBeVisible();
-  await expect(paywall.getByRole("button", { name: "Log out" })).toBeVisible();
-  await captureScreenshot(page, testInfo, "billing-paywall");
-
-  // An unpaid subscription resumes in the portal rather than starting a second checkout.
-  status = billingStatus({ trialAvailable: false, state: "unpaid", hasCustomer: true });
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await expect(paywall.getByRole("button", { name: "Manage billing" })).toBeVisible();
-  await expect(paywall.getByRole("button", { name: "Subscribe" })).toHaveCount(0);
-  await captureScreenshot(page, testInfo, "billing-paywall-unpaid");
-
-  status = billingStatus({
-    access: true,
-    trialAvailable: false,
-    state: "active",
-    seats: 3,
-    currentPeriodEndsAt: "2030-01-15T12:00:00.000Z",
-    hasCustomer: true,
-  });
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await expect(page.getByText("Chief").first()).toBeVisible();
-
-  const settings = await openUserSettings(page, "billing");
-  await expect(settings).toHaveAttribute("data-settings-section", "billing");
-  const billing = settings.getByTestId("billing-settings");
-  await expect(billing.getByRole("heading", { name: "Active", exact: true })).toBeVisible();
-  await expect(billing.getByText(/\$12 \/ month\s*3 seats/)).toBeVisible();
-  await expect(billing.getByText(/^Renews /)).toBeVisible();
-  await expect(billing.getByRole("button", { name: "Manage" })).toBeVisible();
-  await captureScreenshot(page, testInfo, "settings-billing");
-});
-
-test("choose free API keys or monthly credits, then add a one-time top-up", async ({
+test("choose your own key or monthly credits, then add a one-time top-up", async ({
   page,
 }, testInfo) => {
   const stamp = Date.now();
@@ -94,19 +43,25 @@ test("choose free API keys or monthly credits, then add a one-time top-up", asyn
   await page.route("**/rpc/bootstrap", (route) => enableBilling(route, "bootstrap"));
   let status = billingStatus({
     creditPurchasesEnabled: true,
+    byokPriceCents: 1000,
     funding: null,
     balanceUsd: 0,
     monthlyAmountCents: null,
-    trialAvailable: false,
-    trialDays: 0,
   });
   await page.route("**/rpc/billing/status", (route) => route.fulfill({ json: { json: status } }));
   await page.reload();
   await expect(page.getByRole("heading", { name: "Choose how to use Rakazo" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Connect my own", exact: true })).toBeVisible();
+  await expect(page.getByText("$10 / month", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Works with your ChatGPT or Claude plan.", { exact: true }),
+  ).toBeVisible();
+  // Only the own-key plan has a trial; credits are resold at cost.
+  await expect(
+    page.getByRole("button", { name: "Start 7-day free trial", exact: true }),
+  ).toBeVisible();
   const planSelect = page.getByRole("combobox", { name: "Monthly credits" });
   await expect(planSelect).toHaveCSS("height", "48px");
-  await expect(planSelect).toContainText("$20 / month");
+  await expect(planSelect).toContainText("$30 / month");
   await planSelect.click();
   const options = page.locator('[data-slot="select-content"]');
   await expect
@@ -120,10 +75,18 @@ test("choose free API keys or monthly credits, then add a one-time top-up", asyn
   expect(optionsBox!.y).toBeGreaterThanOrEqual(triggerBox!.y + triggerBox!.height);
   await captureScreenshot(page, testInfo, "billing-credit-options");
   await page.keyboard.press("Escape");
-  await expect(
-    page.getByText("$20 in monthly model credits. No API key needed.", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText("All $30 goes to model usage.", { exact: true })).toBeVisible();
   await captureScreenshot(page, testInfo, "billing-credit-choice");
+  // Leaving before choosing a plan: log out or delete the account, without reaching settings.
+  await page.getByRole("button", { name: "Account", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Log out" })).toBeVisible();
+  await captureScreenshot(page, testInfo, "billing-account-menu");
+  await page.getByRole("menuitem", { name: "Delete account" }).click();
+  const deletion = page.getByRole("dialog", { name: "Delete account" });
+  await expect(deletion.getByLabel("Current password")).toBeVisible();
+  await captureScreenshot(page, testInfo, "billing-delete-account");
+  await page.keyboard.press("Escape");
+  await expect(deletion).toHaveCount(0);
   let purchase: { amountCents: number; monthly: boolean } | undefined;
   await page.route("**/rpc/billing/purchaseCredits", async (route) => {
     purchase = route.request().postDataJSON().json;
@@ -131,19 +94,22 @@ test("choose free API keys or monthly credits, then add a one-time top-up", asyn
       access: true,
       creditPurchasesEnabled: true,
       funding: "credits",
-      balanceUsd: 20,
-      monthlyAmountCents: 2000,
+      balanceUsd: 30,
+      monthlyAmountCents: 3000,
       state: "active",
       hasCustomer: true,
-      price: { ...price, amount: 2000 },
+      price: { ...price, amount: 3000 },
+      computerHoursLeft: 13,
     });
     await route.fulfill({ json: { json: { url: new URL("/app", page.url()).href } } });
   });
-  await page.getByRole("button", { name: "Continue with credits" }).click();
+  await page.getByRole("button", { name: "Subscribe to Rakazo credits", exact: true }).click();
   await expect(page.getByText("Chief").first()).toBeVisible();
-  expect(purchase).toEqual({ amountCents: 2000, monthly: true });
+  expect(purchase).toEqual({ amountCents: 3000, monthly: true });
   const settings = await openUserSettings(page, "billing");
-  await expect(settings.getByText("$20.00", { exact: true })).toBeVisible();
+  await expect(settings.getByText("$30.00", { exact: true })).toBeVisible();
+  await expect(settings.getByText("Computer hours left", { exact: true })).toBeVisible();
+  await expect(settings.getByText("13", { exact: true })).toBeVisible();
   await captureScreenshot(page, testInfo, "billing-credit-balance");
   await settings.getByRole("button", { name: "Add credits", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add credits" });
@@ -177,6 +143,63 @@ test("choose free API keys or monthly credits, then add a one-time top-up", asyn
   });
   await page.getByRole("button", { name: "Connect my own", exact: true }).click();
   await expect(page.getByText("Chief").first()).toBeVisible();
+
+  status = billingStatus({
+    access: true,
+    trialAvailable: false,
+    creditPurchasesEnabled: true,
+    byokPriceCents: 1000,
+    byokFreeUntil: "2030-01-15T12:00:00.000Z",
+    funding: "byok",
+    balanceUsd: 0,
+    monthlyAmountCents: null,
+  });
+  await page.reload();
+  await expect(page.getByText("Free plan ends Jan 15, 2030", { exact: true })).toBeVisible();
+  await captureScreenshot(page, testInfo, "sidebar-free-plan-ends");
+  await page.getByRole("button", { name: "Upgrade", exact: true }).click();
+  const plans = page.getByRole("dialog", { name: "Choose how to use Rakazo" });
+  await expect(plans.getByText("$10 / month", { exact: true })).toBeVisible();
+  await expect(
+    plans.getByRole("button", { name: "Subscribe with your own AI", exact: true }),
+  ).toBeVisible();
+  await expect(plans.getByRole("button", { name: "Account", exact: true })).toHaveCount(0);
+  await expect(page).toHaveURL(/[?&]plans/);
+  await captureScreenshot(page, testInfo, "billing-upgrade-plans");
+  await page.keyboard.press("Escape");
+  await expect(plans).toHaveCount(0);
+  await expect(page).not.toHaveURL(/[?&]plans/);
+  await expect(page.getByText("Chief").first()).toBeVisible();
+
+  await page.goto("/app?plans");
+  // The bare route redirects to the first chat and keeps the link's `plans` param.
+  await expect(page).toHaveURL(/\/app\/[^/?]+\?plans$/);
+  await expect(plans).toBeVisible();
+  let selectedFunding = false;
+  await page.route("**/rpc/billing/selectFunding", async (route) => {
+    selectedFunding = true;
+    await route.fulfill({ json: { json: { ok: true } } });
+  });
+  await page.route("**/rpc/billing/checkout", (route) =>
+    route.fulfill({ json: { json: { url: new URL("/app?paid", page.url()).href } } }),
+  );
+  await Promise.all([
+    page.waitForURL(/[?&]paid/),
+    plans.getByRole("button", { name: "Subscribe with your own AI", exact: true }).click(),
+  ]);
+  expect(selectedFunding).toBe(false);
+  await page.unroute("**/rpc/billing/selectFunding");
+  await expect(page.getByText("Chief").first()).toBeVisible();
+  const freePlan = await openUserSettings(page, "billing");
+  await expect(
+    freePlan.getByText("Using your API key. Free plan ends Jan 15, 2030.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    freePlan.getByRole("button", { name: "Subscribe for $10 / month", exact: true }),
+  ).toBeVisible();
+  await captureScreenshot(page, testInfo, "billing-free-plan-ends");
+  await page.keyboard.press("Escape");
+
   status = billingStatus({
     access: true,
     creditPurchasesEnabled: true,
@@ -201,4 +224,49 @@ test("choose free API keys or monthly credits, then add a one-time top-up", asyn
     reactivated.getByRole("button", { name: "Use Rakazo credits", exact: true }),
   ).toHaveCount(0);
   expect(purchase).toEqual({ amountCents: 5000, monthly: false });
+});
+
+test("end an own-key trial early to get full computer hours", async ({ page }, testInfo) => {
+  await signup(page, `trial-end-${Date.now()}@rakazo.test`, "password12", "Demo Customer");
+  await completeOnboarding(page);
+  await page.route("**/api/auth/capabilities", async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), billing: true } });
+  });
+  await page.route("**/rpc/me", (route) => enableBilling(route, "me"));
+  await page.route("**/rpc/bootstrap", (route) => enableBilling(route, "bootstrap"));
+  const trial = billingStatus({
+    access: true,
+    trialAvailable: false,
+    creditPurchasesEnabled: true,
+    byokPriceCents: 1000,
+    funding: "byok",
+    balanceUsd: 0,
+    monthlyAmountCents: null,
+    state: "trialing",
+    trialEndsAt: "2030-01-15T12:00:00.000Z",
+    currentPeriodEndsAt: "2030-01-15T12:00:00.000Z",
+    hasCustomer: true,
+    computerHoursLeft: 4,
+  });
+  await page.route("**/rpc/billing/status", (route) => route.fulfill({ json: { json: trial } }));
+  let ended = false;
+  await page.route("**/rpc/billing/endTrial", async (route) => {
+    ended = true;
+    await route.fulfill({
+      json: { json: { ...trial, state: "active", trialEndsAt: null, computerHoursLeft: 25 } },
+    });
+  });
+  await page.reload();
+  const settings = await openUserSettings(page, "billing");
+  await expect(
+    settings.getByText("Trials get fewer hours to prevent abuse.", { exact: true }),
+  ).toBeVisible();
+  await captureScreenshot(page, testInfo, "billing-trial-computer-hours");
+  await settings.getByRole("button", { name: "Start plan now", exact: true }).click();
+  const confirm = page.getByRole("alertdialog", { name: "Start your plan now?" });
+  await expect(confirm.getByText(/charged \$10(\.00)? today/)).toBeVisible();
+  await captureScreenshot(page, testInfo, "billing-end-trial-confirm");
+  await confirm.getByRole("button", { name: "Start plan", exact: true }).click();
+  await expect.poll(() => ended).toBe(true);
 });

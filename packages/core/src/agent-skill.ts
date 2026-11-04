@@ -11,7 +11,6 @@ export type SkillSource = "user" | "builtin" | "plugin";
 export type ParsedSkillMd = {
   name: string;
   description: string;
-  /** Markdown body after the frontmatter fence. */
   body: string;
   /**
    * All frontmatter keys as parsed scalars/structures. Unknown keys are preserved
@@ -49,18 +48,20 @@ const ROUTINE_SKILL_STOP = new Set([
   "a",
   "an",
 ]);
+// Detection, expansion, and import renames must agree on mention boundaries.
+const ROUTINE_SKILL_LEAD = "[\\s(,，。、；：！？（【「『《]";
+const ROUTINE_SKILL_END = "(?=[\\s,.)，。、；：！？）】」』》]|$)";
 /** Fallback when no catalog is available: @Token with optional Title-case words. */
-const ROUTINE_SKILL_MENTION =
-  /(?:^|[\s(,])@([A-Za-z][\w-]*(?:[ ]+[A-Za-z][\w-]*){0,5})(?=[\s,.)]|$)/g;
+const ROUTINE_SKILL_MENTION = new RegExp(
+  `(?:^|${ROUTINE_SKILL_LEAD})@([A-Za-z][\\w-]*(?:[ ]+[A-Za-z][\\w-]*){0,5})${ROUTINE_SKILL_END}`,
+  "g",
+);
 
 export function isSkillReadOnly(source: SkillSource): boolean {
   return source === "builtin" || source === "plugin";
 }
 
-/**
- * Parse a SKILL.md document. Requires YAML frontmatter with `name` and `description`.
- * Extra frontmatter keys are kept in `frontmatter`.
- */
+/** Requires YAML frontmatter with `name` and `description`; extra keys are kept in `frontmatter`. */
 export function parseSkillMd(content: string): ParsedSkillMd | { error: string } {
   const trimmed = content.replace(/^\uFEFF/, "");
   const match = FRONTMATTER_FENCE.exec(trimmed);
@@ -169,7 +170,10 @@ export function extractRoutineSkillMentions(prompt: string, knownNames?: string[
     // Match each mention once so a longer name does not also select its prefix.
     // Each capture identifies its catalog name without changing regex case matching.
     const alternatives = sorted.map((name) => `(${escapeRegExp(name)})`).join("|");
-    const re = new RegExp(`(?:^|[\\s(,])@(?:${alternatives})(?=[\\s,.)]|$)`, "gi");
+    const re = new RegExp(
+      `(?:^|${ROUTINE_SKILL_LEAD})@(?:${alternatives})${ROUTINE_SKILL_END}`,
+      "gi",
+    );
     const mentionedIndices = new Set(
       [...prompt.matchAll(re)].map((match) =>
         match.slice(1).findIndex((capture) => capture !== undefined),
@@ -275,7 +279,7 @@ export function expandSkillReferencesInPrompt(
     blocks.push(formatForcedSkillPrompt(skill.name, skill.content));
     // Strip the @mention token so the agent is not confused by a dangling pointer.
     remaining = remaining.replace(
-      new RegExp(`(^|[\\s(,])@${escapeRegExp(mention)}(?=[\\s,.)]|$)`, "gi"),
+      new RegExp(`(^|${ROUTINE_SKILL_LEAD})@${escapeRegExp(mention)}${ROUTINE_SKILL_END}`, "gi"),
       "$1",
     );
   }
@@ -296,7 +300,10 @@ export function renameRoutineSkillMentions(
   if (names.length === 0) return prompt;
   const next = new Map([...renames].map(([from, to]) => [from.toLowerCase(), to]));
   return prompt.replace(
-    new RegExp(`(^|[\\s(,])@(${names.map(escapeRegExp).join("|")})(?=[\\s,.)]|$)`, "gi"),
+    new RegExp(
+      `(^|${ROUTINE_SKILL_LEAD})@(${names.map(escapeRegExp).join("|")})${ROUTINE_SKILL_END}`,
+      "gi",
+    ),
     (match, lead: string, name: string) => {
       const to = next.get(name.toLowerCase());
       return to ? `${lead}@${to}` : match;

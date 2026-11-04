@@ -43,6 +43,6 @@ as the thread history they point at.
   completion carries its arguments.
 - `packages/adapters/src/executor.ts`: the completion callback records runtime-owned tools.
 - `packages/db/src/events.ts`: `approval.decided` carries `effectId`.
-- `docs/self-host.md`: the event and an alert query.
+- `docs/self-host-observability.md`: the event and an alert query.
 
 Everything else is in `packages/adapters/src/tool-call-event.ts` and its tests.

@@ -1,11 +1,11 @@
 import { t } from "@lingui/core/macro";
 import { Trans } from "@lingui/react/macro";
-import type { Bot, ComputerStatus, Routine } from "@rakazo/contracts";
+import type { Bot, ComputerStatus } from "@rakazo/contracts";
+import { BotAvatar, Button } from "@rakazo/ui-web";
 import { Maximize2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { ComputersUnavailableHint } from "../../components/ComputersUnavailableHint";
 import { screenIframeSandbox } from "../../lib/computer-screen";
-import { RoutineListHeader, RoutineListRow } from "../RoutineEditor";
 import { computerLabel, computerPlaceholder, DesktopKindEmptyState } from "./computer-view";
 
 type ComputerPanelProps = {
@@ -14,7 +14,7 @@ type ComputerPanelProps = {
   computerOpen: boolean;
   embeddedScreenUrl: string | null;
   /** Changes to load the screen again in a new frame. */
-  screenFrameKey?: number;
+  screenFrameKey?: string;
   screenFrameRef: (frame: HTMLIFrameElement | null) => void;
   computerScreenError: ReactNode;
   computerBooting: ReactNode;
@@ -26,11 +26,6 @@ type ComputerPanelProps = {
   onRecoveryDismissed: () => void;
   onOpenComputerSettings?: () => void;
   onOpen: () => void;
-  routines: Routine[];
-  runningRoutineId?: string;
-  onCreateRoutine: () => void;
-  onEditRoutine: (routine: Routine) => void;
-  onStopRun: () => void;
 };
 
 export function ComputerPanel({
@@ -50,12 +45,52 @@ export function ComputerPanel({
   onRecoveryDismissed,
   onOpenComputerSettings,
   onOpen,
-  routines,
-  runningRoutineId,
-  onCreateRoutine,
-  onEditRoutine,
-  onStopRun,
 }: ComputerPanelProps) {
+  // A clickable preview invites a boot that costs money, so an idle computer only wakes from its button.
+  const idle =
+    !computerOpen &&
+    !booting &&
+    !computerBooting &&
+    !computerScreenError &&
+    !showComputerRecoveryHint &&
+    computer?.kind !== "desktop" &&
+    (!computer || computer.state === "stopped" || computer.state === "suspended");
+  if (idle) {
+    return (
+      <div
+        data-testid="computer-preview"
+        data-state="idle"
+        className="flex flex-col items-center gap-3 rounded-[14px] bg-muted/50 px-6 py-7"
+      >
+        <div className="relative">
+          <BotAvatar
+            avatarSet={bot.avatarSet}
+            color={bot.color}
+            identity={bot.id}
+            size={44}
+            className="opacity-50 grayscale"
+          />
+          <span
+            aria-hidden
+            className="absolute -end-3 -top-2 text-[11px] font-medium leading-none text-muted-foreground/70"
+          >
+            z<sup>z</sup>
+          </span>
+        </div>
+        <span className="text-sm text-muted-foreground">
+          <Trans>Asleep</Trans>
+        </span>
+        <Button variant="secondary" size="sm" data-testid="computer-preview-open" onClick={onOpen}>
+          <Trans>Wake</Trans>
+        </Button>
+      </div>
+    );
+  }
+  const canOpen = !computerScreenError && !showingRecoveryHint;
+  // The Open pill replaces the status text on hover; fade it so they never overlap.
+  const hideOnHover = canOpen
+    ? "transition-opacity group-hover:opacity-0 group-has-[:focus-visible]:opacity-0"
+    : "";
   return (
     <div>
       <div
@@ -65,11 +100,15 @@ export function ComputerPanel({
         }`}
       >
         {computerOpen ? (
-          <div className="grid h-full place-items-center text-sm text-muted-foreground/80">
+          <div
+            className={`grid h-full place-items-center text-sm text-muted-foreground/80 ${hideOnHover}`}
+          >
             <Trans>Open in full window</Trans>
           </div>
         ) : computer?.kind === "desktop" ? (
-          <DesktopKindEmptyState className="grid h-full place-items-center px-6 text-center text-sm text-muted-foreground/80" />
+          <DesktopKindEmptyState
+            className={`grid h-full place-items-center px-6 text-center text-sm text-muted-foreground/80 ${hideOnHover}`}
+          />
         ) : computer?.state === "running" && embeddedScreenUrl && !computerScreenError ? (
           <iframe
             key={screenFrameKey}
@@ -82,7 +121,9 @@ export function ComputerPanel({
             style={{ pointerEvents: "none" }}
           />
         ) : (
-          <div className="grid h-full place-items-center px-6 text-center text-sm text-muted-foreground/80">
+          <div
+            className={`grid h-full place-items-center px-6 text-center text-sm text-muted-foreground/80 ${hideOnHover}`}
+          >
             {computerScreenError ??
               (showComputerRecoveryHint ? (
                 <ComputersUnavailableHint
@@ -101,7 +142,7 @@ export function ComputerPanel({
               ))}
           </div>
         )}
-        {!computerScreenError && !showingRecoveryHint ? (
+        {canOpen ? (
           <button
             type="button"
             data-testid="computer-preview-open"
@@ -109,27 +150,13 @@ export function ComputerPanel({
             aria-label={t`Open`}
             onClick={onOpen}
           >
-            <span className="inline-flex items-center gap-2 rounded-full bg-overlay px-3.5 py-2 text-[14px] text-foreground shadow-md">
+            <span className="inline-flex items-center gap-2 rounded-full bg-background px-3.5 py-2 text-[14px] text-foreground shadow-md">
               <Maximize2 size={15} strokeWidth={1.9} aria-hidden />
               <Trans>Open</Trans>
             </span>
           </button>
         ) : null}
       </div>
-      <p className="mt-2 truncate text-[13.5px] text-muted-foreground" dir="auto">
-        {t`${bot.name}'s screen`}
-      </p>
-
-      <RoutineListHeader onCreate={onCreateRoutine} />
-      {routines.map((routine) => (
-        <RoutineListRow
-          key={routine.id}
-          routine={routine}
-          running={runningRoutineId === routine.id}
-          onOpen={() => onEditRoutine(routine)}
-          onStop={onStopRun}
-        />
-      ))}
     </div>
   );
 }

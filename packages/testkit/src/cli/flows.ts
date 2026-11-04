@@ -7,10 +7,10 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
-import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import { computerTestSandbox } from "../computer-test-config.js";
 import { FLOWS } from "../flows/index.js";
 import type { FlowResult } from "../flows/runner.js";
+import { disposableDatabaseEnv, startPostgres } from "./postgres.js";
 
 const { values } = parseArgs({
   options: {
@@ -58,13 +58,12 @@ async function main() {
 
   // This CLI owns a disposable database; it never touches an inherited one.
   const dataDir = mkdtempSync(path.join(tmpdir(), "rakazo-flows-"));
-  const database = await new PostgreSqlContainer("postgres:18-alpine").start();
+  const database = await startPostgres();
   let stop: (() => Promise<void>) | undefined;
   let closeSupervisor: (() => Promise<void>) | undefined;
   try {
     Object.assign(process.env, {
-      DATABASE_URL: database.getConnectionUri(),
-      REALTIME_DATABASE_URL: database.getConnectionUri(),
+      ...disposableDatabaseEnv(database.getConnectionUri()),
       WAKEUP_DRIVER: "memory",
       SANDBOX_PROVIDER: sandbox.provider,
       ...(sandbox.provider === "docker"
@@ -91,6 +90,8 @@ async function main() {
       COMPOSIO_API_KEY: "",
       CLOUD_AGENT_PROVIDER: "",
       EMAIL_PROVIDER: "none",
+      // Flow MCP servers, such as connect-mcp's task tracker, listen on loopback in this process.
+      MCP_ALLOW_PRIVATE_ENDPOINT: "true",
       // Billing would require a funded credits account; flows pay the model directly.
       STRIPE_SECRET_KEY: "",
       STRIPE_WEBHOOK_SECRET: "",
@@ -137,6 +138,8 @@ async function main() {
       sandboxProvider: sandbox.provider,
       agentRuntime: "pi",
       e2bApiKey: process.env.E2B_API_KEY,
+      novitaApiKey: process.env.NOVITA_API_KEY,
+      sandboxTemplate: process.env.SANDBOX_TEMPLATE,
       boatApiKey: process.env.BOAT_API_KEY,
       boatApiUrl: process.env.BOAT_API_URL,
       wakeupDriver: "memory",

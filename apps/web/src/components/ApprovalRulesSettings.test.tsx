@@ -86,7 +86,7 @@ async function render(scope: "account" | "space" = "account") {
 
 const button = (container: HTMLElement, name: string, within = "") =>
   [...container.querySelectorAll<HTMLButtonElement>(`${within} button`)].find(
-    (candidate) => candidate.textContent === name,
+    (candidate) => candidate.textContent === name || candidate.getAttribute("aria-label") === name,
   );
 
 it("sets the mode, and lists Auto only when an approval model is there", async () => {
@@ -168,8 +168,22 @@ it("shows what older rules do, including email and purchase ones", async () => {
   try {
     await vi.waitFor(() => expect(container.textContent).toContain("Send email"));
     expect(button(container, "Ask", rules)?.getAttribute("aria-pressed")).toBe("true");
-    expect(container.querySelector(rules)?.textContent).toContain("EmailAskRemove");
-    expect(container.querySelector(rules)?.textContent).toContain("PurchaseAllowRemove");
+    for (const [name, effect] of [
+      ["Email", "Ask"],
+      ["Purchase", "Allow"],
+    ]) {
+      const label = [...container.querySelectorAll(`${rules} .text-foreground`)].find(
+        (entry) => entry.textContent === name,
+      );
+      const row = label?.parentElement?.parentElement;
+      expect(row?.textContent).toContain(effect);
+      expect(row?.querySelector("[aria-pressed]")).toBeNull();
+      expect(
+        [...row!.querySelectorAll("button")].map(
+          (entry) => entry.textContent || entry.getAttribute("aria-label"),
+        ),
+      ).toEqual(["Remove"]);
+    }
     await act(async () => root.unmount());
   } finally {
     container.remove();

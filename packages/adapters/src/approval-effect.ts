@@ -6,6 +6,35 @@ import { argumentGiven } from "./update-bot-patch.js";
 
 export type ApprovalPausedToolResult = AgentToolExecutionResult & { terminate: true };
 
+const internalTermination = Symbol("internalTermination");
+
+export const OWNER_SETTINGS_REFUSAL_REPLY =
+  "I can't change that here. Make the change in Settings, or ask me again in a fresh chat.";
+
+/** Preserve trusted control provenance across result copies without exposing it in JSON. */
+export function internalTerminatingResult<T extends AgentToolExecutionResult>(result: T): T {
+  return Object.assign(result, { [internalTermination]: true });
+}
+
+export function isInternalTermination(result: unknown): boolean {
+  return !!result && typeof result === "object" && internalTermination in result;
+}
+
+/** A tool result that ends the turn with a final reply instead of pausing it. */
+export type TerminatingToolResult = AgentToolExecutionResult & { terminate: true };
+
+export function terminatingToolResult(
+  text: string,
+  details: Record<string, unknown>,
+): TerminatingToolResult {
+  return internalTerminatingResult({
+    kind: "agent_tool_result",
+    content: [{ type: "text", text }],
+    details,
+    terminate: true,
+  });
+}
+
 export interface ApprovedEffectReplay {
   kind: string;
   request: unknown;
@@ -335,12 +364,12 @@ export function catalogApprovalInnerArgs(catalog: {
 }
 
 export function approvalPausedToolResult(): ApprovalPausedToolResult {
-  return {
+  return internalTerminatingResult({
     kind: "agent_tool_result",
     content: [{ type: "text", text: "Waiting for approval." }],
     details: { approval: "paused" },
     terminate: true,
-  };
+  });
 }
 
 export function isToolPauseResult(result: unknown): result is ApprovalPausedToolResult {
@@ -353,9 +382,32 @@ export function isToolPauseResult(result: unknown): result is ApprovalPausedTool
   return pause.approval === "paused" || pause.secret === "paused";
 }
 
+/** Whether this tool result ends the live turn with a final reply rather than a pause. */
+export function isTerminatingReplyResult(result: unknown): boolean {
+  return (
+    isInternalTermination(result) &&
+    (result as { terminate?: unknown }).terminate === true &&
+    !isToolPauseResult(result)
+  );
+}
+
+/** The reply a terminating tool result carries, when its content holds text. */
+export function terminatingReplyText(result: {
+  content: ReadonlyArray<{ type: string; text?: unknown }>;
+}): string | undefined {
+  const text = result.content
+    .flatMap((part) => (part.type === "text" && typeof part.text === "string" ? [part.text] : []))
+    .join("\n")
+    .trim();
+  return text || undefined;
+}
+
 export function isApprovalPausedResult(result: unknown): result is ApprovalPausedToolResult {
   return isToolPauseResult(result);
 }
+
+export const DENIED_ACTION_ERROR =
+  "The user denied this action. Do not retry or rephrase it; tell the user and ask what they want instead.";
 
 export type DuplicateEffectGate =
   | { action: "execute" }
@@ -372,15 +424,12 @@ export type ExternalEffectStore = {
   };
 };
 
-export const DENIED_EFFECT_ERROR =
-  "The user denied this action. Do not retry or rephrase it; tell the user and ask what they want instead.";
-
 /** The result a retry of an effect the user denied gets back. It never ran. */
 export function isDeniedEffectResult(result: unknown): boolean {
   return (
     typeof result === "object" &&
     result !== null &&
-    (result as { error?: unknown }).error === DENIED_EFFECT_ERROR
+    (result as { error?: unknown }).error === DENIED_ACTION_ERROR
   );
 }
 
@@ -394,7 +443,7 @@ export function resolveDuplicateEffectGate(
   if (effect.status === "denied") {
     return {
       action: "return",
-      result: { error: DENIED_EFFECT_ERROR },
+      result: { error: DENIED_ACTION_ERROR },
     };
   }
   if (effect.status === "executing") {

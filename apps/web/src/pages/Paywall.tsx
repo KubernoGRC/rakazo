@@ -3,17 +3,23 @@ import type { BillingStatus } from "@rakazo/contracts";
 import { Button } from "@rakazo/ui-web";
 import { Check } from "lucide-react";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { AccountMenu } from "../components/AccountMenu";
 import { CreditChoice } from "../components/ModelCredits";
-import { leaveThroughAccessLogout } from "../lib/access-identity";
 import { formatBillingPrice } from "../lib/billing";
-import { clearSpaceSelection, rpc } from "../lib/rpc";
+import { rpc } from "../lib/rpc";
 import { useSignOut } from "../lib/sign-out";
 import { AuthFrame, submitClass } from "./Auth";
 
-export function PaywallPage({ status }: { status: BillingStatus }) {
+export function PaywallPage({
+  status,
+  dismissible = false,
+}: {
+  status: BillingStatus;
+  /** Opened from the app rather than required, so it closes instead of logging out. */
+  dismissible?: boolean;
+}) {
   return status.funding !== undefined ? (
-    <CreditChoice status={status} />
+    <CreditChoice status={status} dismissible={dismissible} />
   ) : (
     <LegacyPaywallPage status={status} />
   );
@@ -21,16 +27,9 @@ export function PaywallPage({ status }: { status: BillingStatus }) {
 
 function LegacyPaywallPage({ status }: { status: BillingStatus }) {
   const { t, i18n } = useLingui();
-  const navigate = useNavigate();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { signingOut, logOut } = useSignOut(() => {
-    clearSpaceSelection();
-    // Fork: continue to the access proxy's logout when the deployment names one.
-    void leaveThroughAccessLogout(true).then((leaving) => {
-      if (!leaving) navigate("/");
-    });
-  }, setError);
+  const { signingOut, logOut } = useSignOut("/sign-in", setError);
   // An unpaid or paused subscription resumes from the portal; a new checkout would bill twice.
   const resumable = status.state === "unpaid" || status.state === "paused";
   const showCheckout = status.canManage && !resumable;
@@ -115,15 +114,7 @@ function LegacyPaywallPage({ status }: { status: BillingStatus }) {
             <Trans>Manage billing</Trans>
           </Button>
         ) : null}
-        <Button
-          type="button"
-          variant="ghost"
-          className="mt-6 text-muted-foreground"
-          disabled={pending || signingOut}
-          onClick={() => void logOut()}
-        >
-          <Trans>Log out</Trans>
-        </Button>
+        <AccountMenu disabled={pending} signingOut={signingOut} onLogOut={() => void logOut()} />
       </div>
     </AuthFrame>
   );

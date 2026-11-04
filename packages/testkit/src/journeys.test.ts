@@ -16,7 +16,8 @@ import {
 } from "@rakazo/adapters";
 import type { createApp } from "@rakazo/api/app";
 import type { MessageBlock } from "@rakazo/contracts";
-import { ACTIVE_RUN_STATUSES, ONCE_ROUTINE_CRON } from "@rakazo/core";
+import { ACTIVE_RUN_STATUSES, ONCE_ROUTINE_CRON, resolveScreenProxySecret } from "@rakazo/core";
+import { openScreenCapability } from "@rakazo/core/node/screen-capability";
 import {
   appendEvent,
   createThreadEvents,
@@ -31,7 +32,7 @@ import { sessionCookieHeader } from "./index.js";
 import { createModelConnectionFixtureFetch } from "./model-connection-fixture.js";
 import { asSystem } from "./system-db.js";
 
-type App = { request: (input: string, init?: RequestInit) => Promise<Response> };
+type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
 process.env.WAKEUP_DRIVER = "memory";
 process.env.SANDBOX_PROVIDER = "fake";
 process.env.AGENT_RUNTIME = "scripted";
@@ -59,7 +60,7 @@ describeJourneys("required product journeys", () => {
 
   async function sendAndWait(app: App, cookie: string, botId: string, text: string) {
     const { runId } = await rpc<{ runId: string }>(app, cookie, "threads/send", { botId, text });
-    let terminal: { status: string; error: string | null } | null = null;
+    let terminal = null as { status: string; error: string | null } | null;
     await waitForDatabase(async () => {
       terminal = await prisma.run.findUnique({
         where: { id: runId },
@@ -107,7 +108,7 @@ describeJourneys("required product journeys", () => {
       }
     }
     for (const runId of targets) {
-      let terminal: { status: string; error: string | null } | null = null;
+      let terminal = null as { status: string; error: string | null } | null;
       await waitForDatabase(async () => {
         terminal = await prisma.run.findUnique({
           where: { id: runId },
@@ -416,8 +417,8 @@ describeJourneys("required product journeys", () => {
     );
     expect(chief.computerMode).toBe("team");
     expect(coder.computerMode).toBe("team");
-    expect(chiefRecord.computerId).toBe(coderRecord.computerId);
-    expect(chiefRecord.computerId).not.toBe(bobRecord.computerId);
+    expect(chiefRecord!.computerId).toBe(coderRecord!.computerId);
+    expect(chiefRecord!.computerId).not.toBe(bobRecord!.computerId);
 
     const bobList = await rpc<Bot[]>(app, bob, "bots/list");
     expect(bobList.map((b) => b.id)).not.toContain(chief.id);
@@ -551,10 +552,10 @@ describeJourneys("required product journeys", () => {
       where: { id: coder.id },
       include: { computer: true },
     });
-    expect(dedicatedRecord.computerId).not.toBe(chiefRecord.computerId);
+    expect(dedicatedRecord.computerId).not.toBe(chiefRecord!.computerId);
     await rpc<Bot>(app, ada, "bots/setComputer", { botId: coder.id, mode: "team" });
     const backOnTeam = await prisma.bot.findUniqueOrThrow({ where: { id: coder.id } });
-    expect(backOnTeam.computerId).toBe(chiefRecord.computerId);
+    expect(backOnTeam.computerId).toBe(chiefRecord!.computerId);
     await rpc<Bot>(app, ada, "bots/setComputer", { botId: coder.id, mode: "dedicated" });
     const reusedDedicated = await prisma.bot.findUniqueOrThrow({ where: { id: coder.id } });
     expect(reusedDedicated.computerId).toBe(dedicatedRecord.computerId);
@@ -782,9 +783,16 @@ describeJourneys("required product journeys", () => {
     const researcherScreen = await rpc<{ url: string | null }>(app, cookie, "computer/screenUrl", {
       botId: researcher.id,
     });
-    expect(writerScreen.url).toContain(writer.id);
-    expect(researcherScreen.url).toContain(researcher.id);
-    expect(writerScreen.url).not.toBe(researcherScreen.url);
+    const screenOf = (url: string | null) => {
+      const sealed = new URL(url ?? "");
+      const target = openScreenCapability(
+        `${sealed.pathname}${sealed.search}`,
+        resolveScreenProxySecret(),
+      )?.target;
+      return new URL(target?.path ?? "/", "http://screen.invalid").searchParams.get("screen");
+    };
+    expect(screenOf(writerScreen.url)).toBe(writer.id);
+    expect(screenOf(researcherScreen.url)).toBe(researcher.id);
   });
 
   it("3: disconnect and reconnect from a cursor reconstructs the thread", async () => {
@@ -1957,8 +1965,8 @@ describeJourneys("required product journeys", () => {
       instructions: "",
       notifyOnFinish: true,
     });
-    await rpc(app, cookie, "bots/update", { botId: bot.id, title: "Updated chief" });
-    expect((await rpc<Bot>(app, cookie, "bots/get", { botId: bot.id })).title).toBe(
+    await rpc(app, cookie, "bots/update", { botId: bot.id, description: "Updated chief" });
+    expect((await rpc<Bot>(app, cookie, "bots/get", { botId: bot.id })).description).toBe(
       "Updated chief",
     );
 
@@ -3316,7 +3324,7 @@ describeJourneys("required product journeys", () => {
       const card = JSON.stringify(pending.waiting.messages);
       expect(card).toContain("Create group “Crew”?");
       expect(card).toContain("Members: Alpha, Beta");
-      expect(card).not.toContain("Always allow this tool");
+      expect(card).toContain("Always allow this tool");
       expect(await activeGroups(me.userId, "Crew")).toEqual([]);
 
       await answerAndSettle(cookie, chief.id, pending, "allow");
@@ -3990,6 +3998,7 @@ type Bot = {
   sectionId: string | null;
   unread: boolean;
   computerMode: "team" | "dedicated";
+  fleetManagement: boolean;
   parentBotId?: string | null;
 };
 type Snap = {

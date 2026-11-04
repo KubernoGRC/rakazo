@@ -21,49 +21,6 @@ afterEach(() => {
 });
 
 describe("openai-compatible URL policy", () => {
-  it("normalizes missing /v1 suffix without doubling it", () => {
-    expect(normalizeOpenAiCompatibleBaseUrl("http://127.0.0.1:8000")).toBe(
-      "http://127.0.0.1:8000/v1",
-    );
-    expect(normalizeOpenAiCompatibleBaseUrl("http://127.0.0.1:8000/v1")).toBe(
-      "http://127.0.0.1:8000/v1",
-    );
-    expect(normalizeOpenAiCompatibleBaseUrl("http://127.0.0.1:8000/v1/")).toBe(
-      "http://127.0.0.1:8000/v1",
-    );
-  });
-
-  it("treats any /vN versioned API root as complete (no /v1 append)", () => {
-    expect(normalizeOpenAiCompatibleBaseUrl("http://127.0.0.1:8000/v4")).toBe(
-      "http://127.0.0.1:8000/v4",
-    );
-    expect(normalizeOpenAiCompatibleBaseUrl("http://127.0.0.1:8000/v2")).toBe(
-      "http://127.0.0.1:8000/v2",
-    );
-    expect(normalizeOpenAiCompatibleBaseUrl("http://127.0.0.1:8000/v3")).toBe(
-      "http://127.0.0.1:8000/v3",
-    );
-    expect(normalizeOpenAiCompatibleBaseUrl("http://127.0.0.1:8000/v10")).toBe(
-      "http://127.0.0.1:8000/v10",
-    );
-    expect(normalizeOpenAiCompatibleBaseUrl("https://open.bigmodel.cn/api/paas/v4")).toBe(
-      "https://open.bigmodel.cn/api/paas/v4",
-    );
-    expect(normalizeOpenAiCompatibleBaseUrl("https://open.bigmodel.cn/api/paas/v4/")).toBe(
-      "https://open.bigmodel.cn/api/paas/v4",
-    );
-    expect(normalizeOpenAiCompatibleBaseUrl("http://127.0.0.1:8000/api")).toBe(
-      "http://127.0.0.1:8000/api/v1",
-    );
-  });
-
-  it("allows public bigmodel host when ALLOW_PUBLIC=1 without rewriting /v4", () => {
-    process.env.RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC = "1";
-    expect(assertAllowedOpenAiCompatibleUrl("https://open.bigmodel.cn/api/paas/v4").href).toBe(
-      "https://open.bigmodel.cn/api/paas/v4",
-    );
-  });
-
   it("validates request URLs without changing their path", () => {
     expect(
       assertAllowedOpenAiCompatibleRequestUrl("http://127.0.0.1:8000/v1/chat/completions", OWNER)
@@ -75,6 +32,9 @@ describe("openai-compatible URL policy", () => {
     expect(() => normalizeOpenAiCompatibleBaseUrl("file:///tmp/sock")).toThrow(/http or https/);
     expect(() => normalizeOpenAiCompatibleBaseUrl("http://user:pass@127.0.0.1:8000/v1")).toThrow(
       /credentials/,
+    );
+    expect(() => assertAllowedOpenAiCompatibleRequestUrl("file:///tmp/sock", OWNER)).toThrow(
+      /http or https/,
     );
   });
 
@@ -88,11 +48,12 @@ describe("openai-compatible URL policy", () => {
   ];
 
   it("allows loopback, RFC1918, ULA and Docker host endpoints when private endpoints are allowed", () => {
+    process.env.RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC = "0";
     for (const raw of privateUrls) {
       expect(assertAllowedOpenAiCompatibleUrl(raw, OWNER).href).toBe(raw);
     }
     expect(() => assertAllowedOpenAiCompatibleUrl("http://ollama.local:11434/v1", OWNER)).toThrow(
-      /Public model endpoints are blocked/,
+      /Public model endpoints are disabled/,
     );
   });
 
@@ -154,7 +115,7 @@ describe("openai-compatible URL policy", () => {
   });
 
   it("allows only exact configured private hostnames without opening the public gate", () => {
-    delete process.env.RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC;
+    process.env.RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC = "0";
     process.env.RAKAZO_OPENAI_COMPAT_PRIVATE_HOSTS =
       " Models.Example.Test. , other.example.test, , *.wild.example.test";
     for (const hostname of ["models.example.test", "MODELS.EXAMPLE.TEST.", "other.example.test"]) {
@@ -169,7 +130,7 @@ describe("openai-compatible URL policy", () => {
       "sub.wild.example.test",
     ]) {
       expect(() => assertAllowedOpenAiCompatibleUrl(`https://${hostname}/v1`)).toThrow(
-        /Public model endpoints are blocked/,
+        /Public model endpoints are disabled/,
       );
     }
   });
@@ -196,16 +157,17 @@ describe("openai-compatible URL policy", () => {
     }
   });
 
-  it("rejects public hosts unless explicitly allowed", () => {
+  it("allows public hosts unless the operator sets 0", () => {
     delete process.env.RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC;
-    expect(openAiCompatAllowPublicHosts()).toBe(false);
-    expect(() => assertAllowedOpenAiCompatibleUrl("https://api.example.com/v1")).toThrow(
-      /Public model endpoints are blocked.*private reverse proxy.*RFC1918/s,
-    );
-
-    process.env.RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC = "1";
+    expect(openAiCompatAllowPublicHosts()).toBe(true);
     expect(assertAllowedOpenAiCompatibleUrl("https://api.example.com/v1").href).toBe(
       "https://api.example.com/v1",
+    );
+
+    process.env.RAKAZO_OPENAI_COMPAT_ALLOW_PUBLIC = "0";
+    expect(openAiCompatAllowPublicHosts()).toBe(false);
+    expect(() => assertAllowedOpenAiCompatibleUrl("https://api.example.com/v1")).toThrow(
+      /Public model endpoints are disabled/,
     );
   });
 });

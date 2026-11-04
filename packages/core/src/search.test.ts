@@ -125,6 +125,91 @@ describe("search helpers", () => {
     expect(snippetAroundMatch(text, "gamma", 20)).toContain("gamma");
   });
 
+  it("keeps the match after characters that expand when lowercased", () => {
+    const text = `${"İ".repeat(50)} needle result details`;
+    expect(matchesSearchQuery("needle", text)).toBe(true);
+    expect(snippetAroundMatch(text, " NEEDLE ")).toBe(`…${"İ".repeat(39)} needle result details`);
+  });
+
+  it("preserves snippet bounds and original casing after lowercase expansion", () => {
+    const text = `${"İ😀".repeat(50)} NeEdLe ${"tail ".repeat(30)}`;
+    const index = text.indexOf("NeEdLe");
+    expect(snippetAroundMatch(text, "needle")).toBe(`…${text.slice(index - 40, index + 80)}…`);
+  });
+
+  it.each(["i", "\u0307", "i\u0307"])(
+    "maps a match within an expanded character back to that character: %j",
+    (query) => {
+      const text = `${"x".repeat(80)}İ result details`;
+      expect(matchesSearchQuery(query, text)).toBe(true);
+      expect(snippetAroundMatch(text, query)).toBe(`…${"x".repeat(40)}İ result details`);
+    },
+  );
+
+  it("retains whole-string lowercase matching for contextual characters", () => {
+    const text = `${"İ".repeat(50)} ΟΣ result details`;
+    expect(matchesSearchQuery("ος", text)).toBe(true);
+    expect(snippetAroundMatch(text, "ος")).toBe(`…${"İ".repeat(39)} ΟΣ result details`);
+  });
+
+  it.each(["", "   ", "missing"])("keeps the leading fallback for %j", (query) => {
+    const text = "İ".repeat(150);
+    expect(snippetAroundMatch(text, query)).toBe(text.slice(0, 120));
+  });
+
+  it.each(["😀", "𠀀"])("keeps %s whole at the start of a matching snippet", (character) => {
+    const text = `xxxxx${character}${"a".repeat(39)}needle`;
+    const snippet = snippetAroundMatch(text, "needle");
+    expect(snippet).toBe(`…${character}${"a".repeat(39)}needle`);
+    expect(snippet).not.toMatch(/[\ud800-\udfff]/u);
+  });
+
+  it.each(["😀", "𠀀"])("keeps %s whole at the end of a matching snippet", (character) => {
+    const prefix = `needle${"a".repeat(113)}`;
+    const snippet = snippetAroundMatch(`${prefix}${character}z`, "needle");
+    expect(snippet).toBe(`${prefix}…`);
+    expect(snippet).not.toMatch(/[\ud800-\udfff]/u);
+  });
+
+  it.each(["", "   ", "missing"])("keeps the leading fallback well formed for %j", (query) => {
+    const prefix = "a".repeat(119);
+    const snippet = snippetAroundMatch(`${prefix}😀z`, query);
+    expect(snippet).toBe(prefix);
+    expect(snippet).not.toMatch(/[\ud800-\udfff]/u);
+  });
+
+  it("keeps both boundaries whole without exceeding the snippet text budget", () => {
+    const body = `😀${"a".repeat(39)}needle${"b".repeat(72)}`;
+    const snippet = snippetAroundMatch(`xxxxx${body}😀z`, "needle");
+    expect(snippet).toBe(`…${body}…`);
+    expect(snippet.slice(1, -1).length).toBeLessThanOrEqual(120);
+    expect(snippet).not.toMatch(/[\ud800-\udfff]/u);
+  });
+
+  it.each([
+    { maxLen: 0, expected: "" },
+    { maxLen: 1, expected: "" },
+    { maxLen: 2, expected: "😀" },
+  ])(
+    "respects a $maxLen-unit fallback budget without splitting a character",
+    ({ maxLen, expected }) => {
+      const snippet = snippetAroundMatch("😀tail", "", maxLen);
+      expect(snippet).toBe(expected);
+      expect(snippet.length).toBeLessThanOrEqual(maxLen);
+      expect(snippet).not.toMatch(/[\ud800-\udfff]/u);
+    },
+  );
+
+  it("omits the leading ellipsis when the whole starting character reaches the text boundary", () => {
+    const text = `😀${"a".repeat(39)}needle`;
+    expect(snippetAroundMatch(text, "needle")).toBe(text);
+  });
+
+  it("retains a whole character that fits exactly at the matching snippet end", () => {
+    const body = `needle${"a".repeat(112)}😀`;
+    expect(snippetAroundMatch(`${body}tail`, "needle")).toBe(`${body}…`);
+  });
+
   it("uses groupId for group search message jumps", () => {
     expect(searchHitThreadTarget({ groupId: "group-1" })).toEqual({ groupId: "group-1" });
     expect(searchHitThreadTarget({ botId: "bot-1" })).toEqual({ botId: "bot-1" });

@@ -6,6 +6,7 @@ import type { ComputerExecutionLease } from "@rakazo/adapters";
 import {
   acquireComputerExecutionLease,
   applyTeachingDesktopInput,
+  COMPUTER_SCREEN_UNAVAILABLE,
   ComputerBusyError,
   checkpointAndStopComputer,
   clearInactiveUserComputerControl,
@@ -21,6 +22,7 @@ import {
   isSandboxGoneError,
   provisionComputer,
   queueComputerUpdate,
+  rateLimitEnds,
   releaseComputerExecutionLease,
   replaceComputer,
   resolveBotUploadPath,
@@ -30,6 +32,7 @@ import {
   scheduleComputerControlExpiry,
   scheduleComputerSleep,
   screenLeaseIdForRun,
+  sleepDeferReason,
   takeoverLeaseMs,
   toComputerRef,
   touchRunningComputer,
@@ -41,11 +44,18 @@ import {
   ComputerCommandSchema,
   foldComputerCommands,
 } from "@rakazo/contracts";
-import { ACTIVE_RUN_STATUSES } from "@rakazo/core";
+import { ACTIVE_RUN_STATUSES, scrollDirection } from "@rakazo/core";
 import { addScreenProxyCapability } from "@rakazo/core/node/screen-capability";
 import type { ComputerRunEnd, PrismaClient } from "@rakazo/db";
-import { createRepos, IsolationError, parseComputerMode, recordComputerRunEnd } from "@rakazo/db";
+import {
+  createRepos,
+  expireComputerExecutionLeases,
+  IsolationError,
+  parseComputerMode,
+  recordComputerRunEnd,
+} from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
+import { scrollPoint } from "../computer-input.js";
 import {
   executionBlocksUserTakeover,
   resolveBusyBotName,
@@ -126,12 +136,25 @@ export function computerRoutes(ctx: RouterContext) {
       stop: authed.computer.stop.handler(async ({ context, input }) => {
         const bot = await repos.getBot(context.actor, input.botId);
         if (!bot.computer) throw new IsolationError();
+        // A repeated Stop must not turn an unsafe guest back into an auto-startable one.
+        if (bot.computer.state === "quarantined") {
+          if (bot.computer.providerRef)
+            await deps.sandbox.stop(
+              toComputerRef(bot.computer),
+              computerContext(context.actor, bot.id, "stop"),
+            );
+          return computerStatus(deps, context.actor, input.botId);
+        }
         const controlLeaseId = bot.computer.controlLeaseId;
         const now = new Date();
         const claimed = await deps.prisma.computer.updateMany({
           where: {
             id: bot.computer.id,
-            state: { not: "suspending" },
+            // Provision may resume the sandbox after Stop returns; let the boot finish first. Stop
+            // acts on the state it read, so one that changed since is busy too.
+            state: { equals: bot.computer.state, notIn: ["booting", "suspending", "quarantined"] },
+            providerRef: bot.computer.providerRef,
+            kind: bot.computer.kind,
             maintenanceId: null,
             executionLeases: {
               none: { botId: { not: bot.id }, expiresAt: { gt: now } },
@@ -141,7 +164,7 @@ export function computerRoutes(ctx: RouterContext) {
         });
         if (claimed.count !== 1) {
           throw new ORPCError("CONFLICT", {
-            message: "Other Team bots are still using this computer",
+            message: "Computer is busy",
           });
         }
         const otherRun = await deps.prisma.run.findFirst({
@@ -161,24 +184,40 @@ export function computerRoutes(ctx: RouterContext) {
             message: "Other Team bots are still using this computer",
           });
         }
-        await deps.prisma.computerExecutionLease.deleteMany({
-          where: { computerId: bot.computer.id, botId: bot.id },
+        await expireComputerExecutionLeases(deps.prisma, {
+          computerId: bot.computer.id,
+          botId: bot.id,
         });
+        let stopping = false;
         try {
           let end: ComputerRunEnd = "stopped";
           if (bot.computer.providerRef) {
             const ctx = computerContext(context.actor, bot.id, "stop");
             const ref = toComputerRef(bot.computer);
             try {
-              await checkpointAndStopComputer(deps, bot.computer, ref, ctx);
+              if (bot.computer.state === "stopped" || bot.computer.state === "suspended") {
+                // It was saved when it went down and its provider keeps the disk, so a save would
+                // only wake it.
+                stopping = true;
+                await deps.sandbox.stop(ref, ctx);
+              } else {
+                await checkpointAndStopComputer(deps, bot.computer, ref, ctx, () => {
+                  stopping = true;
+                });
+              }
             } catch (error) {
               // The sandbox is already gone: nothing left to checkpoint or stop.
               if (!isSandboxGoneError(error)) throw error;
               end = "gone";
             }
           }
-          await deps.prisma.computer.update({
-            where: { id: bot.computer.id },
+          const stopped = await deps.prisma.computer.updateMany({
+            where: {
+              id: bot.computer.id,
+              state: "suspending",
+              providerRef: bot.computer.providerRef,
+              kind: bot.computer.kind,
+            },
             data: {
               state: "stopped",
               controlHolder: "none",
@@ -188,14 +227,20 @@ export function computerRoutes(ctx: RouterContext) {
               controlRunId: null,
             },
           });
+          if (stopped.count !== 1) return computerStatus(deps, context.actor, input.botId);
           await recordComputerRunEnd(deps.prisma, bot.computer, end);
         } catch (error) {
+          // A failed save, or a stop the provider put off, leaves the computer up: hand it back
+          // to idle sleep and metering instead of hiding it as an error.
+          const stillUp = !stopping || sleepDeferReason(error) !== undefined;
           await deps.prisma.computer
             .updateMany({
               where: { id: bot.computer.id, state: "suspending" },
-              data: { state: "error" },
+              data: { state: stillUp ? bot.computer.state : "error" },
             })
             .catch(() => undefined);
+          if (stillUp)
+            scheduleComputerSleep(deps.jobs, bot.computer.id, undefined, rateLimitEnds(error));
           throw error;
         }
         await deps.jobs.cancel(
@@ -298,23 +343,7 @@ export function computerRoutes(ctx: RouterContext) {
           };
         }
         if (hasActiveComputerControl(bot.computer) && bot.computer.controlBotId !== bot.id) {
-          const previousBotId = bot.computer.controlBotId!;
-          await revokeScreenControl(
-            deps,
-            bot.computer,
-            computerContext(context.actor, previousBotId, "screen.release"),
-            bot.computer.controlLeaseId ?? undefined,
-          );
-          await deps.prisma.computer.updateMany({
-            where: { id: bot.computer.id, controlLeaseId: bot.computer.controlLeaseId },
-            data: {
-              controlHolder: "none",
-              controlLeaseId: null,
-              controlLeaseExpiresAt: null,
-              controlBotId: null,
-              controlRunId: null,
-            },
-          });
+          await releaseComputerControl(deps, context.actor, bot.computer.controlBotId!, "skipped");
           bot = await repos.getBot(context.actor, input.botId);
           if (!bot.computer) throw new IsolationError();
         }
@@ -400,11 +429,10 @@ export function computerRoutes(ctx: RouterContext) {
             expiresAt: current.controlLeaseExpiresAt!.toISOString(),
           };
         }
-        try {
-          await scheduleComputerControlExpiry(deps.jobs, bot.computer.id, leaseId, expiresAt);
-        } catch (error) {
-          await deps.prisma.computer.updateMany({
-            where: { id: bot.computer.id, controlLeaseId: leaseId },
+        const computerId = bot.computer.id;
+        const withdrawGrant = () =>
+          deps.prisma.computer.updateMany({
+            where: { id: computerId, controlLeaseId: leaseId },
             data: {
               controlHolder: "none",
               controlLeaseId: null,
@@ -413,6 +441,22 @@ export function computerRoutes(ctx: RouterContext) {
               controlRunId: null,
             },
           });
+        if (waitingForTakeover && executionLease) {
+          // The wait can end (expired, or yielded to newer work) between the read above and the
+          // grant. Bound to an ended run, the user would share the screen with the next run.
+          const waiting = await deps.prisma.run.findUnique({
+            where: { id: executionLease.runId },
+            select: { status: true },
+          });
+          if (!ACTIVE_RUN_STATUSES.some((status) => status === waiting?.status)) {
+            await withdrawGrant();
+            throw new ORPCError("CONFLICT", { message: "Computer control changed; try again" });
+          }
+        }
+        try {
+          await scheduleComputerControlExpiry(deps.jobs, computerId, leaseId, expiresAt);
+        } catch (error) {
+          await withdrawGrant();
           throw error;
         }
         if (bot.thread) {
@@ -456,9 +500,9 @@ export function computerRoutes(ctx: RouterContext) {
               : input.kind === "scroll"
                 ? {
                     kind: "scroll" as const,
-                    direction:
-                      input.payload.direction === "up" ? ("up" as const) : ("down" as const),
+                    direction: scrollDirection(input.payload.direction),
                     amount: Number(input.payload.amount ?? 3),
+                    ...scrollPoint(input.payload),
                     sensitive,
                   }
                 : {
@@ -528,10 +572,21 @@ export function computerRoutes(ctx: RouterContext) {
             data: { updatedAt: new Date() },
           });
           scheduleComputerSleep(deps.jobs, bot.computer.id);
-          const bytes = await deps.sandbox.readFile(toComputerRef(bot.computer), storedPath, ctx, {
-            maxBytes: MAX_COMPUTER_TEXT_FILE_BYTES,
-          });
-          content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          const bytes = await deps.sandbox
+            .readFile(toComputerRef(bot.computer), storedPath, ctx, {
+              maxBytes: MAX_COMPUTER_TEXT_FILE_BYTES,
+            })
+            .catch((error: unknown) => {
+              if (error instanceof Error && /exceeds|too large/i.test(error.message)) {
+                throw new ORPCError("BAD_REQUEST", { message: "file is too large to preview" });
+              }
+              throw error;
+            });
+          try {
+            content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          } catch {
+            throw new ORPCError("BAD_REQUEST", { message: "file is not a text file" });
+          }
         } else {
           try {
             content = await deps.home.readFile(bot.computer.homeKey, storedPath, ctx, {
@@ -720,7 +775,7 @@ export function computerRoutes(ctx: RouterContext) {
           )
           .catch(async (error: unknown) => {
             if (isComputerScreenUnavailable(error)) {
-              throw new ORPCError("CONFLICT", { message: error.message });
+              throw new ORPCError("CONFLICT", { message: COMPUTER_SCREEN_UNAVAILABLE });
             }
             return clearGoneSandbox(deps, computer, error);
           });
@@ -1024,7 +1079,6 @@ async function bindWaitingTakeoverToControl(
     if (!waitingForTakeover) return;
     if (input.controlRunId === executionLease.runId) return;
 
-    // Confirm the locked lease row still matches before writing controlRunId.
     const leaseStillCurrent = await tx.computerExecutionLease.count({
       where: {
         computerId: input.computerId,
@@ -1083,7 +1137,7 @@ async function clearGoneSandbox(
   error: unknown,
 ): Promise<null> {
   if (!isSandboxGoneError(error)) throw error;
-  getLogger().error(`computer ${computer.id} sandbox ${computer.providerRef} is gone`, error);
+  getLogger().warn(`computer ${computer.id} sandbox ${computer.providerRef} is gone`, { error });
   const cleared = await deps.prisma.computer.updateMany({
     where: { id: computer.id, providerRef: computer.providerRef },
     data: { state: "stopped", providerRef: null },

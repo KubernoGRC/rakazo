@@ -1,6 +1,9 @@
 import type {
+  BillingCancellationReason,
   CacheCapabilities as ConnectionCacheCapabilities,
   ConnectionCatalogItem,
+  ModelApiProtocol,
+  PurchaseCardField,
   SandboxKind,
 } from "@rakazo/contracts";
 
@@ -162,7 +165,14 @@ export type ComputerInput =
 
 export type ComputerAction =
   | ComputerInput
-  | { kind: "scroll"; direction: "up" | "down"; amount?: number }
+  /** With x and y, the wheel turns there, so it scrolls what is under that point. */
+  | {
+      kind: "scroll";
+      direction: "up" | "down" | "left" | "right";
+      amount?: number;
+      x?: number;
+      y?: number;
+    }
   | { kind: "wait"; ms: number }
   | { kind: "open"; path: string }
   | { kind: "launch"; application: string; uri?: string }
@@ -258,8 +268,21 @@ export interface ConnectorTool {
   inputSchema: Record<string, unknown>;
   /** Declared effect. `false` forces approval; `true` never relaxes the name-based gate. */
   readOnly?: boolean;
+  /** Set when the tool runs other actions named in its arguments; see ToolBatch. */
+  batch?: ToolBatch;
   /** In-process routing metadata. It is never exposed to the model. */
   route?: ConnectorRoute;
+}
+
+/**
+ * Where a batch tool's arguments name the actions it runs: `args[items][i][action]`, each with
+ * its own arguments at `args[items][i][arguments]`. Approval rules and the read/write check judge
+ * those actions, never the batch tool, so allowing one action cannot allow the rest.
+ */
+export interface ToolBatch {
+  items: string;
+  action: string;
+  arguments: string;
 }
 
 export interface ConnectorRoute {
@@ -433,9 +456,16 @@ export interface AgentSteeringMessage {
   id: string;
   messageId: string;
   text: string;
+  /**
+   * Who sent it. Only the run's own person ("user") is framed as a message to answer; anything
+   * else, or no origin, is passed on as a neutral note.
+   */
+  origin?: "user" | "member" | "messaging" | "webhook";
   /** Persisted history text before attachment paths are appended. */
   historyText?: string;
   images?: AgentInputImage[];
+  /** Server verified legacy attachment bytes remain available to file tools. */
+  imageFileFallback?: boolean;
 }
 
 /** Adapter-supplied cache policy metadata; absent fields mean unknown. */
@@ -455,6 +485,7 @@ export interface AgentRunModel {
   /** Cloudflare AI Gateway id stored with a gateway BYOK credential. */
   gatewayId?: string;
   baseUrl?: string;
+  apiProtocol?: ModelApiProtocol;
   headers?: Record<string, string>;
   /** The connection owner may reach a private or loopback `baseUrl`; absent means deny. */
   allowPrivateEndpoint?: boolean;
@@ -490,6 +521,11 @@ export interface AgentRunRequest {
   /** Awaited producer-side accounting, independent of event-consumer cancellation. */
   onUsage?: (event: Extract<AgentRuntimeEvent, { type: "usage" }>) => void | Promise<void>;
   contextStrategy?: AgentContextStrategy;
+  /**
+   * MCP servers that must return tool results whole. Direct tools match `slugs`
+   * (`mcp__<slug>__<tool>`); catalog calls match `ids` (`<server id>:<tool>`).
+   */
+  verbatimMcpServers?: { ids: readonly string[]; slugs: readonly string[] };
   /** Exclusive workflow cost bucket; retrieval tool turns are detected for answer calls. */
   usageOperationKind?: UsageOperationKind;
   botId: string;
@@ -508,6 +544,10 @@ export interface AgentRunRequest {
     images?: AgentInputImage[];
   }>;
   currentTurnImages?: AgentInputImage[];
+  /** A confirmed image belongs to this run, including a resumed waiting-input reply. */
+  currentRunRequiresImageInput?: boolean;
+  /** Server verified legacy attachment bytes remain available to file tools. */
+  currentTurnImageFileFallback?: boolean;
   tools: ConnectorTool[];
   model: AgentRunModel;
   /** Ordered, user-selected models eligible after provider unavailability. */
@@ -602,15 +642,32 @@ export interface ModelCallObserver {
 
 export type AgentRuntimeEvent =
   | { type: "text"; text: string }
+  /** Explicit provider reasoning lifecycle only; never contains reasoning text. */
+  | { type: "thinking"; active: boolean }
   /** A new assistant message starts; its text does not continue the previous text. */
   | { type: "turn" }
+  /** Messages sent while the bot worked were handed to the model before this turn. */
+  | {
+      type: "steered";
+      /** At least one came from the run's own person, in the app or a connected chat. */
+      fromRunUser: boolean;
+    }
   | {
       type: "progress";
       text: string;
       /** Provider-generated tool status rather than assistant-authored narration. */
       activity?: true;
     }
-  | { type: "tool"; name: string; args: Record<string, unknown>; executionId: string }
+  | {
+      type: "tool";
+      name: string;
+      args: Record<string, unknown>;
+      executionId: string;
+      /** The model reached this deferred built-in through use_tool. */
+      viaUseTool?: boolean;
+      /** Which model response made the call; calls from one response share it. */
+      response?: number;
+    }
   | {
       type: "ask";
       executionId?: string;
@@ -708,6 +765,7 @@ export interface BackgroundJobPayloads {
   "messaging.credential-cleanup": { installationId: string; ref: string };
   /** Reconcile durable remote-agent intent; scope is loaded from the database. */
   "cloud_agent.poll": { agentId: string };
+  "purchase.poll": { purchaseId: string };
   /** Read an Expo push receipt; the token is identified by its digest, never stored. */
   "push.receipt": { userId: string; ticketId: string; tokenDigest: string };
 }
@@ -786,6 +844,7 @@ export interface TransactionalEmail {
   subject: string;
   text: string;
   html?: string;
+  headers?: Record<string, string>;
 }
 
 export type MessagingReceipt = "typing" | "reaction";
@@ -849,6 +908,13 @@ export interface MessagingInboundMessage {
   channelName: string | null;
   /** Group roster addresses when the platform reports them; often empty. */
   participants: string[];
+  /**
+   * Member departures this event reports one at a time (Telegram service
+   * messages on a platform that sends no roster): addresses that left or were
+   * removed, plus our own bot leaving, which ends every membership because
+   * nothing more can be delivered to that channel.
+   */
+  departures?: { addresses: string[]; botLeft: boolean };
   content: string;
   mediaUrl: string | null;
   /** Files the platform only serves to the bot's credentials (Slack url_private, …). */
@@ -867,7 +933,6 @@ export interface MessagingInboundMessage {
   kind?: TeamChatMessageKind;
   /** Provider thread id for in-channel replies (Slack thread_ts); null for channel root. */
   replyThreadId?: string | null;
-  /** True when the sender is another bot/app. */
   senderIsBot?: boolean;
   /** Display names for room participants when the platform reports them. */
   participantNames?: string[];
@@ -951,6 +1016,8 @@ export interface WebSearchHit {
 export interface WebFetchRequest {
   url: string;
   maxChars?: number;
+  /** Characters of page text to skip, to read on after a truncated fetch. */
+  offset?: number;
   signal?: AbortSignal;
 }
 
@@ -972,15 +1039,39 @@ export interface BrowserCapabilities {
 
 export interface BrowserNavigateRequest {
   url: string;
+  /** Folder in the computer's home that a file download is saved to; without it, none is saved. */
+  downloads?: string;
   signal?: AbortSignal;
+}
+
+/** A file the page downloaded: where it was saved, or why it was not. */
+export interface BrowserDownload {
+  name?: string;
+  path?: string;
+  /** Bytes saved, or so far while it is still downloading. */
+  size?: number;
+  type?: string;
+  /** Still downloading when the result was sent; the file appears at `path` once it is done. */
+  state?: "downloading";
+  error?: string;
 }
 
 export interface BrowserNavigateResult {
   url: string;
   title: string;
+  /** The page it reached, as a snapshot shows it, when that could be read in time. */
+  tree?: string;
+  elements?: BrowserSnapshotNode[];
+  /** The page was still loading or waiting on its own requests when it was captured. */
+  loading?: boolean;
+  downloads?: BrowserDownload[];
   /** When set, the page tool could not operate; use computer_act instead. */
   fallback?: "computer_act";
   error?: string;
+  /** What the page did that the bot should know, such as an alert that was closed. */
+  note?: string;
+  /** A JavaScript dialog the page has open on the screen, which page tools cannot answer. */
+  dialog?: string;
 }
 
 export interface BrowserSnapshotRequest {
@@ -994,6 +1085,10 @@ export interface BrowserSnapshotNode {
   name: string;
   value?: string;
   tag?: string;
+  /** A native select's options: what the page shows, the value it keeps, and which one is chosen. */
+  options?: Array<{ label: string; value: string; selected?: boolean; disabled?: boolean }>;
+  /** How many options a long select has, when only the first ones and the chosen one are listed. */
+  optionsTotal?: number;
 }
 
 export interface BrowserSnapshotResult {
@@ -1006,11 +1101,14 @@ export interface BrowserSnapshotResult {
   loading?: boolean;
   fallback?: "computer_act";
   error?: string;
+  /** What the page did that the bot should know, such as an alert that was closed. */
+  note?: string;
+  /** A JavaScript dialog the page has open on the screen, which page tools cannot answer. */
+  dialog?: string;
 }
 
 export type BrowserActKind = "click" | "fill" | "type" | "upload";
 
-/** Most files one upload step may attach. */
 export const MAX_BROWSER_UPLOAD_FILES = 10;
 
 export type BrowserActStep =
@@ -1023,12 +1121,33 @@ export type BrowserActStep =
       text: string;
       /** Refuse the step unless the page is on this origin when it is applied. */
       origin?: string;
-      /** Which part of a saved login `text` is; a password is typed only into a password field. */
-      field?: "username" | "password";
+      /**
+       * What `text` is: a saved login's hidden field ("password", typed only into a password
+       * field) or visible field ("username"), or an approved purchase's card detail. A card fill
+       * always carries `origin`.
+       */
+      field?: "username" | "password" | "card";
+    }
+  | {
+      kind: "fill";
+      ref?: undefined;
+      text: string;
+      origin: string;
+      field: "card";
+      cardField: PurchaseCardField;
+    }
+  | {
+      kind: "pay_token";
+      ref?: undefined;
+      text: string;
+      origin: string;
+      merchantAccountId: string;
     };
 
 export interface BrowserActRequest {
   actions: BrowserActStep[];
+  /** Folder in the computer's home that a file download is saved to; without it, none is saved. */
+  downloads?: string;
   signal?: AbortSignal;
 }
 
@@ -1044,19 +1163,23 @@ export interface BrowserActResult {
   elements?: BrowserSnapshotNode[];
   /** The page was still loading or waiting on its own requests when that snapshot was taken. */
   loading?: boolean;
+  downloads?: BrowserDownload[];
   fallback?: "computer_act";
   error?: string;
+  /** What the page did that the bot should know, such as an alert that was closed. */
+  note?: string;
+  /** A JavaScript dialog the page has open on the screen, which page tools cannot answer. */
+  dialog?: string;
 }
 
 /** A sandbox must route these commands through its owned screen, never generic host execution. */
 export type PageBrowserCommand =
-  | { command: "navigate"; url: string }
+  | { command: "navigate"; url: string; downloads?: string }
   | { command: "snapshot" }
-  | { command: "act"; actions: BrowserActStep[] };
+  | { command: "act"; actions: BrowserActStep[]; downloads?: string };
 
 export type PageBrowserResult = Partial<BrowserSnapshotResult & BrowserActResult> & { ok: boolean };
 
-/** Vendor-neutral status for a remote cloud coding agent. */
 export type CloudAgentStatus = "running" | "finished" | "failed" | "cancelled" | "expired";
 
 export interface CloudAgentCapabilities {
@@ -1164,7 +1287,6 @@ export interface BillingPrice {
   intervalCount: number;
 }
 
-/** Full subscription state for one billing customer, re-fetched from the provider on every sync. */
 export interface BillingCreditPurchase {
   /** Stable provider payment identity, including any subsequent refund adjustment. */
   id: string;
@@ -1181,6 +1303,12 @@ export interface BillingCreditCheckoutRequest {
   cancelUrl: string;
 }
 
+export interface BillingByokCheckoutRequest extends Omit<BillingCreditCheckoutRequest, "monthly"> {
+  /** Omitted when the customer has already used its trial. */
+  trialDays?: number;
+}
+
+/** Full subscription state for one billing customer, re-fetched from the provider on every sync. */
 export interface BillingSubscriptionSnapshot {
   creditAmountCents?: number;
   subscriptionId: string;
@@ -1189,9 +1317,19 @@ export interface BillingSubscriptionSnapshot {
   status: BillingSubscriptionStatus;
   seats: number;
   trialEndsAt: Date | null;
+  /** Start of the period being billed, or of the trial while one runs. */
+  currentPeriodStartsAt: Date | null;
   currentPeriodEndsAt: Date | null;
   cancelAtPeriodEnd: boolean;
   endedAt: Date | null;
+  /** The flat own-key plan, which grants access without credits. */
+  byokPlan?: boolean;
+  /** What the own-key plan bills each month, which stays at the price it was bought at. */
+  byokPriceCents?: number;
+  /** Stable identity of the subscription's card across customers, when the provider has one. */
+  cardFingerprint?: string;
+  cancellationReason?: BillingCancellationReason;
+  cancellationComment?: string;
 }
 
 export interface BillingCheckoutRequest {

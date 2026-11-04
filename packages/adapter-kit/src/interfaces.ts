@@ -10,6 +10,7 @@ import type {
   AutoReviewResult,
   BackgroundJob,
   BackgroundJobHandlers,
+  BillingByokCheckoutRequest,
   BillingCheckoutRequest,
   BillingCreditCheckoutRequest,
   BillingCreditPurchase,
@@ -95,7 +96,7 @@ import type {
 
 export interface SandboxProvider {
   /** True when every running minute is billed, so the active-lifetime cap applies. */
-  billsWhileRunning?(computer: ComputerRef): boolean;
+  billsWhileRunning?(computer: Pick<ComputerRef, "kind">): boolean;
   describe(): AdapterDescriptor<SandboxCapabilities>;
   /** Workspace directory operations for hosts without the standard Unix command tools. */
   workspaceDirectories?(
@@ -135,7 +136,11 @@ export interface SandboxProvider {
    * choose between kinds at provision time implement it.
    */
   provisionKind?(): Promise<ComputerRef["kind"]>;
-  /** Read-only probe: true only when this exact reference is already running. */
+  /**
+   * Read-only probe that never starts or resumes anything. Resolves true only when the provider
+   * reports this exact reference running, and false only when it reports it not running or gone;
+   * throws when it cannot tell.
+   */
   isRunning?(computer: ComputerRef, context: AdapterContext): Promise<boolean>;
   /**
    * Read-only probe: true only when the provider already holds this reference stopped with its
@@ -241,6 +246,9 @@ export interface ConnectorProvider {
     context: AdapterContext,
   ): Promise<{ call: ConnectorCall; tool: ConnectorTool } | undefined>;
   execute(call: ConnectorCall, context: AdapterContext): AsyncIterable<ConnectorEvent>;
+  /** Release run-scoped state (open sessions) of a run that ended for good on
+   * this worker. A run that ended elsewhere is bounded by the provider itself. */
+  endRun?(runId: string): void;
 }
 
 export interface ConnectionAuthProvider {
@@ -266,6 +274,22 @@ export interface ManagedConnectorProvider
   listReconnectRefs?(context: AdapterContext): Promise<string[]>;
   connectionReady(context: AdapterContext, externalId: string): Promise<boolean>;
   warmDirectory?(): Promise<void>;
+  /** Map a begin() state or stored ref to the concrete remote account id, skipping excluded ids. */
+  resolveConnectedAccountId?(
+    userId: string,
+    slug: string,
+    currentRef: string | null | undefined,
+    excludeIds?: string[],
+    spaceId?: string,
+  ): Promise<string | undefined>;
+  /** Invalidate an unfinished browser authorization by its request id. */
+  cancelAuthorizationRequest?(requestId: string, context: AdapterContext): Promise<void>;
+  /** Delete remote accounts for `slug` that no local row still references. */
+  revokeUnreferencedAccounts?(
+    slug: string,
+    keepAccountIds: string[],
+    context: AdapterContext,
+  ): Promise<void>;
 }
 
 export interface MemoryStore {
@@ -450,6 +474,17 @@ export interface BillingProvider {
   createCreditCheckout?(input: BillingCreditCheckoutRequest): Promise<{ url: string }>;
   listCreditPurchases?(customerId: string): Promise<BillingCreditPurchase[]>;
   setMonthlyCredits?(customerId: string, amountCents: number): Promise<void>;
+  /** Flat monthly own-key plan: access without credits. */
+  createByokCheckout?(input: BillingByokCheckoutRequest): Promise<{ url: string }>;
+  /** Ends the customer's running trial now and bills the first period; a no-op without one. */
+  endTrial?(customerId: string): Promise<void>;
+  /** Ends every live own-key plan at its period end. */
+  endByokPlans?(customerId: string): Promise<void>;
+  /**
+   * Credits the customer's account; future invoices draw it down before charging. Idempotent per
+   * `referenceId`, so a retry after an unknown outcome never credits twice.
+   */
+  grantBalanceCredit?(customerId: string, amountCents: number, referenceId: string): Promise<void>;
   describe(): AdapterDescriptor<{ trials: boolean; portal: boolean; modelCredits?: boolean }>;
   getPrice(): Promise<BillingPrice>;
   createCustomer(input: { email: string; organizationId: string }): Promise<{ customerId: string }>;
@@ -517,12 +552,8 @@ export interface MessagingSurface {
     context: AdapterContext,
   ): Promise<MessagingInboundMessage[]>;
   /**
-   * Start the surface eagerly instead of waiting for the first inbound
-   * webhook or outbound send to touch it. Needed for adapters that pull
-   * updates themselves (e.g. Telegram in "auto"/"polling" mode, used when
-   * no public webhook URL is reachable): without an explicit call here,
-   * nothing kicks off that pull loop until something else happens to
-   * initialize the adapter first.
+   * Start eagerly. Adapters that pull updates themselves (Telegram polling when no public
+   * webhook URL is reachable) otherwise never start until a webhook or send touches them.
    */
   initialize?(): Promise<void>;
   /**
@@ -557,11 +588,8 @@ export interface WebProvider extends WebSearchProvider, WebFetchProvider {
 }
 
 /**
- * Provider-neutral page browser on the bot computer. Builtin browser_* tools
- * route here so backends (in-process page session, CDP against the computer's
- * Chrome, future adapters) can swap without changing tool names. Not a second
- * hosted browser product. Prefer this for web pages; use computer_act when the
- * page tool cannot operate or the task needs the desktop itself.
+ * Provider-neutral page browser on the bot computer, not a hosted browser product. Prefer it
+ * for web pages; use computer_act when the page tool cannot operate or the task needs the desktop.
  */
 export interface BrowserProvider {
   describe(): AdapterDescriptor<BrowserCapabilities>;
@@ -600,8 +628,8 @@ export interface CloudAgentProvider {
 }
 
 /**
- * Provider-neutral "is this tool call safe to auto-allow?" check. First used by
- * Auto Review; swap vendors without changing approval UX (pass → run, ask → card).
+ * Provider-neutral "is this tool call safe to auto-allow?" check. Swap vendors
+ * without changing approval UX (pass → run, ask → card).
  * Core runs with none configured and falls back to the LLM adapter.
  */
 export interface AutoReviewProvider {

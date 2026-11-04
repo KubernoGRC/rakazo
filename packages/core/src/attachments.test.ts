@@ -6,12 +6,27 @@ import {
   blocksToAgentHistoryText,
   decodeAttachmentBase64,
   inferAttachmentMimeType,
+  normalizeVoiceTranscript,
   promptTextForAttachments,
   userTurnMessageForRun,
   validateAttachmentMimeType,
 } from "./attachments.js";
 
 describe("attachment helpers", () => {
+  it.each([
+    ["xls", "application/vnd.ms-excel"],
+    ["xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+  ])("accepts and preserves %s spreadsheet attachments", (extension, mimeType) => {
+    for (const reported of [undefined, "", mimeType, "application/octet-stream"]) {
+      expect(inferAttachmentMimeType(`statement.${extension}`, reported)).toBe(mimeType);
+      expect(inferAttachmentMimeType(`STATEMENT.${extension.toUpperCase()}`, reported)).toBe(
+        mimeType,
+      );
+    }
+    expect(attachmentExtensionForMimeType(mimeType)).toBe(`.${extension}`);
+    expect(() => validateAttachmentMimeType(mimeType)).not.toThrow();
+  });
+
   it.each([
     ["mp3", "audio/mpeg"],
     ["wav", "audio/wav"],
@@ -68,16 +83,11 @@ describe("attachment helpers", () => {
   });
 
   it("validates a large base64 payload without blowing the stack", () => {
-    // Regression test: the original validator used a grouped-repetition regex
-    // (`/^(?:[chars]{4})*(...)?$/`) that stack-overflows V8 on inputs in the
-    // megabytes-of-characters range — a 5 MiB string reliably reproduced it,
-    // well within reach of the current 10 MiB attachment limit (~13.3 MiB of
-    // base64 once encoded).
+    // A grouped-repetition base64 regex stack-overflows V8 on multi-megabyte inputs.
     const validLarge = "A".repeat(6 * 1024 * 1024);
     expect(() => decodeAttachmentBase64(validLarge)).not.toThrow();
 
-    // A base64 string decoding to just over the 10 MiB byte limit must still
-    // be rejected for size — and, same regression, without a stack overflow.
+    // Just over the 10 MiB byte limit: rejected for size, without a stack overflow.
     const oversized = "A".repeat(15 * 1024 * 1024);
     expect(() => decodeAttachmentBase64(oversized)).not.toThrow(RangeError);
     expect(() => decodeAttachmentBase64(oversized)).toThrow(AttachmentValidationError);
@@ -110,12 +120,42 @@ describe("attachment helpers", () => {
     ).toBe("hello\n[image: shot.png]\n[file: brief.pdf (application/pdf, 99 bytes)]");
   });
 
+  it("appends a voice note transcript after the file note", () => {
+    expect(
+      promptTextForAttachments("listen to this", [
+        { name: "voice.oga", mimeType: "audio/ogg", size: 10, transcript: "hello there" },
+      ]),
+    ).toBe(
+      'listen to this\n\nUser attached file "voice.oga" (audio/ogg, 10 bytes).' +
+        "\n[voice note transcript: hello there]",
+    );
+  });
+
+  it("normalizes and bounds a voice note transcript", () => {
+    expect(normalizeVoiceTranscript("a\u007fb\u0085c\u009fd\te\nf")).toBe("abcd\te\nf");
+    expect(normalizeVoiceTranscript(" \u0080 ")).toBe("");
+    expect(normalizeVoiceTranscript(" \r\u0000 ")).toBe("");
+    expect(normalizeVoiceTranscript("a".repeat(8000))).toHaveLength(4000);
+  });
+
   it("infers attachment mime types from extensions", () => {
     expect(inferAttachmentMimeType("photo.JPG", "")).toBe("image/jpeg");
     expect(inferAttachmentMimeType("notes.pdf", "")).toBe("application/pdf");
     expect(inferAttachmentMimeType("notes.md", "")).toBe("text/markdown");
     expect(inferAttachmentMimeType("notes.markdown", "text/plain")).toBe("text/markdown");
     expect(inferAttachmentMimeType("notes.md", "application/pdf")).toBe("application/pdf");
+  });
+
+  it("keeps a CSV a CSV when Windows reports it as an Excel file", () => {
+    expect(inferAttachmentMimeType("sales.csv", "application/vnd.ms-excel")).toBe("text/csv");
+    expect(inferAttachmentMimeType("SALES.CSV", "application/vnd.ms-excel")).toBe("text/csv");
+    expect(inferAttachmentMimeType("sales.xls", "application/vnd.ms-excel")).toBe(
+      "application/vnd.ms-excel",
+    );
+    expect(inferAttachmentMimeType("statement", "application/vnd.ms-excel")).toBe(
+      "application/vnd.ms-excel",
+    );
+    expect(inferAttachmentMimeType("sales.csv", "application/pdf")).toBe("application/pdf");
   });
 
   it.each([

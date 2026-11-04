@@ -48,9 +48,7 @@ function MemberPicker({
   const visible = useMemo(() => {
     const base = expanded ? selectable : selectable.filter((bot) => everPicked.has(bot.id));
     if (!needle) return base;
-    return base.filter(
-      (bot) => bot.name.toLowerCase().includes(needle) || bot.title.toLowerCase().includes(needle),
-    );
+    return base.filter((bot) => bot.name.toLowerCase().includes(needle));
   }, [expanded, selectable, everPicked, needle]);
 
   function toggle(botId: string) {
@@ -109,7 +107,13 @@ function MemberPicker({
                 onClick={() => onOpenBot?.(bot.id)}
                 className="flex min-w-0 flex-1 items-center gap-3 text-start"
               >
-                <BotAvatar color={bot.color} identity={bot.id} size={32} status={bot.status} />
+                <BotAvatar
+                  avatarSet={bot.avatarSet}
+                  color={bot.color}
+                  identity={bot.id}
+                  size={32}
+                  status={bot.status}
+                />
                 <span className="flex-1 text-[15px] text-foreground" dir="auto">
                   {bot.name}
                 </span>
@@ -266,7 +270,12 @@ export function GroupSettings({
   useEffect(() => {
     if (saving || confirmingDelete || covered) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing) {
+      if (
+        event.key === "Escape" &&
+        !event.defaultPrevented &&
+        !event.isComposing &&
+        event.keyCode !== 229
+      ) {
         event.preventDefault();
         onClose();
       }
