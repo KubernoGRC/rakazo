@@ -5,7 +5,13 @@ import {
   clipToolResultContent,
   clipToolResultText,
   effectiveOutputReserve,
+  MODEL_CONNECT_TIMEOUT_MS,
+  MODEL_STREAM_IDLE_TIMEOUT_MS,
+  MODEL_STREAM_TIMEOUT_MS,
+  modelConnectTimeoutMs,
+  modelStreamIdleTimeoutMs,
   modelStreamMaxRetries,
+  modelStreamTimeoutMs,
   operatorMaxTokens,
   REASONING_MODEL_MAX_TOKENS,
   resolveCompletionMaxTokens,
@@ -32,6 +38,63 @@ describe("modelStreamMaxRetries", () => {
       expect(modelStreamMaxRetries()).toBe(1);
     },
   );
+});
+
+describe.each([
+  ["MODEL_STREAM_TIMEOUT_MS", modelStreamTimeoutMs, MODEL_STREAM_TIMEOUT_MS, 1_000, 2_147_483_647],
+  ["MODEL_CONNECT_TIMEOUT_MS", modelConnectTimeoutMs, MODEL_CONNECT_TIMEOUT_MS, 1_000, 300_000],
+  [
+    "MODEL_STREAM_IDLE_TIMEOUT_MS",
+    modelStreamIdleTimeoutMs,
+    MODEL_STREAM_IDLE_TIMEOUT_MS,
+    0,
+    2_147_483_647,
+  ],
+] as const)("%s", (name, read, fallback, minimum, maximum) => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("accepts supported whole-millisecond values and retains defaults for invalid values", () => {
+    vi.stubEnv(name, undefined);
+    expect(read()).toBe(fallback);
+
+    for (const value of [minimum, 240_000, maximum]) {
+      vi.stubEnv(name, String(value));
+      expect(read()).toBe(value);
+    }
+
+    for (const value of [
+      "",
+      " ",
+      String(minimum - 1),
+      String(maximum + 1),
+      "-1000",
+      "1500.5",
+      "Infinity",
+      "10m",
+    ]) {
+      vi.stubEnv(name, value);
+      expect(read()).toBe(fallback);
+    }
+  });
+});
+
+describe("extended model inference timeouts", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("accepts a 230-minute model request timeout", () => {
+    vi.stubEnv("MODEL_STREAM_TIMEOUT_MS", "13800000");
+    expect(modelStreamTimeoutMs()).toBe(13_800_000);
+  });
+
+  it("allows disabling stream inactivity detection", () => {
+    vi.stubEnv("MODEL_STREAM_IDLE_TIMEOUT_MS", "0");
+    expect(modelStreamIdleTimeoutMs()).toBe(0);
+  });
+
+  it("does not extend connection timeout validation", () => {
+    vi.stubEnv("MODEL_CONNECT_TIMEOUT_MS", "13800000");
+    expect(modelConnectTimeoutMs()).toBe(MODEL_CONNECT_TIMEOUT_MS);
+  });
 });
 
 describe("billedPromptTokens", () => {

@@ -9,7 +9,7 @@ import type {
 import type { PrismaClient } from "@rakazo/db";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createConnectorStack } from "./composio-connector.js";
+import { createConnectorStack } from "./connector-registry.js";
 import {
   DeploymentMcpConnector,
   deploymentConnectorConfigFromEnv,

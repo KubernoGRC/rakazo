@@ -221,7 +221,10 @@ beforeEach(() => {
   providerState.delay.mockReset().mockResolvedValue(undefined);
 });
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+});
 
 describe("Pi runtime transient model retries", () => {
   it("recovers one empty idle stream after the header retry budget expires", async () => {
@@ -405,6 +408,26 @@ describe("Pi runtime transient model retries", () => {
       expect(providerState.delay).not.toHaveBeenCalled();
     },
   );
+
+  it("retries within the configured request budget", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("MODEL_STREAM_TIMEOUT_MS", "240000");
+    const pending = new AssistantMessageEventStream();
+    providerState.stream
+      .mockReturnValueOnce(pending)
+      .mockImplementation(() =>
+        stream(primary, message(primary, [{ type: "text", text: "Recovered." }], "stop")),
+      );
+    const outcome = run(request());
+    await vi.advanceTimersByTimeAsync(MODEL_STREAM_TIMEOUT_MS);
+    const failure = message(primary, [], "error", "Request timed out.");
+    pending.push({ type: "error", reason: "error", error: failure });
+    pending.end(failure);
+    expect(await outcome).toContainEqual({ type: "text", text: "Recovered." });
+    expect(providerState.stream.mock.calls[1]?.[2].timeoutMs).toBe(
+      240_000 - MODEL_STREAM_TIMEOUT_MS,
+    );
+  });
 
   it("bounds repeated early timeouts by elapsed request budget", async () => {
     vi.useFakeTimers();
@@ -1841,6 +1864,84 @@ describe("Pi runtime ordered model fallback", () => {
     expect(providerState.stream).toHaveBeenCalledTimes(1);
   });
 
+  it("uses a smaller backup on the context its own policy shortens to fit", async () => {
+    const input = request([{ provider: backupA.provider, id: backupA.id }]);
+    input.resolveFallbackModel = async (provider, id) => ({
+      provider,
+      id,
+      apiKey: "fake-small-window-key",
+    });
+    // Each turn alone fits the 8K backup; together they fit only the 32K primary.
+    input.history = Array.from({ length: 8 }, (_, index) => ({
+      id: `older-${index}`,
+      role: index % 2 ? ("assistant" as const) : ("user" as const),
+      content: `Older turn ${index}. `.repeat(400),
+    })) as AgentRunRequest["history"];
+    const sent: { provider: string; messages: number }[] = [];
+    providerState.stream.mockImplementation(
+      (target: Model<"openai-completions">, context: { messages: unknown[] }) => {
+        sent.push({ provider: target.provider, messages: context.messages.length });
+        return target.provider === primary.provider
+          ? stream(target, message(target, [], "error", "429 quota exhausted"))
+          : stream(target, message(target, [{ type: "text", text: "done" }], "stop"));
+      },
+    );
+    await run(input);
+    expect(sent.map((call) => call.provider)).toEqual([primary.provider, backupA.provider]);
+    expect(sent[1]!.messages).toBeLessThan(sent[0]!.messages);
+  });
+
+  it("still skips a smaller backup when the context strategy keeps the transcript as is", async () => {
+    const input = request([{ provider: backupA.provider, id: backupA.id }]);
+    input.contextStrategy = "current";
+    input.resolveFallbackModel = async (provider, id) => ({
+      provider,
+      id,
+      apiKey: "fake-small-window-key",
+    });
+    input.history = Array.from({ length: 8 }, (_, index) => ({
+      id: `older-${index}`,
+      role: index % 2 ? ("assistant" as const) : ("user" as const),
+      content: `Older turn ${index}. `.repeat(400),
+    })) as AgentRunRequest["history"];
+    providerState.stream.mockImplementation((target: Model<"openai-completions">) =>
+      stream(target, message(target, [], "error", "429 quota exhausted")),
+    );
+    const error = await run(input).catch((error: Error) => error);
+    expect(JSON.parse((error as Error).message).backups).toEqual([
+      {
+        provider: backupA.provider,
+        modelId: backupA.id,
+        status: "skipped",
+        reason: "Conversation exceeds the backup model's context limit.",
+      },
+    ]);
+    expect(providerState.stream).toHaveBeenCalledTimes(1);
+  });
+
+  it("still skips a backup whose window cannot hold the instructions", async () => {
+    const input = request([{ provider: backupA.provider, id: backupA.id }]);
+    input.instructions = "Mandatory instruction. ".repeat(4_000);
+    input.resolveFallbackModel = async (provider, id) => ({
+      provider,
+      id,
+      apiKey: "fake-small-window-key",
+    });
+    providerState.stream.mockImplementation((target: Model<"openai-completions">) =>
+      stream(target, message(target, [], "error", "429 quota exhausted")),
+    );
+    const error = await run(input).catch((error: Error) => error);
+    expect(JSON.parse((error as Error).message).backups).toEqual([
+      {
+        provider: backupA.provider,
+        modelId: backupA.id,
+        status: "skipped",
+        reason: "Conversation exceeds the backup model's context limit.",
+      },
+    ]);
+    expect(providerState.stream).toHaveBeenCalledTimes(1);
+  });
+
   it("retains the primary failure when a backup fails for a different reason", async () => {
     providerState.stream.mockImplementation((target: Model<"openai-completions">) =>
       stream(
@@ -1983,6 +2084,55 @@ describe("Pi runtime ordered model fallback", () => {
       ),
     ).toEqual([primary.provider, backupA.provider]);
     expect(providerState.stream.mock.calls[1]?.[2]).toMatchObject({ reasoning: undefined });
+  });
+
+  it("runs a reasoning backup at its own effort, not the main model's", async () => {
+    const reasoningPrimary = { ...primary, reasoning: true };
+    const reasoningBackup = { ...backupA, reasoning: true };
+    providerState.models.set(`${primary.provider}/${primary.id}`, reasoningPrimary);
+    providerState.models.set(`${backupA.provider}/${backupA.id}`, reasoningBackup);
+    const input = request([
+      { provider: backupA.provider, id: backupA.id, apiKey: "reasoning-backup-key" },
+    ]);
+    input.model.reasoning = true;
+    input.model.thinkingLevel = "high";
+    providerState.stream.mockImplementation((target: Model<"openai-completions">) =>
+      target.provider === primary.provider
+        ? stream(target, message(target, [], "error", "429 rate_limit_error"))
+        : stream(target, message(target, [{ type: "text", text: "backup answer" }], "stop")),
+    );
+
+    await run(input);
+
+    expect(providerState.stream.mock.calls[1]?.[2]).toMatchObject({ reasoning: "medium" });
+  });
+
+  it("keeps a backup's own effort when its role row sets one", async () => {
+    const reasoningPrimary = { ...primary, reasoning: true };
+    providerState.models.set(`${primary.provider}/${primary.id}`, reasoningPrimary);
+    providerState.models.set(`${backupA.provider}/${backupA.id}`, {
+      ...backupA,
+      reasoning: true,
+    });
+    const input = request([
+      {
+        provider: backupA.provider,
+        id: backupA.id,
+        apiKey: "reasoning-backup-key",
+        thinkingLevel: "low",
+      },
+    ]);
+    input.model.reasoning = true;
+    input.model.thinkingLevel = "high";
+    providerState.stream.mockImplementation((target: Model<"openai-completions">) =>
+      target.provider === primary.provider
+        ? stream(target, message(target, [], "error", "429 rate_limit_error"))
+        : stream(target, message(target, [{ type: "text", text: "backup answer" }], "stop")),
+    );
+
+    await run(input);
+
+    expect(providerState.stream.mock.calls[1]?.[2]).toMatchObject({ reasoning: "low" });
   });
 
   it.each([...IMAGE_RETURNING_COMPUTER_TOOLS, "write_effect"])(

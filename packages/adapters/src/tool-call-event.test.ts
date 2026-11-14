@@ -111,6 +111,8 @@ function request(name: string, args: Record<string, unknown>, route = SERVER_ROU
     replayEffectToolName: name,
     fleetSummary: undefined,
     heldForApproval: false,
+    purchase: undefined,
+    cardUse: undefined,
   } satisfies ToolRequest;
 }
 
@@ -132,6 +134,7 @@ function passedCall(
     nextApprovedTool: undefined,
     bypassApproval: approval.bypass ?? false,
     claimedEffect: false,
+    spend: undefined,
     persistEffectResult: async () => true,
     finish: async (result) => result,
     claimOrReturn: async () => undefined,
@@ -478,6 +481,20 @@ describe("recordRuntimeToolCall", () => {
       expect.objectContaining({ tool: "run_subagent", outcome: "error" }),
     ]);
     expect(JSON.stringify(recordedEvents())).not.toContain("Which?");
+  });
+
+  it("leaves a background helper to the dispatcher, which already recorded it", async () => {
+    const { ctx } = fakeContext();
+
+    await recordRuntimeToolCall(ctx, {
+      name: "run_subagent",
+      executionId: "call-1",
+      durationMs: 3,
+      args: { task: "x", background: true },
+      result: { content: [], details: {} },
+    });
+
+    expect(recordedEvents()).toEqual([]);
   });
 
   it.each([

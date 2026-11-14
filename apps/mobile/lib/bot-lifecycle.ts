@@ -1,6 +1,8 @@
 import { Alert } from "react-native";
 import type { ApiRequestContext } from "./api";
 import { rpc } from "./api";
+import { notifyArchivedChatsChanged } from "./archived-chats";
+import { notifyConversationCleared } from "./conversation-cleared";
 import { t } from "./i18n";
 import { removeFromSearchInbox } from "./search-inbox";
 import { errorText } from "./user-error";
@@ -47,14 +49,26 @@ export function confirmDeleteBot(
   );
 }
 
-export function confirmDeleteGroup(group: { id: string; name: string }, onDeleted: () => void) {
+export function confirmDeleteGroup(
+  group: { id: string; name: string },
+  onDeleted: () => void,
+  requestContext?: ApiRequestContext,
+) {
   Alert.alert(t("Delete {name}?", { name: group.name }), t("Bots and their own chats stay."), [
     { text: t("Cancel"), style: "cancel" },
     {
       text: t("Delete"),
       style: "destructive",
       onPress: () =>
-        void rpc("groups/remove", { groupId: group.id })
+        void (
+          requestContext
+            ? rpc(
+                "groups/remove",
+                { groupId: group.id },
+                { requestContext, skipSpaceAuthRecovery: true },
+              )
+            : rpc("groups/remove", { groupId: group.id })
+        )
           .then(() => {
             removeFromSearchInbox(group.id);
             onDeleted();
@@ -68,4 +82,32 @@ export function confirmDeleteGroup(group: { id: string; name: string }, onDelete
 
 export async function restoreArchivedBot(botId: string): Promise<void> {
   await rpc("bots/restore", { botId });
+}
+
+export async function archiveBot(botId: string): Promise<void> {
+  await rpc("bots/archive", { botId });
+  removeFromSearchInbox(botId);
+  notifyArchivedChatsChanged();
+}
+
+export function confirmClearConversation(botId: string) {
+  Alert.alert(
+    t("Clear conversation?"),
+    t(
+      "This removes every message and stops current work. The bot, computer, memory, and routines are kept.",
+    ),
+    [
+      { text: t("Cancel"), style: "cancel" },
+      {
+        text: t("Clear"),
+        style: "destructive",
+        onPress: () =>
+          void rpc("threads/clear", { botId })
+            .then(() => notifyConversationCleared(botId))
+            .catch((error: unknown) =>
+              Alert.alert(t("Could not clear conversation"), errorText(error, t("Try again."))),
+            ),
+      },
+    ],
+  );
 }

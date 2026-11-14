@@ -62,6 +62,7 @@ function fixture(
     seq: 2,
     createdAt: new Date(),
     blocks: replyBlocks,
+    steeringMessages: [],
   };
   const steering: Array<{ id: string; messageId: string; runId: string | null }> = reply
     ? [{ id: "reply-steering", messageId: replyMessage.id, runId: reply.steeringRunId }]
@@ -176,6 +177,7 @@ function fixture(
           historyCompactedUpToSeq: null,
         }),
       },
+      spaceMember: { findUnique: async () => ({ id: "member-1" }) },
       deploymentSettings: {
         findUnique: async () => ({
           defaultModelProvider: model.provider,
@@ -198,6 +200,7 @@ function fixture(
         findFirst: async () => ({ id: "fixture-key", ciphertext: "fixture-ciphertext" }),
       },
       $queryRaw: async () => [],
+      $executeRaw: async () => 0,
       $transaction: async (action: (tx: unknown) => Promise<unknown>) => action(prisma),
       externalEffect: {
         ...empty,

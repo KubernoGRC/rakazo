@@ -4,6 +4,7 @@ import {
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
   signupRequiresEmailVerification,
+  suggestEmailCorrection,
 } from "@rakazo/core";
 import { Button, Input, InputOTP, InputOTPGroup, InputOTPSlot, Label } from "@rakazo/ui-web";
 import { useEffect, useRef, useState } from "react";
@@ -13,23 +14,33 @@ import { signInWithAccessIdentity } from "../lib/access-identity";
 import { authClient } from "../lib/auth";
 import type { AuthCapabilities } from "../lib/auth-capabilities";
 import { fetchAuthCapabilities } from "../lib/auth-capabilities";
+import { desktopBridge } from "../lib/desktop";
 import { clearSpaceSelection } from "../lib/rpc";
+import { newAccountDestination, signInNext } from "../lib/sign-in-next";
 import { runSsoFlow } from "../lib/sso-flow";
 import { authErrorText, credentialIssueText } from "../lib/user-error";
+import { WindowChrome } from "./WindowChrome";
 
 type AuthMode = "in" | "up" | "forgot";
 
-const fieldClass = "mt-2 h-12 rounded-xl px-4 text-base md:text-base";
+// off-scale: 16px below md stops iOS Safari zooming into a focused field.
+const fieldClass = "mt-2 h-12 rounded-xl px-4 text-[16px]/6 md:text-body-lg";
 const CODE_LENGTH = 6;
-export const submitClass = "mt-3 h-12 w-full rounded-xl text-base";
+export const submitClass = "mt-3 h-12 w-full rounded-xl text-body-lg";
 
 export function AuthPage({ mode }: { mode: AuthMode }) {
   const { t } = useLingui();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const next = signInNext(searchParams.get("next"));
+  // Switching between sign-in and sign-up keeps where the person was going.
+  const nextQuery = next ? `?next=${encodeURIComponent(next)}` : "";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [emailBlurred, setEmailBlurred] = useState(false);
+  const [warnedEmail, setWarnedEmail] = useState<string | null>(null);
+  const emailSuggestion = mode === "up" ? suggestEmailCorrection(email) : null;
   const [error, setError] = useState<string | null>(() => {
     const code = searchParams.get("error");
     if (!code) return null;
@@ -52,7 +63,6 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const [accessOutcome, setAccessOutcome] = useState<"refused" | "unavailable" | null>(null);
   const [accessAttempt, setAccessAttempt] = useState(0);
   const accessIdentity = reset?.accessIdentity === true;
-  const next = searchParams.get("next");
   // One exchange per attempt; navigating re-renders before this page unmounts.
   const accessStarted = useRef<number | null>(null);
   const passwordFieldId = mode === "in" ? "current-password" : "new-password";
@@ -126,6 +136,11 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
       setError(credentialIssueText(issue));
       return;
     }
+    if (emailSuggestion && warnedEmail !== email) {
+      setWarnedEmail(email);
+      setEmailBlurred(true);
+      return;
+    }
     setPending(true);
     setError(null);
     try {
@@ -172,7 +187,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         return;
       }
       if (mode === "up" && signupRequiresEmailVerification(result.data)) {
-        setSearchParams({ verify: "email" });
+        setSearchParams({ verify: "email", ...(next ? { next } : {}) });
         return;
       }
       enterApp();
@@ -230,13 +245,11 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
           authClient.signIn.social({
             disableRedirect,
             provider: "oidc",
-            newUserCallbackURL: callbackURL("/onboarding"),
-            callbackURL: callbackURL(
-              searchParams.get("next") === "/integrations/setup" ? "/integrations/setup" : "/app",
-            ),
+            newUserCallbackURL: callbackURL(newAccountDestination(next)),
+            callbackURL: callbackURL(next ?? "/app"),
             errorCallbackURL: callbackURL("/sign-in"),
           }),
-        ["/app", "/onboarding", "/integrations/setup", "/sign-in"],
+        ["/app", "/onboarding", "/integrations/setup", "/sign-in", ...(next ? [next] : [])],
       );
       if (result.error) setError(authErrorText(result.error, t`Could not continue`));
     } catch {
@@ -252,7 +265,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
     <AuthFrame onSubmit={submit} title={title}>
       {sent ? (
         <div className="w-full text-center">
-          <Link to="/sign-in" className="font-medium text-foreground">
+          <Link to={`/sign-in${nextQuery}`} className="font-medium text-foreground">
             <Trans>Back to sign in</Trans>
           </Link>
         </div>
@@ -304,7 +317,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
             </Button>
           ) : null}
           {error && !reset?.passwordAuth ? (
-            <p role="alert" className="mt-3 text-sm text-destructive">
+            <p role="alert" className="mt-3 text-body text-destructive">
               {error}
             </p>
           ) : null}
@@ -344,7 +357,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                         <InputOTPSlot
                           key={index}
                           index={index}
-                          className="size-12 text-lg first:rounded-l-xl last:rounded-r-xl"
+                          className="size-12 text-heading3 first:rounded-l-xl last:rounded-r-xl"
                         />
                       ))}
                     </InputOTPGroup>
@@ -360,12 +373,31 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                     name="email"
                     autoComplete={mode === "in" ? "username webauthn" : "username"}
                     value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    onChange={(e) => {
+                      setEmail(e.target.value);
+                      setEmailBlurred(false);
+                    }}
+                    onBlur={() => setEmailBlurred(true)}
                     placeholder={t`Your email address`}
                     type="email"
                     required
                     className={fieldClass}
                   />
+                  {emailSuggestion && emailBlurred ? (
+                    <p role="status" className="mt-2 text-body text-warning">
+                      <Trans>
+                        Did you mean{" "}
+                        <button
+                          type="button"
+                          className="font-medium underline"
+                          onClick={() => setEmail(emailSuggestion)}
+                        >
+                          {emailSuggestion}
+                        </button>
+                        ?
+                      </Trans>
+                    </p>
+                  ) : null}
                 </div>
               )}
               {mode !== "forgot" && !codeStep ? (
@@ -387,7 +419,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                     className={fieldClass}
                   />
                   {mode === "in" && reset?.passwordReset ? (
-                    <div className="mt-2 text-right text-sm">
+                    <div className="mt-2 text-right text-body">
                       <Link to="/forgot-password" className="font-medium text-foreground">
                         <Trans>Forgot password?</Trans>
                       </Link>
@@ -396,7 +428,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                 </div>
               ) : null}
               {error ? (
-                <p role="alert" className="mt-3 w-full text-sm text-destructive">
+                <p role="alert" className="mt-3 w-full text-body text-destructive">
                   {error}
                 </p>
               ) : null}
@@ -455,19 +487,19 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                   {mode === "in" ? (
                     <>
                       <Trans>Don’t have an account?</Trans>{" "}
-                      <Link to="/sign-up" className="font-medium text-foreground">
+                      <Link to={`/sign-up${nextQuery}`} className="font-medium text-foreground">
                         <Trans>Sign up</Trans>
                       </Link>
                     </>
                   ) : mode === "up" ? (
                     <>
                       <Trans>Already have an account?</Trans>{" "}
-                      <Link to="/sign-in" className="font-medium text-foreground">
+                      <Link to={`/sign-in${nextQuery}`} className="font-medium text-foreground">
                         <Trans>Sign in</Trans>
                       </Link>
                     </>
                   ) : (
-                    <Link to="/sign-in" className="font-medium text-foreground">
+                    <Link to={`/sign-in${nextQuery}`} className="font-medium text-foreground">
                       <Trans>Back to sign in</Trans>
                     </Link>
                   )}
@@ -520,7 +552,7 @@ export function PasswordResetPage() {
     <AuthFrame onSubmit={submit} title={<Trans>Choose a new password</Trans>}>
       {complete ? (
         <div role="status" className="w-full text-center">
-          <p className="text-lg">
+          <p className="text-heading3">
             <Trans>Password updated</Trans>
           </p>
           <Link to="/sign-in" className="mt-6 inline-block font-medium">
@@ -543,7 +575,7 @@ export function PasswordResetPage() {
             className="mt-4"
           />
           {error ? (
-            <p role="alert" className="mt-3 w-full text-sm text-destructive">
+            <p role="alert" className="mt-3 w-full text-body text-destructive">
               {error}
             </p>
           ) : null}
@@ -573,18 +605,37 @@ export function AuthFrame({
   onSubmit: (event: React.FormEvent) => void;
   children: React.ReactNode;
 }) {
+  const server = desktopBridge()?.server;
   return (
-    <div className="flex min-h-full items-center justify-center bg-background px-6 py-16 text-foreground">
-      <form onSubmit={onSubmit} className="flex w-[460px] flex-col items-center">
-        <div className="flex h-[74px] w-[74px] items-center justify-center gap-[11px] rounded-full bg-muted">
-          <span className="h-5 w-[9px] rounded-full bg-primary" />
-          <span className="h-5 w-[9px] rounded-full bg-primary" />
+    <div
+      className="flex min-h-full flex-col bg-background text-foreground"
+      data-rakazo-surface="auth"
+    >
+      <div className="app-drag flex items-center gap-2 px-5 py-[18px]">
+        <WindowChrome />
+      </div>
+      <div className="flex flex-1 items-center justify-center px-6 pb-16">
+        <form onSubmit={onSubmit} className="flex w-full max-w-[460px] flex-col items-center">
+          <div className="flex h-[74px] w-[74px] items-center justify-center gap-[11px] rounded-full bg-muted">
+            <span className="h-5 w-[9px] rounded-full bg-primary" />
+            <span className="h-5 w-[9px] rounded-full bg-primary" />
+          </div>
+          <h1
+            aria-live="polite"
+            className="mb-9 mt-7 text-balance text-center text-display font-medium tracking-tight"
+          >
+            {title}
+          </h1>
+          {children}
+        </form>
+      </div>
+      {server ? (
+        <div className="flex justify-center pb-6">
+          <Button type="button" variant="text" size="sm" onClick={() => void server.change()}>
+            <Trans>Change server</Trans>
+          </Button>
         </div>
-        <h1 aria-live="polite" className="mb-9 mt-7 text-4xl font-medium tracking-tight">
-          {title}
-        </h1>
-        {children}
-      </form>
+      ) : null}
     </div>
   );
 }

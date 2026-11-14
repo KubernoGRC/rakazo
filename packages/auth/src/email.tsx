@@ -1,6 +1,6 @@
 /** @jsxRuntime automatic */
 import type { TransactionalEmail } from "@rakazo/adapter-kit";
-import { displayName, matchUiLocale, translate } from "@rakazo/core";
+import { displayName, matchUiLocale, textDirectionForLocale, translate } from "@rakazo/core";
 import { webLightTokens as lightTokens, webDarkTokens } from "@rakazo/ui-tokens";
 import type { ReactNode } from "react";
 import {
@@ -15,10 +15,38 @@ import {
   Text,
   toPlainText,
 } from "react-email";
+import { DE_MESSAGES } from "./locales/de.js";
 import { ES_MESSAGES } from "./locales/es.js";
+import { FR_MESSAGES } from "./locales/fr.js";
+import { HE_MESSAGES } from "./locales/he.js";
+import { HI_MESSAGES } from "./locales/hi.js";
+import { JA_MESSAGES } from "./locales/ja.js";
+import { KO_MESSAGES } from "./locales/ko.js";
+import { NL_MESSAGES } from "./locales/nl.js";
+import { PL_MESSAGES } from "./locales/pl.js";
+import { PT_BR_MESSAGES } from "./locales/pt-BR.js";
+import { RU_MESSAGES } from "./locales/ru.js";
+import { TR_MESSAGES } from "./locales/tr.js";
+import { ZH_CN_MESSAGES } from "./locales/zh-CN.js";
+import { ZH_TW_MESSAGES } from "./locales/zh-TW.js";
 
 /** Email copy by app language, keyed by the English text. Any other language reads English. */
-const CATALOGS: Readonly<Record<string, Readonly<Record<string, string>>>> = { es: ES_MESSAGES };
+export const CATALOGS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  de: DE_MESSAGES,
+  es: ES_MESSAGES,
+  fr: FR_MESSAGES,
+  he: HE_MESSAGES,
+  hi: HI_MESSAGES,
+  ja: JA_MESSAGES,
+  ko: KO_MESSAGES,
+  nl: NL_MESSAGES,
+  pl: PL_MESSAGES,
+  "pt-BR": PT_BR_MESSAGES,
+  ru: RU_MESSAGES,
+  tr: TR_MESSAGES,
+  "zh-CN": ZH_CN_MESSAGES,
+  "zh-TW": ZH_TW_MESSAGES,
+};
 const LOCALES = Object.keys(CATALOGS);
 
 /**
@@ -27,14 +55,27 @@ const LOCALES = Object.keys(CATALOGS);
  */
 export function emailLocale(saved: string | null | undefined, headers?: Headers | null): string {
   if (saved) return matchUiLocale(saved, LOCALES);
-  // Browsers list languages best first: take the first one emails are written in.
+  // Keep the first supported language at the highest acceptable quality.
+  let bestLocale = "en";
+  let bestQuality = 0;
   for (const part of headers?.get("accept-language")?.split(",") ?? []) {
-    const tag = part.split(";")[0]?.trim() ?? "";
-    if (/^en(?:-|$)/i.test(tag)) return "en";
-    const locale = matchUiLocale(tag, LOCALES);
-    if (locale !== "en") return locale;
+    const match = part
+      .trim()
+      .match(
+        /^([a-z]{1,8}(?:[-_][a-z0-9]{1,8})*|\*)(?:\s*;\s*q\s*=\s*(0(?:\.\d{0,3})?|1(?:\.0{0,3})?))?$/i,
+      );
+    if (!match) continue;
+    const tag = match[1] ?? "";
+    const quality = match[2] === undefined ? 1 : Number(match[2]);
+    if (quality <= bestQuality) continue;
+    const isEnglish = /^en(?:[-_]|$)/i.test(tag);
+    const locale = isEnglish ? "en" : matchUiLocale(tag, LOCALES);
+    // matchUiLocale also returns English for unsupported tags (including *).
+    if (locale === "en" && !isEnglish) continue;
+    bestLocale = locale;
+    bestQuality = quality;
   }
-  return "en";
+  return bestLocale;
 }
 
 /** The language to email an account in, given the headers of the request that asked. */
@@ -63,7 +104,7 @@ export async function message(
   unsubscribeUrl?: string,
 ): Promise<TransactionalEmail> {
   const html = await render(
-    <Html lang={locale}>
+    <Html lang={locale} dir={textDirectionForLocale(locale)}>
       <Head>
         <meta name="color-scheme" content="light dark" />
         <meta name="supported-color-schemes" content="light dark" />

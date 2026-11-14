@@ -1,9 +1,11 @@
 import type {
+  ApnsVoipConfig,
   DeploymentConnectorConfig,
   PhotonProjectCredentials,
   TelegramBotCredentials,
 } from "@rakazo/adapters";
 import {
+  apnsVoipConfig,
   boatApiKeyFromEnv,
   boatApiUrlFromEnv,
   deploymentConnectorConfigFromEnv,
@@ -17,7 +19,7 @@ import {
 } from "@rakazo/adapters";
 import type { AccessIdentityConfig, OidcConfig } from "@rakazo/auth";
 import type { MinimumClientBuilds, NavLink } from "@rakazo/contracts";
-import { parseMinimumClientBuilds, parseNavLinks } from "@rakazo/contracts";
+import { isPrivateNetworkHost, parseMinimumClientBuilds, parseNavLinks } from "@rakazo/contracts";
 import { parseCrispWebsiteId } from "@rakazo/contracts/content-security-policy";
 import {
   attachmentCountFromEnv,
@@ -29,7 +31,7 @@ import {
   resolveSupervisorToken,
   uploadSizeFromEnv,
 } from "@rakazo/core";
-import { monitoringPseudonymSecret } from "@rakazo/logging";
+import { getLogger, monitoringPseudonymSecret } from "@rakazo/logging";
 
 export { resolveCloudAgentProvider, resolveSandboxProvider } from "@rakazo/adapters";
 
@@ -41,6 +43,8 @@ export interface AppEnv {
   /** Opt-in Have I Been Pwned check for new passwords. Default off: it calls an outside service. */
   breachedPasswordCheck?: boolean;
   oidc?: OidcConfig;
+  /** Bearer token the identity provider presents to provision accounts over SCIM. */
+  scimBearerToken?: string;
   /** Fork: trusted access-proxy identity; see docs/fork-access-identity.md. */
   accessIdentity?: AccessIdentityConfig;
   /**
@@ -55,6 +59,8 @@ export interface AppEnv {
   authSecret: string;
   authUrl: string;
   webOrigin: string;
+  /** Extra browser origins trusted for sign-in and CORS, from `RAKAZO_EXTRA_AUTH_ORIGINS`. */
+  extraAuthOrigins: string[];
   /** `<TEAM_ID>.<bundle id>` of iOS apps that may use this domain's passkeys. */
   passkeyAppleAppIds: string[];
   /** SHA-256 signing certificate fingerprints of Android apps that may use this domain's passkeys. */
@@ -75,6 +81,8 @@ export interface AppEnv {
   ticketBoardEnabled: boolean;
   /** USER_DEVICES_ENABLED=false stops users connecting their own computers. Default on. */
   userDevicesEnabled: boolean;
+  /** COMPUTER_SETTINGS_ENABLED=true lets Settings choose where computers run. Default off. */
+  computerSettingsEnabled: boolean;
   /** Operator menu links that frame a same-origin page (RAKAZO_NAV_LINKS). */
   navLinks?: NavLink[];
   /** Verified accounts that review plugin submissions, add stdio MCP servers, and grant access
@@ -123,12 +131,15 @@ export interface AppEnv {
   sendblueSigningSecret: string | undefined;
   sendbluePhoneNumber: string | undefined;
   expoAccessToken: string | undefined;
+  apnsVoip?: ApnsVoipConfig;
   smtpUrl: string | undefined;
   emailProvider?: string;
   welcomeEmailEnabled?: boolean;
   emailApiKey?: string;
   emailFrom: string | undefined;
   emailReplyTo?: string;
+  /** Mail to bots' addresses, posted by a relay; off unless the domain and secret are both set. */
+  inboundEmail?: { domain: string; secret: string };
   /** Billing turns on only when all three are set; self-hosted installs leave them unset. */
   stripeSecretKey: string | undefined;
   stripeWebhookSecret: string | undefined;
@@ -236,6 +247,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
           allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS === "true",
         }
       : undefined;
+  const scimBearerToken = optional(source.SCIM_BEARER_TOKEN);
+  if (scimBearerToken && (scimBearerToken.length < 32 || /\s/.test(scimBearerToken)))
+    throw new Error("SCIM_BEARER_TOKEN must be at least 32 characters with no spaces");
   const authSecret = resolveAuthSecret(source);
   const webOrigin = resolveWebOrigin(source.WEB_ORIGIN, DEFAULT_WEB_ORIGIN, "WEB_ORIGIN");
   const sandboxProvider = resolveSandboxProvider(source);
@@ -245,6 +259,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     passwordAuth,
     breachedPasswordCheck: source.AUTH_BREACHED_PASSWORD_CHECK_ENABLED === "true",
     oidc,
+    scimBearerToken,
     ...(accessIdentity ? { accessIdentity } : {}),
     ...(accessExemptWebhooks.length > 0 ? { accessExemptWebhooks } : {}),
     nodeEnv: source.NODE_ENV ?? "",
@@ -254,6 +269,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     authSecret,
     authUrl: resolveWebOrigin(source.BETTER_AUTH_URL, webOrigin, "BETTER_AUTH_URL"),
     webOrigin,
+    extraAuthOrigins: parseExtraAuthOrigins(source.RAKAZO_EXTRA_AUTH_ORIGINS),
     passkeyAppleAppIds: list(source.PASSKEY_APPLE_APP_IDS),
     passkeyAndroidCertFingerprints: androidCertFingerprints(source.PASSKEY_ANDROID_CERT_SHA256),
     privacyPolicyUrl: optional(source.PRIVACY_POLICY_URL),
@@ -272,6 +288,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     piSessionRecording: source.PI_SESSION_RECORDING === "true",
     ticketBoardEnabled: source.TICKET_BOARD_ENABLED === "true",
     userDevicesEnabled: source.USER_DEVICES_ENABLED !== "false",
+    computerSettingsEnabled: source.COMPUTER_SETTINGS_ENABLED === "true",
     navLinks: parseNavLinks(source.RAKAZO_NAV_LINKS),
     adminEmails: list(source.RAKAZO_ADMIN_EMAILS).map((email) => email.toLowerCase()),
     ...phoneCallSettings(source),
@@ -313,11 +330,13 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     sendblueSigningSecret: optional(source.SENDBLUE_SIGNING_SECRET),
     sendbluePhoneNumber: optional(source.SENDBLUE_PHONE_NUMBER),
     expoAccessToken: optional(source.EXPO_ACCESS_TOKEN),
+    apnsVoip: apnsVoipConfig(source),
     smtpUrl: optional(source.SMTP_URL),
     emailProvider: optional(source.EMAIL_PROVIDER),
     emailApiKey: optional(source.EMAIL_API_KEY),
     emailFrom: optional(source.EMAIL_FROM),
     emailReplyTo: optional(source.EMAIL_REPLY_TO),
+    inboundEmail: inboundEmailFromEnv(source),
     welcomeEmailEnabled: source.WELCOME_EMAIL_ENABLED === "true",
     stripeSecretKey: optional(source.STRIPE_SECRET_KEY),
     stripeWebhookSecret: optional(source.STRIPE_WEBHOOK_SECRET),
@@ -385,6 +404,31 @@ function resolveWebOrigin(value: string | undefined, fallback: string, name: str
   return origin;
 }
 
+/**
+ * Comma-separated origins an operator adds for a second address of the same install (a tailnet
+ * or LAN URL). Only bare `https://` origins, or `http://` on loopback or a private network, are
+ * kept; anything else is dropped with a warning so a typo cannot widen trust.
+ */
+export function parseExtraAuthOrigins(value: string | undefined): string[] {
+  const origins = new Set<string>();
+  for (const raw of (value ?? "").split(/[\s,]+/).filter(Boolean)) {
+    try {
+      const url = new URL(raw);
+      const bare =
+        url.pathname === "/" && !url.search && !url.hash && !url.username && !url.password;
+      const allowed =
+        url.protocol === "https:" ||
+        (url.protocol === "http:" && isPrivateNetworkHost(url.hostname));
+      if (!bare || !allowed) throw new Error();
+      origins.add(url.origin);
+    } catch {
+      // The entry is not logged: it may carry credentials.
+      getLogger().warn("ignoring invalid RAKAZO_EXTRA_AUTH_ORIGINS entry");
+    }
+  }
+  return [...origins];
+}
+
 function required(source: NodeJS.ProcessEnv, key: string): string {
   const value = source[key];
   if (!value) throw new Error(`Missing ${key}`);
@@ -410,6 +454,20 @@ function voiceSummaryMinCharsFromEnv(value: string | undefined): number | undefi
     throw new Error("VOICE_SUMMARY_MIN_CHARS must be a positive whole number of characters");
   }
   return Number(raw);
+}
+
+function inboundEmailFromEnv(source: NodeJS.ProcessEnv): AppEnv["inboundEmail"] {
+  const domain = optional(source.INBOUND_EMAIL_DOMAIN)?.toLowerCase();
+  const secret = optional(source.INBOUND_EMAIL_SECRET);
+  if (!domain && !secret) return undefined;
+  if (!domain || !secret) {
+    throw new Error("Set INBOUND_EMAIL_DOMAIN and INBOUND_EMAIL_SECRET together");
+  }
+  if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)) {
+    throw new Error("INBOUND_EMAIL_DOMAIN must be a domain name such as bots.example.com");
+  }
+  if (secret.length < 32) throw new Error("INBOUND_EMAIL_SECRET must be at least 32 characters");
+  return { domain, secret };
 }
 
 /**

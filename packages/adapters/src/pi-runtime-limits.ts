@@ -21,6 +21,43 @@ export function modelStreamMaxRetries(): number {
   return Number.isInteger(raw) && raw >= 0 && raw <= 5 ? raw : DEFAULT_MODEL_STREAM_MAX_RETRIES;
 }
 
+/**
+ * Parse a configurable timeout in whole milliseconds. Invalid or blank values
+ * retain the existing default. Node timers support delays up to 2^31 - 1 ms.
+ * Provider HTTP transports may impose additional independent limits.
+ */
+function timeoutMsFromEnv(
+  value: string | undefined,
+  fallback: number,
+  min: number = 1_000,
+  max: number = 300_000,
+): number {
+  const raw = Number(value?.trim() || fallback);
+  return Number.isInteger(raw) && raw >= min && raw <= max ? raw : fallback;
+}
+
+export function modelStreamTimeoutMs(): number {
+  return timeoutMsFromEnv(
+    process.env.MODEL_STREAM_TIMEOUT_MS,
+    MODEL_STREAM_TIMEOUT_MS,
+    1_000,
+    2_147_483_647,
+  );
+}
+
+export function modelConnectTimeoutMs(): number {
+  return timeoutMsFromEnv(process.env.MODEL_CONNECT_TIMEOUT_MS, MODEL_CONNECT_TIMEOUT_MS);
+}
+
+export function modelStreamIdleTimeoutMs(): number {
+  return timeoutMsFromEnv(
+    process.env.MODEL_STREAM_IDLE_TIMEOUT_MS,
+    MODEL_STREAM_IDLE_TIMEOUT_MS,
+    0,
+    2_147_483_647,
+  );
+}
+
 export const TOOL_RESULT_TEXT_LIMIT = 12_000;
 
 export function clipToolResultText(text: string, limit: number = TOOL_RESULT_TEXT_LIMIT): string {

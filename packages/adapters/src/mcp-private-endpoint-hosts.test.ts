@@ -4,7 +4,7 @@ import { mcpStdioOptionsFromEnv } from "./mcp-connector.js";
 import { mcpPrivateEndpointHostsFromEnv } from "./mcp-private-endpoint-hosts.js";
 import { addMcpServerFromTool } from "./mcp-server-tool.js";
 import { secureFetch } from "./mcp-transport.js";
-import { assertSafeRemoteUrl, createSafeLookup } from "./remote-mcp.js";
+import { assertRemoteAddresses, assertSafeRemoteUrl, createSafeLookup } from "./remote-mcp.js";
 
 const resolvesTo =
   (...addresses: string[]) =>
@@ -148,5 +148,28 @@ describe("add_mcp_server on a pinned private host", () => {
     // The stub deps stop the tool at its next step; only the endpoint refusal matters here.
     const result = await addMcpServerFromTool(deps(["runner.example.test"]), run, "b", args, "e");
     expect(JSON.stringify(result)).not.toMatch(/private/);
+  });
+});
+
+// The proxy's CONNECT tunnel applies the same policy as the direct lookup.
+describe("assertRemoteAddresses (direct lookup and proxy CONNECT)", () => {
+  const policy = { privateEndpointHosts: ["runner.example.test"] };
+  const at = (address: string) => [{ address, family: address.includes(":") ? 6 : 4 } as const];
+
+  it("lets a pinned host reach its private address", () => {
+    expect(() =>
+      assertRemoteAddresses("runner.example.test", at("10.0.4.20"), policy),
+    ).not.toThrow();
+    expect(() =>
+      assertRemoteAddresses("[RUNNER.example.test.]", at("fd00::20"), policy),
+    ).not.toThrow();
+  });
+
+  it("keeps a pinned host off metadata and loopback, and other hosts off private addresses", () => {
+    expect(() =>
+      assertRemoteAddresses("runner.example.test", at("169.254.169.254"), policy),
+    ).toThrow();
+    expect(() => assertRemoteAddresses("runner.example.test", at("127.0.0.1"), policy)).toThrow();
+    expect(() => assertRemoteAddresses("other.example.test", at("10.0.4.20"), policy)).toThrow();
   });
 });

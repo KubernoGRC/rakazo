@@ -16,8 +16,10 @@
 # UPSTREAM_REF, when set, excludes commits already published by upstream: they
 # are not this fork's to leak, and upstream's own test fixtures trip gitleaks.
 # For the same reason a tree match is skipped in a file whose content is
-# byte-identical to upstream's file at the same path; the fork's copy of
-# upstream's own fixtures would otherwise fail every commit after a sync.
+# byte-identical to upstream's file at the same path, either at upstream's tip
+# or where the commit last took upstream (its merge base with UPSTREAM_REF);
+# the fork's copy of upstream's own fixtures would otherwise fail every commit
+# after a sync, and every sync whose fixture upstream has changed since.
 # GITLEAKS is the gitleaks binary (default: gitleaks on PATH). GITLEAKS_CONFIG
 # is its config (default: .gitleaks.toml beside this script's repository root),
 # which extends the default rules.
@@ -55,20 +57,30 @@ fi
 mapfile -t commits < <(git rev-list "${range[@]}")
 echo "Scanning ${#commits[@]} commit(s)"
 
-# True when the file at this path is byte-identical to upstream's file there.
-same_as_upstream() { # same_as_upstream <commit> <path>
+# True when the file at this path is byte-identical to upstream's file there,
+# at upstream's tip or at the upstream commit this commit last merged. Both are
+# already published upstream.
+same_as_upstream() { # same_as_upstream <commit> <path> <merge base or "">
   [ -n "${UPSTREAM_REF:-}" ] || return 1
-  local upstream
-  upstream=$(git rev-parse -q --verify "$UPSTREAM_REF:$2" 2>/dev/null) || return 1
-  [ "$upstream" = "$(git rev-parse "$1:$2")" ]
+  local ours ref upstream
+  ours=$(git rev-parse "$1:$2")
+  for ref in "$UPSTREAM_REF" ${3:+"$3"}; do
+    upstream=$(git rev-parse -q --verify "$ref:$2" 2>/dev/null) || continue
+    [ "$upstream" = "$ours" ] && return 0
+  done
+  return 1
 }
 
 found=0
 for c in "${commits[@]}"; do
   hit=0
+  taken=""
+  if [ -n "${UPSTREAM_REF:-}" ]; then
+    taken=$(git merge-base "$c" "$UPSTREAM_REF" 2>/dev/null) || taken=""
+  fi
   while IFS= read -r -d '' path; do
     path=${path#"$c":}
-    same_as_upstream "$c" "$path" && continue
+    same_as_upstream "$c" "$path" "$taken" && continue
     git grep -nIiE "${patterns[@]}" "$c" -- ":(literal)$path"
     hit=1
   done < <(git grep -lzIiE "${patterns[@]}" "$c" --)

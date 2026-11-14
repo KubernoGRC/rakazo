@@ -131,7 +131,8 @@ export function toolCallOutcome(
 
 /**
  * Tools the agent runtime runs itself, without passing them to the run's dispatcher. Their
- * completions are recorded from the runtime's completion callback instead.
+ * completions are recorded from the runtime's completion callback instead. A background
+ * `run_subagent` is the exception: the dispatcher starts it, so the dispatcher records it.
  */
 export const RUNTIME_OWNED_TOOLS: ReadonlySet<string> = new Set([
   "ask_user",
@@ -145,6 +146,7 @@ export async function recordRuntimeToolCall(
   completion: AgentToolCompletion,
 ): Promise<void> {
   if (!RUNTIME_OWNED_TOOLS.has(completion.name)) return;
+  if (completion.name === "run_subagent" && completion.args?.background === true) return;
   const details = (completion.result as { details?: unknown } | undefined)?.details;
   // A subagent reports failure in its returned text, not by throwing.
   const delegation =

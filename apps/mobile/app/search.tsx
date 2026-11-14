@@ -17,9 +17,11 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { BotAvatar } from "../components/bot-avatar";
 import { GlassIconButton } from "../components/glass-icon-button";
 import { GroupAvatar } from "../components/group-avatar";
+import { NativeActionButton } from "../components/native-action-button";
 import { NativeSymbol } from "../components/native-symbol";
 import { readableGutters } from "../lib/adaptive-layout";
-import { currentApiBase, selectedSpaceId, selectSpace, spaceSelectionSeq } from "../lib/api";
+import { currentApiBase, selectedSpaceId, spaceSelectionSeq } from "../lib/api";
+import { selectSpace } from "../lib/api-server";
 import { mobileTokens, resolveMobileAppearance } from "../lib/appearance";
 import { useI18n } from "../lib/i18n";
 import { native, useThemedStyles } from "../lib/native";
@@ -52,7 +54,7 @@ export default function SearchSheet() {
   const focused = useRef(false);
   const [query, setQuery] = useState("");
   const spaces = useSyncExternalStore(subscribeSearchInbox, getSearchInbox);
-  const { hits, loading } = useSearch(query);
+  const { hits, loading, error, retry } = useSearch(query);
   const rows = useMemo(() => searchSheetRows(spaces, query, hits), [spaces, query, hits, locale]);
 
   const cancelOpen = useCallback(() => {
@@ -216,12 +218,29 @@ export default function SearchSheet() {
           paddingBottom: insets.bottom + 16,
         }}
         ListEmptyComponent={
-          <Text style={styles.empty}>{loading ? t("Searching…") : t("No results")}</Text>
+          error ? null : (
+            <Text style={styles.empty}>{loading ? t("Searching…") : t("No results")}</Text>
+          )
+        }
+        ListFooterComponent={
+          error ? (
+            <View style={styles.failure}>
+              <Text accessibilityRole="alert" style={styles.error}>
+                {error}
+              </Text>
+              <NativeActionButton
+                label={t("Try again")}
+                prominence="secondary"
+                size="compact"
+                onPress={retry}
+              />
+            </View>
+          ) : null
         }
         renderItem={({ item }) => (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`${item.title}, ${item.label}`}
+            accessibilityLabel={[item.title, item.label, item.preview].filter(Boolean).join(", ")}
             onPress={() => void open(item)}
             style={({ pressed }) => [styles.row, pressed && styles.pressed]}
           >
@@ -246,7 +265,8 @@ export default function SearchSheet() {
                 </Text>
                 <Text style={styles.time}>{item.label}</Text>
               </View>
-              <Text numberOfLines={1} style={styles.preview}>
+              {/* Two lines, so the matched words fit after the text before them. */}
+              <Text numberOfLines={2} style={styles.preview}>
                 {item.preview}
               </Text>
             </View>
@@ -312,5 +332,7 @@ function createStyles() {
       writingDirection: "auto",
     },
     empty: { color: native.secondaryLabel, fontSize: 16, paddingHorizontal: 20, paddingTop: 28 },
+    failure: { alignItems: "flex-start", gap: 12, paddingHorizontal: 20, paddingTop: 28 },
+    error: { color: tokens.destructive, fontSize: 14 },
   });
 }

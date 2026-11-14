@@ -18,6 +18,7 @@ function tx(options?: {
   const events: Array<Record<string, unknown>> = [];
   const client = {
     $queryRaw: vi.fn(async () => []),
+    $executeRaw: vi.fn(async () => 0),
     externalEffect: {
       deleteMany: vi.fn(async () => ({ count: 0 })),
       updateMany: vi.fn(async () => ({ count: 1 })),
@@ -175,6 +176,8 @@ describe("expireStuckRun", () => {
       where: {
         OR: [
           { userId: "user-1", spaceId: "space-1", kind: "run-secret:run-1" },
+          { userId: "user-1", spaceId: "space-1", kind: "run-code:run-1" },
+          { userId: "user-1", spaceId: "space-1", kind: "run-code-spent:run-1" },
           { userId: "user-1", spaceId: "space-1", kind: { startsWith: "run-login:run-1:" } },
         ],
       },

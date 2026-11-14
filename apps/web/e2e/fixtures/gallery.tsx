@@ -1,6 +1,7 @@
 import { I18nProvider } from "@lingui/react";
 import type { MessageBlock, ThreadMessage } from "@rakazo/contracts";
-import { BOT_COLOR_LIST, instructionUpdateDiff } from "@rakazo/core";
+import { BOT_COLOR_LIST } from "@rakazo/contracts";
+import { instructionUpdateDiff } from "@rakazo/core";
 import type { GroupAvatarMember } from "@rakazo/ui-web";
 import { Button } from "@rakazo/ui-web";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -207,6 +208,38 @@ const approvals: Scenario = {
         site: "example.test",
         status: "pending",
         actions: approvalActions,
+      },
+    ]),
+    bot([
+      {
+        // As the adapters' purchase card words a pay click, with the order lines the page lists.
+        kind: "ask",
+        approvalEffectId: "effect-6",
+        text: "Pay on freshcart.test?",
+        detail: [
+          'Button: "Place order"',
+          "Bananas × 6: $3.00",
+          "Oat milk 1L × 2: $8.40",
+          "Delivery: $6.00",
+          "Total on the page: $17.40",
+          "The button label, items and total are read from the page. The bot has not checked them.",
+        ].join("\n"),
+        detailFormat: "text",
+        receipt: {
+          button: "Place order",
+          items: [
+            { name: "Bananas × 6", amount: "$3.00" },
+            { name: "Oat milk 1L × 2", amount: "$8.40" },
+            { name: "Delivery", amount: "$6.00" },
+          ],
+          amount: "$17.40",
+          amountSource: "page",
+        },
+        status: "pending",
+        actions: [
+          { id: "allow", label: "Allow once" },
+          { id: "deny", label: "Deny" },
+        ],
       },
     ]),
     bot([
@@ -601,8 +634,34 @@ const calls: Scenario = {
   ],
 };
 
+// Every markdown style a reply can use, so type and weight changes can be judged in one place.
+const textStyles: Scenario = {
+  id: "text-styles",
+  label: "Text styles",
+  messages: [
+    user("Show me the text styles you can use."),
+    say(
+      [
+        "# Heading 1",
+        "## Heading 2",
+        "### Heading 3",
+        "A plain paragraph that runs long enough to wrap, so line height and measure show the way a real answer reads.",
+        "**Bold**, *italic*, ***bold italic***, ~~strikethrough~~, `inline code` and a [link](https://example.test).",
+        "> A blockquote that also runs long enough to wrap onto a second line.",
+        "- A bullet\n- Another bullet\n  - A nested bullet",
+        "1. **A bold lead-in:** then the rest of the item, long enough to wrap.\n2. A second item",
+        "| Plan | Price |\n| --- | --- |\n| Free | $0 |\n| Pro | $20 |",
+        '```\nconst greeting = "hello";\n```',
+        "---",
+        "A closing paragraph after a rule.",
+      ].join("\n\n"),
+    ),
+  ],
+};
+
 const SCENARIOS: Scenario[] = [
   conversation,
+  textStyles,
   questions,
   approvals,
   secrets,

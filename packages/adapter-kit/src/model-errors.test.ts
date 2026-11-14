@@ -39,6 +39,10 @@ describe("transient model errors", () => {
     ["bad gateway", new Error("502 Bad Gateway")],
     ["empty truncated stream", new Error("Stream ended without finish_reason")],
     ["dropped fetch body", new TypeError("terminated")],
+    [
+      "interrupted upstream stream",
+      new Error("Provider error (Example Model): stream interrupted"),
+    ],
     ["provider network stop", new Error("Provider finish_reason: network_error")],
     ["fetch failure", new TypeError("fetch failed")],
     ["SDK connection failure", new Error("Connection error.")],
@@ -47,6 +51,11 @@ describe("transient model errors", () => {
     ["socket hang up", new Error("socket hang up")],
     ["closed websocket", "WebSocket closed 1006"],
     ["idle stream", "Codex stream idle timeout"],
+    [
+      "provider timed out downloading a linked file",
+      '400 data: {"error":{"code":"invalid_parameter_error","message":"Download multimodal file timed out","type":"invalid_request_error"}}',
+    ],
+    ["provider timed out on a file download", '400: {"message":"File download timed out"}'],
     [
       "server-side processing failure",
       "Codex error: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 00000000-0000-0000-0000-000000000000 in your message.",
