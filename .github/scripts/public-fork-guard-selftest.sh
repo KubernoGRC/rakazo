@@ -88,6 +88,14 @@ export UPSTREAM_REF=upstream
 expect pass "upstream's unchanged file" "$(git rev-parse HEAD)"
 echo "// fork edit" >> fixture.ts && git add fixture.ts && git commit -qm "fork edits fixture"
 expect fail "fork-changed upstream file" "$(git rev-parse HEAD)" "Commit $(git rev-parse HEAD) tracks"
+# Upstream changes its fixture after the fork took it: the fork's copy, still
+# identical to the upstream commit it merged, passes; a fork edit still fails.
+git switch -q -c on-upstream-later on-upstream~1
+git switch -q upstream
+printf 'const KEY = "%s";\nconst OTHER = 1;\n' "$arn" > fixture.ts
+git add fixture.ts && git commit -qm "upstream changes fixture"
+expect pass "upstream's file as the fork took it" "$(git rev-parse on-upstream-later)"
+expect fail "fork-changed file after upstream moved" "$(git rev-parse on-upstream)" "Commit $(git rev-parse on-upstream) tracks"
 unset UPSTREAM_REF
 
 # A credential in pull request text is caught.
