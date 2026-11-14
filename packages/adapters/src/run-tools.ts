@@ -89,7 +89,7 @@ export async function applyTool(
   const knownTool =
     TOOL_HANDLERS.has(name) ||
     ctx.tools.connector.has(name) ||
-    ctx.tools.builtins.some((tool) => tool.name === name);
+    Boolean(ctx.tools.builtins?.some((tool) => tool.name === name));
   try {
     return await recordToolCallEvent(ctx, name, args, knownTool, (audit) =>
       dispatchTool(ctx, name, args, executionId, observer, audit),

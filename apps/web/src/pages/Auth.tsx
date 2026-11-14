@@ -63,7 +63,6 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const [accessOutcome, setAccessOutcome] = useState<"refused" | "unavailable" | null>(null);
   const [accessAttempt, setAccessAttempt] = useState(0);
   const accessIdentity = reset?.accessIdentity === true;
-  const next = searchParams.get("next");
   // One exchange per attempt; navigating re-renders before this page unmounts.
   const accessStarted = useRef<number | null>(null);
   const passwordFieldId = mode === "in" ? "current-password" : "new-password";

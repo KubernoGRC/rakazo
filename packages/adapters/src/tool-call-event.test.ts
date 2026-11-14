@@ -111,6 +111,8 @@ function request(name: string, args: Record<string, unknown>, route = SERVER_ROU
     replayEffectToolName: name,
     fleetSummary: undefined,
     heldForApproval: false,
+    purchase: undefined,
+    cardUse: undefined,
   } satisfies ToolRequest;
 }
 
@@ -132,6 +134,7 @@ function passedCall(
     nextApprovedTool: undefined,
     bypassApproval: approval.bypass ?? false,
     claimedEffect: false,
+    spend: undefined,
     persistEffectResult: async () => true,
     finish: async (result) => result,
     claimOrReturn: async () => undefined,
