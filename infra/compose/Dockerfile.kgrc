@@ -12,7 +12,10 @@ FROM ${BASE_IMAGE}
 
 USER root
 ENV COREPACK_HOME=/opt/corepack
+# pnpm 12 fetches its native binary into the package on first run, which would
+# otherwise happen at container start; run it once here so the image carries it.
 RUN corepack install --global "$(node -p "require('/app/package.json').packageManager")" \
+ && pnpm --version \
  && chmod -R a+rX /opt/corepack
 
 # Never fetch a package manager at run time; the image must already carry it.
