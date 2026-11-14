@@ -4181,6 +4181,7 @@ msgstr "正在載入語音供應商…"
 #: src/components/SpaceMembersSettings.tsx
 #: src/pages/AdminAccessPage.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/Invite.tsx
 #: src/pages/PeerMessagesOverlay.tsx
@@ -6439,6 +6440,10 @@ msgstr "重新登入"
 #: src/pages/onboarding/model-step.tsx
 msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "在 <0>{0}</0> 登入，然後將代碼貼到這裡。"
+
+#: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "請透過貴組織的入口網站登入"
 
 #: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"

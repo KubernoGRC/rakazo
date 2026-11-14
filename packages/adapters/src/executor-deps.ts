@@ -75,6 +75,8 @@ export interface ExecutorDeps {
   secretHttp?: RemoteTransportDependencies;
   /** Allow RFC1918 / Docker-network MCP URLs when the operator enabled the escape. */
   mcpAllowPrivateEndpoint?: boolean;
+  /** Exact DNS names MCP URLs may reach on private addresses (`MCP_PRIVATE_ENDPOINT_HOSTS`). */
+  mcpPrivateEndpointHosts?: readonly string[];
   /** Remote cloud coding agents. Null/omit means tools stay uninjected. */
   cloudAgent?: CloudAgentConnection | null;
   /** The deployment's payment wallet. Null/omit means purchase tools stay uninjected. */

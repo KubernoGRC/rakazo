@@ -9,6 +9,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 import { computerControlEndpoint, controlDesktop } from "./computer-control.js";
+import { computerMatchesCreateSpec } from "./computer-hardening.js";
 import {
   computerLocaleFields,
   computerLocaleMatches,
@@ -184,6 +185,21 @@ app.post("/computers", async (c) => {
         assertVolumeSubpathSupport((await docker.version()).ApiVersion);
       }
       const computerUser = runtimeInfo ? COMPUTER_USER : hostComputerUser(hostUid, hostGid);
+      // Fork patch: resume and create share one input, so a resumed computer is
+      // compared against exactly what create would build.
+      const createInput = {
+        name: containerNameFor(body.botId),
+        image: COMPUTER_IMAGE,
+        botId: body.botId,
+        spaceId: body.spaceId,
+        ...storage,
+        user: computerUser,
+        networkMode,
+        publishControlPort: controlViaLoopback,
+        dns: computerDns,
+        mounts: computerMounts,
+        locale,
+      };
       const existing = await findBotContainer(body.botId, body.spaceId);
       if (existing) {
         const info = await existing.inspect();
@@ -258,6 +274,8 @@ app.post("/computers", async (c) => {
           // So are the owner's time zone and language.
           computerLocaleMatches(info.Config.Env, locale) &&
           controlPublishOk &&
+          // Fork patch: never resume a computer that differs from what create would build.
+          computerMatchesCreateSpec(info, containerCreateOptions(createInput)) &&
           (!storage.homeVolume || homeVolumeMatches(info.HostConfig.Mounts, storage.homeVolume)) &&
           // A computer that cannot rejoin its network is replaced below instead.
           (!reconnect ||
@@ -303,25 +321,12 @@ app.post("/computers", async (c) => {
             ? COMPUTER_GID
             : hostGid;
         await assertComputerHomeWritable(serviceHomePath, effectiveUid, effectiveGid);
-        const name = containerNameFor(body.botId);
+        const { name } = createInput;
         const createdNetwork =
           screenNetworkMode === "internal"
             ? undefined
             : await ensureBotNetwork(body.botId, networkOwner);
-        const options = containerCreateOptions({
-          name,
-          image: COMPUTER_IMAGE,
-          botId: body.botId,
-          spaceId: body.spaceId,
-          ...storage,
-          user: computerUser,
-          networkMode,
-          controlToken: randomUUID(),
-          publishControlPort: controlViaLoopback,
-          dns: computerDns,
-          mounts: computerMounts,
-          locale,
-        });
+        const options = containerCreateOptions({ ...createInput, controlToken: randomUUID() });
         let container: Docker.Container | undefined;
         const removeNamedComputer = () =>
           removeOwnedComputer(

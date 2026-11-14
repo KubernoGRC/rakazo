@@ -4180,6 +4180,7 @@ msgstr "Spraakanbieders laden…"
 #: src/components/SpaceMembersSettings.tsx
 #: src/pages/AdminAccessPage.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/Invite.tsx
 #: src/pages/PeerMessagesOverlay.tsx
@@ -6438,6 +6439,10 @@ msgstr "Opnieuw aanmelden"
 #: src/pages/onboarding/model-step.tsx
 msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "Meld je aan op <0>{0}</0> en plak de code hier."
+
+#: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "Meld je aan via de portal van je organisatie"
 
 #: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"

@@ -24,6 +24,8 @@ import { LazyLarkAdapter } from "./lark/lazy-adapter.js";
 import { Domain } from "./lark/thread-id.js";
 import { lazyChatAdapter } from "./lazy-chat-adapter.js";
 import { LazyPhotonAdapter } from "./photon/lazy-adapter.js";
+import type { TeamsTransport } from "./teams-platform.js";
+import { teamsPlatform } from "./teams-platform.js";
 import { isVitestRuntime } from "./test-runtime.js";
 
 /**
@@ -57,6 +59,10 @@ export interface MessagingEnvironmentValues {
   photonWebhookSecret?: string | undefined;
   /** Extra named Photon projects (PHOTON_PROJECT_ID_<NAME>), each with its own number. */
   photonProjects?: PhotonProjectCredentials[] | undefined;
+  // Fork: a single-tenant Azure Bot (docs/fork-teams.md).
+  teamsAppId?: string | undefined;
+  teamsAppPassword?: string | undefined;
+  teamsAppTenantId?: string | undefined;
 }
 
 export function messagingEnvFromProcess(
@@ -89,6 +95,9 @@ export function messagingEnvFromProcess(
     photonProjectSecret: clean(env.PHOTON_PROJECT_SECRET),
     photonWebhookSecret: clean(env.PHOTON_WEBHOOK_SECRET),
     photonProjects: photonProjectsFromEnv(env),
+    teamsAppId: clean(env.TEAMS_APP_ID),
+    teamsAppPassword: clean(env.TEAMS_APP_PASSWORD),
+    teamsAppTenantId: clean(env.TEAMS_APP_TENANT_ID),
   };
 }
 
@@ -178,6 +187,8 @@ export function messagingPlatformsFromEnv(
     sendblueTransport?: Pick<SendblueClientOptions, "baseURL" | "fetch">;
     /** Test seam: replace only the official Lark SDK HTTP boundary. */
     larkTransport?: HttpInstance;
+    /** Test seam: replace only Microsoft's token issuance and JWT check. */
+    teamsTransport?: TeamsTransport;
   } = {},
 ): MessagingPlatform[] {
   const platforms: MessagingPlatform[] = [];
@@ -392,6 +403,20 @@ export function messagingPlatformsFromEnv(
         pollInboundMessages: options.pollInboundMessages ?? false,
       }),
     });
+  }
+
+  // Fork: all three or nothing, like every other platform (docs/fork-teams.md).
+  if (env.teamsAppId && env.teamsAppPassword && env.teamsAppTenantId) {
+    platforms.push(
+      teamsPlatform(
+        {
+          appId: env.teamsAppId,
+          appPassword: env.teamsAppPassword,
+          tenantId: env.teamsAppTenantId,
+        },
+        options.teamsTransport,
+      ),
+    );
   }
 
   return platforms;

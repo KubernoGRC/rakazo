@@ -4180,6 +4180,7 @@ msgstr "Chargement des fournisseurs vocaux…"
 #: src/components/SpaceMembersSettings.tsx
 #: src/pages/AdminAccessPage.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/Invite.tsx
 #: src/pages/PeerMessagesOverlay.tsx
@@ -6438,6 +6439,10 @@ msgstr "Se reconnecter"
 #: src/pages/onboarding/model-step.tsx
 msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "Connectez-vous sur <0>{0}</0>, puis collez le code ici."
+
+#: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr ""
 
 #: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"

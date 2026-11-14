@@ -149,6 +149,7 @@ The API and worker append a row to `security_events` and write a `security.event
 - model, MCP, connector, voice, memory, and secret credentials created, changed, or removed
 - deployment settings changes, approval decisions, and approval policy changes
 - refused private or internal destinations (`egress.refused`) and auth rate-limit hits
+- every agent tool call (`tool.called`), whatever its outcome
 
 Each event has the user, space, client address, user agent, time, and a few identifiers. Events
 never include message content, secrets, or tokens. Rows older than `SECURITY_EVENT_RETENTION_DAYS`
@@ -194,6 +195,23 @@ GROUP BY "client.ip", bucket(15 minutes) HAVING count(*) > 10;
 SELECT count(DISTINCT "client.ip") FROM logs
 WHERE "security.event.type" = 'auth.sign_in.failed'
 GROUP BY bucket(15 minutes) HAVING count(*) > 50
+```
+
+A `tool.called` event names the tool, the connector and the tool's own name on it, and for an
+MCP server its host (`stdio:` and the command for a local one). It carries a SHA-256 and the size
+of the canonical JSON arguments and the size of the result, never either value, plus how the call
+ended (`metadata.outcome`: `ok`, `error`, `refused`, `replayed`, `approval_requested`,
+`input_requested` or `cancelled`) and what let it run (`metadata.approval`: `person`, `policy` or
+`none`). When a person approved the call, `metadata.approvalId` matches the `effectId` of that
+`approval.decided` event.
+
+Tools a policy refused, by user:
+
+```sql
+SELECT "user.id", "security.event.metadata.tool", "security.event.metadata.host", count(*)
+FROM logs WHERE "security.event.type" = 'tool.called'
+  AND "security.event.metadata.outcome" = 'refused'
+GROUP BY 1, 2, 3
 ```
 
 Probes of internal addresses. Any hit deserves a look:

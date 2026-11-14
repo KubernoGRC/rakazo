@@ -432,6 +432,15 @@ export type ExternalEffectStore = {
   };
 };
 
+/** The result a retry of an effect the user denied gets back. It never ran. */
+export function isDeniedEffectResult(result: unknown): boolean {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    (result as { error?: unknown }).error === DENIED_ACTION_ERROR
+  );
+}
+
 export function resolveDuplicateEffectGate(
   effect: { status: string; result?: unknown },
   toolName: string,

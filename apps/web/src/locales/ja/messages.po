@@ -4180,6 +4180,7 @@ msgstr "音声プロバイダーを読み込み中…"
 #: src/components/SpaceMembersSettings.tsx
 #: src/pages/AdminAccessPage.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/Invite.tsx
 #: src/pages/PeerMessagesOverlay.tsx
@@ -6438,6 +6439,10 @@ msgstr "再度ログイン"
 #: src/pages/onboarding/model-step.tsx
 msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "<0>{0}</0> でサインインし、表示されたコードをここに貼り付けてください。"
+
+#: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "組織のポータルからサインインしてください"
 
 #: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"

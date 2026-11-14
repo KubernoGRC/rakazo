@@ -33,6 +33,7 @@ export const SECURITY_EVENT_TYPES = [
   "space.member.left",
   "egress.refused",
   "rate_limit.hit",
+  "tool.called",
 ] as const;
 
 export const SecurityEventTypeSchema = z.enum(SECURITY_EVENT_TYPES);

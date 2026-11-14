@@ -52,6 +52,7 @@ import type { McpOAuthBroker, OAuthMaterial } from "./mcp-oauth.js";
 import {
   accessTokenExpiresAt,
   launchArgSecrets,
+  launchOAuthClient,
   looksLikeSecretValue,
   McpReauthorizationRequiredError,
   oauthMaterialSecrets,
@@ -65,6 +66,7 @@ import {
   isNpxCommand,
   parseNpxLaunch,
 } from "./mcp-package-installer.js";
+import { mcpPrivateEndpointHostsFromEnv } from "./mcp-private-endpoint-hosts.js";
 import type { McpServerHealthUpdate } from "./mcp-server-health.js";
 import { needsMcpOAuthClient, recordMcpServerHealth } from "./mcp-server-health.js";
 import { McpSession, mcpStdioRefusal } from "./mcp-transport.js";
@@ -222,6 +224,8 @@ export type McpConnectorOptions = {
   /** Audit sink for failed discovery. Without it the log line stays the only trace. */
   events?: Pick<ThreadEvents, "append">;
   allowPrivateEndpoint?: boolean;
+  /** Exact DNS names user servers may reach on private addresses (`MCP_PRIVATE_ENDPOINT_HOSTS`). */
+  privateEndpointHosts?: readonly string[];
   /** Where `npx` packages are installed; see `defaultMcpPackagesRoot`. */
   packagesDir?: string;
   /** Upper bound for installing an `npx` package. */
@@ -242,14 +246,21 @@ function positiveInteger(value: string | undefined, allowZero = false): number |
   return Number.isInteger(parsed) && (allowZero ? parsed >= 0 : parsed > 0) ? parsed : undefined;
 }
 
-/** Stdio launch settings shared by the API and worker composition roots. */
+/** Stdio launch settings shared by the API and worker composition roots, plus the
+ * private hosts user servers may reach (`MCP_PRIVATE_ENDPOINT_HOSTS`). */
 export function mcpStdioOptionsFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): Pick<
   McpConnectorOptions,
-  "packagesDir" | "installTimeoutMs" | "startupTimeoutMs" | "idleMs" | "discoveryTimeoutMs"
+  | "packagesDir"
+  | "installTimeoutMs"
+  | "startupTimeoutMs"
+  | "idleMs"
+  | "discoveryTimeoutMs"
+  | "privateEndpointHosts"
 > {
   return {
+    privateEndpointHosts: mcpPrivateEndpointHostsFromEnv(env),
     packagesDir: defaultMcpPackagesRoot(env),
     installTimeoutMs:
       positiveInteger(env.MCP_STDIO_INSTALL_TIMEOUT_MS) ?? DEFAULT_MCP_INSTALL_TIMEOUT_MS,
@@ -1157,10 +1168,9 @@ export class McpConnector implements ConnectorProvider {
           values = {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
-            client_id: material.oauthClient?.client_id,
-            client_secret: material.oauthClient?.client_secret,
+            ...launchOAuthClient(material),
             expires_at: expiresAt === undefined ? undefined : String(expiresAt),
-            scope: tokens.scope ?? material.oauthClient?.scope,
+            scope: tokens.scope ?? launchOAuthClient(material).scope,
             token_type: tokens.token_type,
           };
           launchEnv = resolveMcpOAuthEnv(env, values);
@@ -1242,6 +1252,7 @@ export class McpConnector implements ConnectorProvider {
               allowHttpLocalhost: localHttp,
               allowLocalHttpCredentials: localHttp,
               allowPrivateEndpoint,
+              privateEndpointHosts: this.options.privateEndpointHosts,
             },
             transport: server.transport === "sse" ? "sse" : "streamable-http",
             allowLegacySse: server.transport === "sse",

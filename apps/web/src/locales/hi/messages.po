@@ -4180,6 +4180,7 @@ msgstr "आवाज़ प्रोवाइडर्स लोड हो र�
 #: src/components/SpaceMembersSettings.tsx
 #: src/pages/AdminAccessPage.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/Invite.tsx
 #: src/pages/PeerMessagesOverlay.tsx
@@ -6438,6 +6439,10 @@ msgstr "फिर से साइन इन करें"
 #: src/pages/onboarding/model-step.tsx
 msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "<0>{0}</0> पर साइन इन करें, फिर कोड यहाँ पेस्ट करें।"
+
+#: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr ""
 
 #: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"

@@ -34,6 +34,8 @@ import {
   userComputerShell,
 } from "./run-tools-user-computer.js";
 import { strategicInitiativeToolAllowed } from "./strategic-initiative.js";
+import type { ToolCallAudit } from "./tool-call-event.js";
+import { auditToolCall as recordToolCallEvent } from "./tool-call-event.js";
 import { argumentGiven } from "./update-bot-patch.js";
 
 const TOOL_HANDLERS = new Map<string, ToolHandler>([
@@ -62,7 +64,10 @@ function toolHandler(name: string): ToolHandler {
   );
 }
 
-/** Run one tool call of this run's model: gate it, then hand it to its tool family. */
+/**
+ * Run one tool call of this run's model: gate it, then hand it to its tool family. Every call,
+ * however it ends, records one `tool.called` security event.
+ */
 export async function applyTool(
   ctx: RunContext,
   name: string,
@@ -81,8 +86,14 @@ export async function applyTool(
     const { bot_id: _self, ...own } = args;
     args = own;
   }
+  const knownTool =
+    TOOL_HANDLERS.has(name) ||
+    ctx.tools.connector.has(name) ||
+    ctx.tools.builtins.some((tool) => tool.name === name);
   try {
-    return await dispatchTool(ctx, name, args, executionId, observer);
+    return await recordToolCallEvent(ctx, name, args, knownTool, (audit) =>
+      dispatchTool(ctx, name, args, executionId, observer, audit),
+    );
   } finally {
     // Editing its own profile returns only what this run wrote; a child's profile is another bot's.
     const ownProfile = name === "update_bot" && !argumentGiven(args.bot_id);
@@ -96,6 +107,7 @@ async function dispatchTool(
   args: Record<string, unknown>,
   executionId: string,
   observer: AgentToolExecutionObserver | undefined,
+  audit: ToolCallAudit,
 ) {
   ctx.context.signal.throwIfAborted();
   if (!strategicInitiativeToolAllowed(name, ctx.run)) {
@@ -128,6 +140,7 @@ async function dispatchTool(
   }
   const request = await resolveToolRequest(ctx, name, args, executionId);
   if ("error" in request) return request;
+  audit.resolved(request);
   // A catalog call resolves to a connector tool after the checks above; one named like a local
   // tool (message_agent, cloud_agent_*, ...) would otherwise run that local handler instead.
   if (request.catalogRemapped && toolHandler(request.name) !== connectorTool) {
@@ -137,7 +150,11 @@ async function dispatchTool(
   if (refused) return refused;
   noteComputerTaskStep(ctx.state.reply, request.name);
   const gate = await gateToolCall(ctx, request, observer);
-  if ("result" in gate) return gate.result;
+  if ("result" in gate) {
+    if (gate.replayed) audit.replayed();
+    return gate.result;
+  }
+  audit.passedGate(gate.call);
   if (!gate.call.applied) return toolHandler(gate.call.name)(ctx, gate.call);
   let outcome: "success" | "failure" = "failure";
   try {

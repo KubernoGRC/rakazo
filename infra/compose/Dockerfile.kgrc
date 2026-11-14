@@ -1,0 +1,20 @@
+# Fork-owned overlay on the upstream app image (infra/compose/Dockerfile).
+# The upstream Dockerfile is built unmodified as BASE_IMAGE and every change
+# this fork needs on top lives here, so merging upstream never conflicts.
+#
+# pnpm is baked in. Upstream runs `corepack enable` and every pnpm step as root,
+# so Corepack's cache sits in /root/.cache, which USER node cannot read. Every
+# service command (`pnpm --filter ...`) then makes Corepack download pnpm at
+# container start, and a host without outbound internet crash-loops. Here the
+# cache lives in the image, readable by node, and runtime downloads are off.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+ENV COREPACK_HOME=/opt/corepack
+RUN corepack install --global "$(node -p "require('/app/package.json').packageManager")" \
+ && chmod -R a+rX /opt/corepack
+
+# Never fetch a package manager at run time; the image must already carry it.
+ENV COREPACK_ENABLE_NETWORK=0 COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+USER node

@@ -80,6 +80,8 @@ export function createRouterContext(deps: RouterDeps) {
     actor: Actor | null;
     /** The signed-in session, so a push token ends with the session that registered it. */
     sessionId?: string;
+    /** Fork: the request's headers, for access-identity step-up confirmation. */
+    headers?: Headers;
     signal?: AbortSignal;
     /** Re-runs the request's auth so a long-lived stream notices sign-out and revocation. */
     stillAuthorized?: () => Promise<boolean>;
