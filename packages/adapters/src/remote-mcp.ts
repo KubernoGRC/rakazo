@@ -759,12 +759,8 @@ async function resolvePublicHost(
   const addresses = await resolve(hostname);
   try {
     // The CONNECT tunnel bypasses createSafeLookup's own per-address check, so
-    // re-apply the same policy: loopback stays allowed under the private-endpoint escape.
-    if (policy.allowPrivateEndpoint === true && isLocalhostOrLoopbackIp(hostname)) {
-      assertLoopbackAddresses(addresses);
-    } else {
-      assertAllowedAddresses(addresses, policy);
-    }
+    // re-apply the same policy, pinned private hosts included.
+    assertRemoteAddresses(hostname, addresses, policy);
   } catch (error) {
     throw egressRefused(hostname, error);
   }
@@ -903,20 +899,32 @@ export function createSafeLookup(
   resolve: ResolveHostname = resolveHostname,
   policy: RemoteUrlPolicy = {},
 ): LookupFunction {
-  return createAddressCheckedLookup(resolve, (addresses, hostname) => {
-    if (isPinnedPrivateHost(hostname.replace(/^\[|\]$/g, ""), policy)) {
-      assertPinnedPrivateAddresses(addresses);
-      return;
-    }
-    if (
-      policy.allowPrivateEndpoint === true &&
-      isLocalhostOrLoopbackIp(hostname.replace(/^\[|\]$/g, ""))
-    ) {
-      assertLoopbackAddresses(addresses);
-      return;
-    }
-    assertAllowedAddresses(addresses, policy);
-  });
+  return createAddressCheckedLookup(resolve, (addresses, hostname) =>
+    assertRemoteAddresses(hostname, addresses, policy),
+  );
+}
+
+/**
+ * The address policy for a remote MCP host, shared by the direct lookup and the proxy's
+ * CONNECT tunnel: a pinned private host (MCP_PRIVATE_ENDPOINT_HOSTS) may reach only RFC 1918
+ * or unique-local addresses, loopback only under the private-endpoint escape, anything else
+ * only public addresses.
+ */
+export function assertRemoteAddresses(
+  host: string,
+  addresses: ResolvedAddress[],
+  policy: RemoteUrlPolicy,
+): void {
+  const hostname = host.replace(/^\[|\]$/g, "");
+  if (isPinnedPrivateHost(hostname, policy)) {
+    assertPinnedPrivateAddresses(addresses);
+    return;
+  }
+  if (policy.allowPrivateEndpoint === true && isLocalhostOrLoopbackIp(hostname)) {
+    assertLoopbackAddresses(addresses);
+    return;
+  }
+  assertAllowedAddresses(addresses, policy);
 }
 
 /** Reserved local names (localhost, .local, .internal, Docker Desktop) and non-public literals. */
