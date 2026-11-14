@@ -483,6 +483,20 @@ describe("recordRuntimeToolCall", () => {
     expect(JSON.stringify(recordedEvents())).not.toContain("Which?");
   });
 
+  it("leaves a background helper to the dispatcher, which already recorded it", async () => {
+    const { ctx } = fakeContext();
+
+    await recordRuntimeToolCall(ctx, {
+      name: "run_subagent",
+      executionId: "call-1",
+      durationMs: 3,
+      args: { task: "x", background: true },
+      result: { content: [], details: {} },
+    });
+
+    expect(recordedEvents()).toEqual([]);
+  });
+
   it.each([
     [`${SUBAGENT_FAILURE_PREFIX}provider failed`, "error"],
     [SUBAGENT_NESTING_REFUSAL, "refused"],

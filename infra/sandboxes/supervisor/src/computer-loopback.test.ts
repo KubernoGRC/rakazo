@@ -2712,7 +2712,7 @@ describe("computer network reclaim", () => {
             User: hostComputerUser(),
             Labels: { "rakazo.managed": "true", "rakazo.botId": "bot", "rakazo.spaceId": "space" },
           },
-          HostConfig: { NetworkMode: botNet, PortBindings: {} },
+          HostConfig: { ...createdHostConfig(), NetworkMode: botNet, PortBindings: {} },
           State: { Running: false },
           NetworkSettings: { Networks: { [botNet]: { NetworkID: "net-v4" } } },
         }),
@@ -2781,7 +2781,7 @@ describe("computer network reclaim", () => {
                 "rakazo.spaceId": "space",
               },
             },
-            HostConfig: { NetworkMode: botNet, PortBindings: {} },
+            HostConfig: { ...createdHostConfig(), NetworkMode: botNet, PortBindings: {} },
             State: { Running: false },
             NetworkSettings: {
               Networks: detached ? {} : { [botNet]: { NetworkID: "net-v4" } },

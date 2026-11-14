@@ -6440,6 +6440,10 @@ msgid "Sign in at <0>{0}</0>, then paste the code here."
 msgstr "Zaloguj się pod adresem <0>{0}</0>, a potem wklej tutaj kod."
 
 #: src/pages/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "Zaloguj się przez portal swojej organizacji"
+
+#: src/pages/Auth.tsx
 msgid "Sign in to Rakazo"
 msgstr "Zaloguj się do Rakazo"
 

@@ -1050,6 +1050,8 @@ export const PL_MESSAGES: Record<string, string> = {
   "Privacy policy": "Polityka prywatności",
   "Continue with {name}": "Kontynuuj przez {name}",
   "Could not load sign-in options": "Nie udało się wczytać opcji logowania",
+  "This server uses your organisation's sign-in in a web browser":
+    "Ten serwer korzysta z logowania Twojej organizacji w przeglądarce internetowej",
   "Deletion code": "Kod usunięcia",
   "Email is not allowed to register": "Ten adres e-mail nie może służyć do rejestracji",
   "Email verification required": "Wymagana weryfikacja adresu e-mail",
