@@ -47,9 +47,15 @@ describe("Teams messaging", () => {
             text: "link-code",
             channelId: "msteams",
             serviceUrl: "https://smba.trafficmanager.net/teams/",
-            from: { id: "sender-1" },
+            // This tenant's activity, so the fork's tenant pin passes it to the JWT check.
+            from: { id: "sender-1", aadObjectId: "00000000-0000-4000-8000-000000000003" },
             recipient: { id: `28:${credentials.teamsAppId}` },
-            conversation: { id: "a:conversation-1", conversationType: "personal" },
+            conversation: {
+              id: "a:conversation-1",
+              conversationType: "personal",
+              tenantId: credentials.teamsAppTenantId,
+            },
+            channelData: { tenant: { id: credentials.teamsAppTenantId } },
           }),
         }),
       );

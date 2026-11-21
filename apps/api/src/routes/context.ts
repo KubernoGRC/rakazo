@@ -105,6 +105,8 @@ export function createRouterContext(deps: RouterDeps) {
     /** The signed-in session, so a push token ends with the session that registered it. */
     sessionId?: string;
     nativeSessionId?: string;
+    /** Fork: the request's headers, for access-identity step-up confirmation. */
+    headers?: Headers;
     signal?: AbortSignal;
     /** Re-runs the request's auth so a long-lived stream notices sign-out and revocation. */
     stillAuthorized?: () => Promise<boolean>;

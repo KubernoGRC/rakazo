@@ -47,6 +47,8 @@ export interface McpUrlPolicy {
   allowLocalHttpCredentials?: boolean;
   /** Permit RFC1918 / Docker-network hosts when the operator enabled the escape. */
   allowPrivateEndpoint?: boolean;
+  /** Exact DNS names reachable on private addresses without `allowPrivateEndpoint`. */
+  privateEndpointHosts?: readonly string[];
   /** Hosts allowed after redirects (redirects are rejected by default). */
   allowedHosts?: readonly string[];
 }
@@ -209,7 +211,10 @@ export function secureFetch(
   const safeRemoteFetch = createSafeRemoteFetch(
     network.fetch,
     network.resolveHostname,
-    { allowPrivateEndpoint: urlPolicy.allowPrivateEndpoint },
+    {
+      allowPrivateEndpoint: urlPolicy.allowPrivateEndpoint,
+      privateEndpointHosts: urlPolicy.privateEndpointHosts,
+    },
     undefined,
     responseTimeouts,
   );

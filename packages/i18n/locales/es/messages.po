@@ -13078,3 +13078,11 @@ msgstr "Sin retención de datos"
 #: apps/web/src/components/vault/VaultItemEditor.tsx
 msgid "ZIP or postal code"
 msgstr "Código postal"
+
+#: apps/web/src/pages/auth/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr ""
+
+#: apps/mobile/app/sign-in.tsx
+msgid "This server uses your organisation's sign-in in a web browser"
+msgstr "Este servidor usa el inicio de sesión de tu organización en un navegador web"

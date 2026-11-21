@@ -13078,3 +13078,11 @@ msgstr "データ保持なし"
 #: apps/web/src/components/vault/VaultItemEditor.tsx
 msgid "ZIP or postal code"
 msgstr "郵便番号"
+
+#: apps/web/src/pages/auth/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "組織のポータルからサインインしてください"
+
+#: apps/mobile/app/sign-in.tsx
+msgid "This server uses your organisation's sign-in in a web browser"
+msgstr "このサーバーでは、Webブラウザで組織のサインインを使用します"

@@ -32,6 +32,11 @@ import { reconcileCloudAgents } from "../../cloud-agents/cloud-agent-service.js"
 import { createIdleComputerSweeper } from "../../computers/computer-idle.js";
 import { reconcileComputerUpdates } from "../../computers/computer-update.js";
 import { createConnectorStack } from "../../integrations/connector-registry.js";
+import type { DeploymentConnectorConfig } from "../../integrations/deployment-connectors.js";
+import {
+  deploymentConnectorConfigFromEnv,
+  deploymentConnectorProviders,
+} from "../../integrations/deployment-connectors.js";
 import type { RemoteConnectorDependencies } from "../../integrations/installed-connectors.js";
 import { InstalledConnectorProvider } from "../../integrations/installed-connectors.js";
 import { IntegrationProviderSettings } from "../../integrations/integration-provider-settings.js";
@@ -95,6 +100,8 @@ export interface RunRuntimeEnv extends PipedreamEnvironmentValues {
   mcpStdioAllowedCommands: string[];
   mcpStdio: ReturnType<typeof mcpStdioOptionsFromEnv>;
   mcpAllowPrivateEndpoint: boolean;
+  /** Fork: deployment-owned connectors; see docs/fork-deployment-connectors.md. */
+  deploymentConnectors: DeploymentConnectorConfig;
   deploymentLabs: LabFeature[];
   phoneCallsEnabled: boolean;
   phoneCallRingSeconds: number;
@@ -128,6 +135,7 @@ export function runRuntimeEnvFromProcess(source: NodeJS.ProcessEnv): RunRuntimeE
       .filter(Boolean),
     mcpStdio: mcpStdioOptionsFromEnv(source),
     mcpAllowPrivateEndpoint: source.MCP_ALLOW_PRIVATE_ENDPOINT === "true",
+    deploymentConnectors: deploymentConnectorConfigFromEnv(source),
     pipedreamClientId: source.PIPEDREAM_CLIENT_ID,
     pipedreamClientSecret: source.PIPEDREAM_CLIENT_SECRET,
     pipedreamProjectId: source.PIPEDREAM_PROJECT_ID,
@@ -200,14 +208,21 @@ export function createConnectorRuntime(
         : undefined),
     pipedream,
   });
-  const stack = createConnectorStack(composio, [
-    installed,
-    ...integrationSettings
-      .providers()
-      .filter((provider) => !composio || provider.describe().id !== "composio"),
-    mcp,
-    ...(overrides.connectors ?? []),
-  ]);
+  const stack = createConnectorStack(
+    composio,
+    deploymentConnectorProviders(
+      env.deploymentConnectors,
+      [
+        installed,
+        ...integrationSettings
+          .providers()
+          .filter((provider) => !composio || provider.describe().id !== "composio"),
+        mcp,
+        ...(overrides.connectors ?? []),
+      ],
+      network,
+    ),
+  );
   integrationSettings.warmDirectories();
   const userCloudAgents = new T3CodeConnections(prisma, mcpOAuth, {
     ...network,
@@ -225,6 +240,7 @@ type SetByRunRuntime =
   | "listConnectedPlugins"
   | "secrets"
   | "mcpAllowPrivateEndpoint"
+  | "mcpPrivateEndpointHosts"
   | "deploymentModelKey"
   | "deploymentModelConfigured"
   | "dataDir"
@@ -311,8 +327,10 @@ export function createRunRuntime(
       env.composioApiKey ?? "",
       env.cursorApiKey ?? "",
       process.env.TYPESAFE_API_KEY ?? "",
+      env.deploymentConnectors.mcp?.token ?? "",
     ].filter(Boolean),
     mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
+    mcpPrivateEndpointHosts: env.mcpStdio.privateEndpointHosts,
     deploymentModelKey: env.deploymentModelKey,
     deploymentModelConfigured: env.deploymentModelConfigured,
     dataDir: env.dataDir,

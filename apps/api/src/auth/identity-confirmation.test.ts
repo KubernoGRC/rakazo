@@ -22,6 +22,21 @@ it("passes a session that recently confirmed its identity", async () => {
   });
 });
 
+// Fork: the request's headers reach the lookup, so a fresh access assertion can confirm.
+it("passes the request headers to the confirmation lookup", async () => {
+  const headers = new Headers({ "x-test": "1" });
+  const hasRecentIdentityConfirmation = vi.fn(async () => true);
+  await requireIdentityConfirmation(
+    { hasRecentIdentityConfirmation },
+    { actor, sessionId: "session-1", headers },
+  );
+  expect(hasRecentIdentityConfirmation).toHaveBeenCalledWith({
+    sessionId: "session-1",
+    userId: "user-1",
+    headers,
+  });
+});
+
 // Without a session or actor the guard must refuse even if a confirmation lookup would pass.
 it.each([
   ["an unconfirmed session", { actor, sessionId: "session-1" }, false],

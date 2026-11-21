@@ -13079,3 +13079,11 @@ msgstr "零資料保留"
 #: apps/web/src/components/vault/VaultItemEditor.tsx
 msgid "ZIP or postal code"
 msgstr "郵遞區號"
+
+#: apps/web/src/pages/auth/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr "請透過貴組織的入口網站登入"
+
+#: apps/mobile/app/sign-in.tsx
+msgid "This server uses your organisation's sign-in in a web browser"
+msgstr "此伺服器使用貴組織的登入方式，請在網頁瀏覽器中登入"

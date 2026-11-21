@@ -385,7 +385,14 @@ export async function callMcpToolAsking(
   router: McpElicitationRouter,
   name: string,
   args: Record<string, unknown>,
-  options: { signal?: AbortSignal; idleMs: number; totalMs: number; asker?: McpCallAsker },
+  options: {
+    signal?: AbortSignal;
+    idleMs: number;
+    totalMs: number;
+    asker?: McpCallAsker;
+    /** Sent as the request `_meta` of the call. */
+    meta?: Record<string, unknown>;
+  },
 ) {
   const timedOut = new AbortController();
   const clock = new McpCallClock(options.idleMs, options.totalMs, (limit) =>
@@ -404,12 +411,16 @@ export async function callMcpToolAsking(
     signal: AbortSignal.any([signal, ended.signal]),
   });
   try {
-    return await client.callTool({ name, arguments: args }, undefined, {
-      signal,
-      timeout: NO_SDK_TIMEOUT_MS,
-      // A progress handler is what asks the server for progress reports at all.
-      onprogress: () => clock.progress(),
-    });
+    return await client.callTool(
+      { name, arguments: args, ...(options.meta ? { _meta: options.meta } : {}) },
+      undefined,
+      {
+        signal,
+        timeout: NO_SDK_TIMEOUT_MS,
+        // A progress handler is what asks the server for progress reports at all.
+        onprogress: () => clock.progress(),
+      },
+    );
   } finally {
     clock.end();
     ended.abort();

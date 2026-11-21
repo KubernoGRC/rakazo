@@ -114,6 +114,7 @@ export interface ToolCall {
 export type ToolHandler = (ctx: RunContext, call: ToolCall) => Promise<unknown>;
 export type ToolHandlers = Record<string, ToolHandler>;
 
+/** `replayed` marks a result an earlier attempt of the same effect already settled. */
 type GateOutcome = { result: unknown; replayed?: true } | { call: ToolCall };
 
 /**

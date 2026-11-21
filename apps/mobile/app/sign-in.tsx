@@ -406,6 +406,19 @@ export default function SignIn() {
                         style={{ marginTop: 16 }}
                       />
                     ) : null}
+                    {reset?.accessIdentity ? (
+                      // Fork: the access proxy's sign-in runs only in a web browser.
+                      <Text
+                        accessibilityRole="alert"
+                        style={{
+                          color: tokens.mutedForeground,
+                          textAlign: "center",
+                          marginTop: 16,
+                        }}
+                      >
+                        {t`This server uses your organisation's sign-in in a web browser`}
+                      </Text>
+                    ) : null}
                     {!reset?.passwordAuth && mode !== "forgot" ? (
                       <SocialSignInButtons
                         providers={providers}

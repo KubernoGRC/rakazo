@@ -1,3 +1,4 @@
+import type { TeamsAdapterConfig } from "@chat-adapter/teams";
 import type { HttpInstance } from "@larksuiteoapi/node-sdk";
 import type { ClientOptions as SendblueClientOptions } from "sendblue";
 import type { MessagingPlatform } from "./chat-sdk-surface.js";
@@ -34,6 +35,8 @@ export interface MessagingMountOptions {
   sendblueTransport?: Pick<SendblueClientOptions, "baseURL" | "fetch">;
   /** Test seam: replace only the official Lark SDK HTTP boundary. */
   larkTransport?: HttpInstance;
+  /** Fork test seam: replace only Microsoft's token issuance and JWT check, offline. */
+  teamsTransport?: Pick<TeamsAdapterConfig, "token" | "webhookVerifier">;
 }
 
 export interface MessagingMountContext extends MessagingMountOptions {

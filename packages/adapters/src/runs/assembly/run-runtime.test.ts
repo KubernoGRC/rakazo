@@ -1,6 +1,7 @@
 import { phoneCallSettings, uploadSizeFromEnv } from "@rakazo/core";
 import { resolveEncryptionKey } from "@rakazo/core/node/secrets-guard";
 import { describe, expect, it } from "vitest";
+import { deploymentConnectorConfigFromEnv } from "../../integrations/deployment-connectors.js";
 import { mcpStdioOptionsFromEnv } from "../../mcp/mcp-connector.js";
 import { resolveDeploymentModel } from "../../models/deployment-model.js";
 import { workspaceSaveLimits } from "../../storage/workspace-save-policy.js";
@@ -29,6 +30,7 @@ function previousWorkerValues(source: NodeJS.ProcessEnv) {
       .filter(Boolean),
     mcpStdio: mcpStdioOptionsFromEnv(source),
     mcpAllowPrivateEndpoint: source.MCP_ALLOW_PRIVATE_ENDPOINT === "true",
+    deploymentConnectors: deploymentConnectorConfigFromEnv(source),
     pipedreamClientId: source.PIPEDREAM_CLIENT_ID,
     pipedreamClientSecret: source.PIPEDREAM_CLIENT_SECRET,
     pipedreamProjectId: source.PIPEDREAM_PROJECT_ID,

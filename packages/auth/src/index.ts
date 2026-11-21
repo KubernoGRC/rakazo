@@ -36,6 +36,15 @@ import {
 } from "better-auth/api";
 import { parseSetCookieHeader } from "better-auth/cookies";
 import { emailOTP, lastLoginMethod, organization } from "better-auth/plugins";
+import type { AccessVerifier } from "./access-identity.js";
+import {
+  ACCESS_IDENTITY_METHOD,
+  ACCESS_SIGN_IN_PATH,
+  accessIdentity,
+  accessIdentityClosesPath,
+  accessReauthentication,
+  freshAccessAssertionFor,
+} from "./access-identity.js";
 import {
   ACCOUNT_EXPORT_TOKEN_PREFIX,
   consumeAccountExportToken,
@@ -68,6 +77,20 @@ import { socialCallbackProtection } from "./social-callback-protection.js";
 import type { TokenKey } from "./token-storage.js";
 import { encryptStoredOAuthTokens, openIdToken, sealIdToken } from "./token-storage.js";
 
+export type {
+  AccessIdentity,
+  AccessIdentityConfig,
+  AccessRefusal,
+  AccessVerdict,
+  AccessVerifier,
+} from "./access-identity.js";
+export {
+  ACCESS_ASSERTION_HEADER,
+  ACCESS_PROVIDER_ID,
+  ACCESS_SIGN_IN_PATH,
+  accessIdentityClosesPath,
+  createAccessVerifier,
+} from "./access-identity.js";
 export { agentImportEmail } from "./agent-import-email.js";
 export type { DirectoryAccountChange } from "./directory.js";
 export { createDirectory } from "./directory.js";
@@ -106,6 +129,8 @@ export interface AuthEnv {
   oidc?: OidcConfig;
   /** Google and Apple, each present only when its credentials are set. */
   social?: SocialAuthConfig;
+  /** Fork: trusted access-proxy identity. The only way in when set. */
+  accessIdentity?: AccessVerifier;
   secret: string;
   baseURL: string;
   webOrigin: string;
@@ -195,7 +220,7 @@ export function authRateLimitOptions(nodeEnv = process.env.NODE_ENV) {
 }
 
 export function createAuth(prisma: PrismaClient, env: AuthEnv) {
-  if (env.passwordAuth === false && !env.oidc)
+  if (env.passwordAuth === false && !env.oidc && !env.accessIdentity)
     throw new Error("Password auth requires OIDC when disabled");
   // A failed lookup still sends the email, in the asking browser's language.
   const emailLocaleOf: EmailLocaleOf = async (account, headers) => {
@@ -206,6 +231,8 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
       return emailLocale(null, headers);
     }
   };
+  assertAccessIdentityConfig(env);
+  const accessMode = Boolean(env.accessIdentity);
   const discovery = env.oidc ? oidcDiscovery(env.oidc) : undefined;
   /** The signup policy as it applies to the request asking. */
   const admission = (headers: Headers | undefined) => {
@@ -376,6 +403,12 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
         signupPartnerClickId: attributionField,
       },
       validateUserInfo: async ({ user, source }, ctx) => {
+        // Fork: under access identity no other provisioning source is accepted.
+        if (accessMode) {
+          return source.method === ACCESS_IDENTITY_METHOD
+            ? undefined
+            : { error: "REGISTRATION_CLOSED" };
+        }
         if (source.method !== "oauth") return;
         const providerId = source.oauth?.providerId;
         const reauthentication = (await getOAuthState())?.serverContext;
@@ -493,6 +526,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
         env.oidc?.name,
         env.oidc?.issuer,
         env.passwordAuth !== false,
+        env.accessIdentity ? accessReauthentication(env.accessIdentity) : undefined,
       ),
       identityConfirmation(env.email, emailLocaleOf),
       ...(discovery ? [discovery.plugin] : []),
@@ -529,6 +563,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
         : []),
       // Marks the method on the sign-in page; written only alongside a new session cookie.
       lastLoginMethod({ cookieName: LAST_SIGN_IN_COOKIE }),
+      ...(env.accessIdentity ? [accessIdentity(env.accessIdentity)] : []),
       organization({
         allowUserToCreateOrganization: false,
         disableOrganizationDeletion: true,
@@ -537,6 +572,13 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     ],
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
+        // Fork: under access identity the verified assertion is the only way in.
+        if (accessMode && accessIdentityClosesPath(ctx.path)) {
+          throw new APIError("FORBIDDEN", {
+            code: "ACCESS_IDENTITY_ONLY",
+            message: "Sign in through your organisation's portal",
+          });
+        }
         const providerId = requestProviderId(ctx);
         if (
           (ctx.path === "/sign-in/social" || ctx.path === "/link-social") &&
@@ -773,7 +815,16 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
             const user = await ctx?.context.internalAdapter.findUserById(session.userId);
             const policy = admission(ctx?.headers);
             const oidcSignIn = isOidcCallback(ctx);
-            const bypassAllowlist = oidcSignIn && env.oidc?.allowSignupBypass;
+            // Fork: the access policy is the admission decision, so the signup
+            // policy cannot refuse a verified identity, and nothing else may
+            // create a session in that mode.
+            const accessSignIn = accessMode && ctx?.path === ACCESS_SIGN_IN_PATH;
+            if (accessMode && !accessSignIn) {
+              throw new APIError("FORBIDDEN", {
+                message: "Sign in through your organisation's portal",
+              });
+            }
+            const bypassAllowlist = (oidcSignIn && env.oidc?.allowSignupBypass) || accessSignIn;
             if (!user || isMessagingEmail(user.email)) {
               throw new APIError("FORBIDDEN", {
                 code: "EMAIL_VERIFICATION_REQUIRED",
@@ -796,6 +847,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
             const membership = await prisma.spaceMember.findFirst({ where: { userId: user.id } });
             if (!membership) {
               if (
+                !accessSignIn &&
                 (!policy.enabled ||
                   (!bypassAllowlist && !emailAllowed(user.email, policy.allowlist))) &&
                 !(await provisioned(user.id))
@@ -908,6 +960,10 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
             if (isMessagingEmail(user.email)) {
               throw new APIError("BAD_REQUEST", { message: "Email is not available" });
             }
+            // Fork: under access identity only the verified bootstrap creates accounts.
+            if (accessMode && ctx?.path !== ACCESS_SIGN_IN_PATH) {
+              throw new APIError("FORBIDDEN", { message: "Registration is closed" });
+            }
             const callbackAttribution = SignupAttribution.safeParse(
               ctx?.path === "/callback/:id"
                 ? (await getOAuthState())?.serverContext?.signupAttribution
@@ -964,8 +1020,25 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     encryptStoredOAuthTokens: async () => encryptStoredOAuthTokens(prisma, await tokenKey()),
     ssoAvailability: () => discovery?.availability(),
     passkeyRpId: relyingParty?.rpID ?? null,
-    hasRecentIdentityConfirmation: async (session: { sessionId: string; userId: string }) =>
-      hasRecentIdentityConfirmation((await auth.$context).internalAdapter, session),
+    hasRecentIdentityConfirmation: async (session: {
+      sessionId: string;
+      userId: string;
+      /** Fork: the request's headers, so a fresh access assertion counts as confirmation. */
+      headers?: Headers;
+    }) => {
+      const adapter = (await auth.$context).internalAdapter;
+      if (await hasRecentIdentityConfirmation(adapter, session)) return true;
+      return Boolean(
+        env.accessIdentity &&
+          session.headers &&
+          (await freshAccessAssertionFor(
+            env.accessIdentity,
+            adapter,
+            session.headers,
+            session.userId,
+          )),
+      );
+    },
     issueAccountExportToken: async (userId: string) =>
       issueAccountExportToken((await auth.$context).internalAdapter, userId),
     consumeAccountExportToken: async (token: string) =>
@@ -976,6 +1049,20 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
   });
 }
 
+/**
+ * Fork: access identity only means something when it is the sole way in, so it
+ * fails at startup beside password auth, OIDC or social sign-in.
+ */
+export function assertAccessIdentityConfig(
+  env: Pick<AuthEnv, "accessIdentity" | "oidc" | "passwordAuth" | "social">,
+) {
+  if (!env.accessIdentity) return;
+  if (env.passwordAuth !== false)
+    throw new Error("Access identity requires password authentication to be disabled");
+  if (env.oidc) throw new Error("Access identity cannot be combined with OIDC");
+  if (env.social?.providers.length)
+    throw new Error("Access identity cannot be combined with social sign-in");
+}
 export type Auth = ReturnType<typeof createAuth>;
 
 async function revokeUnprovenCredentials(prisma: PrismaClient, userId: string) {

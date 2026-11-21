@@ -13078,3 +13078,11 @@ msgstr "ללא שמירת נתונים"
 #: apps/web/src/components/vault/VaultItemEditor.tsx
 msgid "ZIP or postal code"
 msgstr "מיקוד"
+
+#: apps/web/src/pages/auth/Auth.tsx
+msgid "Sign in through your organisation's portal"
+msgstr ""
+
+#: apps/mobile/app/sign-in.tsx
+msgid "This server uses your organisation's sign-in in a web browser"
+msgstr ""

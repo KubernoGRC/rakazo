@@ -51,6 +51,8 @@ import {
   userComputerObserve,
   userComputerShell,
 } from "./run-tools-user-computer.js";
+import type { ToolCallAudit } from "./tool-call-event.js";
+import { auditToolCall as recordToolCallEvent } from "./tool-call-event.js";
 
 const TOOL_HANDLERS = new Map<string, ToolHandler>([
   ...Object.entries(computerTools),
@@ -94,7 +96,10 @@ function toolHandler(name: string): ToolHandler {
   );
 }
 
-/** Run one tool call of this run's model: gate it, then hand it to its tool family. */
+/**
+ * Run one tool call of this run's model: gate it, then hand it to its tool family. Every call,
+ * however it ends, records one `tool.called` security event.
+ */
 export async function applyTool(
   ctx: RunContext,
   name: string,
@@ -113,9 +118,15 @@ export async function applyTool(
     const { bot_id: _self, ...own } = args;
     args = own;
   }
-  if (name === "update_bot" && ownFieldsBesideInstructions(args).length)
-    return applyOwnUpdateWithInstructions(ctx, args, executionId, observer);
-  return dispatchTool(ctx, name, args, executionId, observer);
+  const knownTool =
+    TOOL_HANDLERS.has(name) ||
+    ctx.tools.connector.has(name) ||
+    Boolean(ctx.tools.builtins?.some((tool) => tool.name === name));
+  return recordToolCallEvent(ctx, name, args, knownTool, (audit) =>
+    name === "update_bot" && ownFieldsBesideInstructions(args).length
+      ? applyOwnUpdateWithInstructions(ctx, args, executionId, observer, audit)
+      : dispatchTool(ctx, name, args, executionId, observer, audit),
+  );
 }
 
 /** The other fields an own update_bot call changes along with its instructions, if it does. */
@@ -144,6 +155,7 @@ async function applyOwnUpdateWithInstructions(
   args: Record<string, unknown>,
   executionId: string,
   observer: AgentToolExecutionObserver | undefined,
+  audit: ToolCallAudit,
 ) {
   const others = ownFieldsBesideInstructions(args);
   const { approvedReplays } = ctx.tools;
@@ -161,6 +173,7 @@ async function applyOwnUpdateWithInstructions(
         Object.fromEntries(others.map((key) => [key, args[key]])),
         executionId,
         observer,
+        audit,
       );
   if (profile && isInternalTermination(profile)) return profile;
   if (profile && isToolError(profile))
@@ -171,6 +184,7 @@ async function applyOwnUpdateWithInstructions(
     { instructions: args.instructions },
     executionId,
     observer,
+    audit,
   );
   if (isInternalTermination(set)) return set;
   // A profile part that only repeated current values was answered as a read; it saved nothing.
@@ -196,6 +210,7 @@ async function dispatchTool(
   args: Record<string, unknown>,
   executionId: string,
   observer: AgentToolExecutionObserver | undefined,
+  audit: ToolCallAudit,
 ) {
   ctx.context.signal.throwIfAborted();
   // A call turned away before its tool runs is logged by its refusal code. `target` is the
@@ -268,6 +283,7 @@ async function dispatchTool(
   }
   const request = await resolveToolRequest(ctx, name, args, executionId);
   if ("error" in request) return refuse(request);
+  audit.resolved(request);
   // A catalog call resolves to a connector tool after the checks above; one named like a local
   // tool (message_agent, cloud_agent_*, ...) would otherwise run that local handler instead.
   if (request.catalogRemapped && toolHandler(request.name) !== connectorTool) {
@@ -281,12 +297,14 @@ async function dispatchTool(
   noteComputerTaskStep(ctx.state.reply, request.name);
   const gate = await gateToolCall(ctx, request, observer);
   if ("result" in gate) {
+    if (gate.replayed) audit.replayed();
     const ownProfile = name === "update_bot" && !argumentGiven(args.bot_id);
     if (gate.replayed && toolResultTaintsRun(request.name) && !ownProfile) {
       await markReadOutsideContent(ctx, gate.result);
     }
     return refuse(gate.result, request.name);
   }
+  audit.passedGate(gate.call);
   // Only a call that ran can have taken in outside content; one refused above, or whose approval
   // was denied, never did. A call that failed partway still counts.
   const runHandler = async () => {

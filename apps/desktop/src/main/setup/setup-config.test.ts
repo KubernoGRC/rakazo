@@ -18,6 +18,7 @@ import {
   serverHeadersFor,
   servesBundledRenderer,
   sessionPartitionForServerUrl,
+  usesAccessIdentity,
 } from "./setup-config.js";
 
 describe("server address normalization", () => {
@@ -334,4 +335,17 @@ describe("probe failures", () => {
   ])("explains %s", (message, expected) => {
     expect(probeFailureMessage(new Error(message))).toBe(expected);
   });
+});
+
+describe("access identity servers", () => {
+  it("recognises the access-identity sign-in mode", () => {
+    expect(usesAccessIdentity({ passwordAuth: false, sso: null, accessIdentity: true })).toBe(true);
+  });
+
+  it.each([{ passwordAuth: true, sso: null }, { accessIdentity: "true" }, null, "accessIdentity"])(
+    "leaves other servers alone: %j",
+    (value) => {
+      expect(usesAccessIdentity(value)).toBe(false);
+    },
+  );
 });

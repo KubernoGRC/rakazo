@@ -22,6 +22,7 @@ import { Link, Navigate, useLocation, useNavigate, useSearchParams } from "react
 import { PasskeySignIn, usePasskeySignIn } from "../../components/account/PasskeySignIn";
 import { SocialSignInButtons } from "../../components/account/SocialSignInButtons";
 import { WindowChrome } from "../../components/WindowChrome";
+import { signInWithAccessIdentity } from "../../lib/auth/access-identity";
 import { authClient } from "../../lib/auth/auth";
 import type { AuthCapabilities } from "../../lib/auth/auth-capabilities";
 import { fetchAuthCapabilities } from "../../lib/auth/auth-capabilities";
@@ -82,6 +83,11 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const presented = Boolean(
     reset?.passwordAuth && providers.length > 0 && mode !== "forgot" && !sent && !codeStep,
   );
+  const [accessOutcome, setAccessOutcome] = useState<"refused" | "unavailable" | null>(null);
+  const [accessAttempt, setAccessAttempt] = useState(0);
+  const accessIdentity = reset?.accessIdentity === true;
+  // One exchange per attempt; navigating re-renders before this page unmounts.
+  const accessStarted = useRef<number | null>(null);
   const passwordFieldId = mode === "in" ? "current-password" : "new-password";
   const title =
     sent || codeStep ? (
@@ -115,6 +121,29 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
       active = false;
     };
   }, [mode, capabilityAttempt]);
+
+  // Fork: the access proxy already authenticated this visitor; exchange it for a session.
+  useEffect(() => {
+    if (!accessIdentity || accessStarted.current === accessAttempt) return;
+    accessStarted.current = accessAttempt;
+    setAccessOutcome(null);
+    // Not cancelled on re-render: the guard means no later run would retry it.
+    void signInWithAccessIdentity().then((result) => {
+      if (result.kind !== "signed-in") {
+        setAccessOutcome(result.kind);
+        return;
+      }
+      clearSpaceSelection();
+      authClient.$store.notify("$sessionSignal");
+      navigate(
+        result.created
+          ? "/onboarding"
+          : next === "/integrations/setup"
+            ? "/integrations/setup"
+            : "/app",
+      );
+    });
+  }, [accessIdentity, accessAttempt, navigate, next]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -324,6 +353,27 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                 <Trans>Retry</Trans>
               </Button>
             </div>
+          ) : accessIdentity && !accessOutcome ? (
+            <p role="status">
+              <Trans>Loading…</Trans>
+            </p>
+          ) : accessOutcome === "unavailable" ? (
+            <div role="alert" className="w-full text-center">
+              <p>
+                <Trans>Could not reach the server</Trans>
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setAccessAttempt((attempt) => attempt + 1)}
+              >
+                <Trans>Retry</Trans>
+              </Button>
+            </div>
+          ) : accessOutcome === "refused" ? (
+            <p role="alert" className="w-full text-center">
+              <Trans>Sign in through your organisation's portal</Trans>
+            </p>
           ) : null}
           {!reset?.passwordAuth && mode !== "forgot" ? (
             <SocialSignInButtons
