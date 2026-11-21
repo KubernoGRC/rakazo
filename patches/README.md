@@ -7,17 +7,6 @@ copy this folder next to the lockfile, so a patch applies in production images
 too — removing one means editing `pnpm-workspace.yaml` and the lockfile
 (`pnpm patch-remove <pkg>`).
 
-## `app-builder-lib@26.15.3.patch`
-
-macOS code signing: `security set-key-partition-list -k` expects the temporary
-keychain's own password, but upstream passed the imported `.p12` item password,
-so every signed build failed with `SecKeychainUnlock`. Carries the two-line fix
-from electron-userland/electron-builder#10101 (reported as #10066), which no
-release through 26.16.0 includes. Drop once an electron-builder upgrade ships
-it — verify a signed macOS build still unlocks the keychain.
-
-Introduced in #547.
-
 ## `dockerode@5.0.1.patch`
 
 Docker builds: a BuildKit session was closed only when a build ended cleanly, so
@@ -29,6 +18,16 @@ upgrade fixes the same leak upstream — check a failing build actually releases
 its connection.
 
 Introduced in #2703.
+
+## `expo-speech@58.0.4.patch`
+
+Mobile speech: `Speech.speak` started the native call and dropped its promise,
+so a voice iOS could not load (or text over the length limit) rejected with
+nothing listening. The app saw an unhandled rejection, and read-aloud waiting
+for `onDone` or `onError` never finished. The patch passes that rejection to the
+utterance's `onError` and clears its callbacks. Drop once expo-speech reports a
+rejected `speak` through `onError` itself — check a speak with an unknown voice
+identifier calls `onError`.
 
 ## `fflate@0.8.3.patch`
 

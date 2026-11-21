@@ -8,22 +8,23 @@ run made it. It is generic and is offered upstream.
 ## What it records
 
 One event per call to `applyTool`, however the call ends: run, refused, waiting for approval,
-replayed from an earlier attempt, failed or cancelled. The three tools the agent runtime runs
-itself (`ask_user`, `request_takeover`, `run_subagent`) are recorded from its completion callback
-instead, so every tool call has exactly one event. The event is content-free, like every
+replayed from an earlier attempt, failed or cancelled. The two tools the agent runtime runs
+itself (`ask_user`, `request_takeover`) are recorded from its completion callback instead, so
+every tool call has exactly one event. `run_subagent` starts a background helper through
+`applyTool`, so it is recorded there. The event is content-free, like every
 security event:
 
-| Field | Value |
-| --- | --- |
-| `userId`, `spaceId` | The run's owner and Space |
-| `metadata.tool` | The tool name, or `(unknown)` when the model asked for a tool the run does not have |
-| `metadata.connector`, `metadata.remoteTool`, `metadata.resourceId` | The connector route the call resolved to, if any |
-| `metadata.host` | An MCP server's endpoint hostname, or `stdio:<command>` for a local one, plus the package when the command is a known launcher (`npx`, `pnpx`, `bunx`, `uvx`). Option values are never read. |
-| `metadata.argsSha256`, `metadata.argsBytes` | SHA-256 and size of the canonical JSON of the arguments that ran (for an approved replay, the approved request) |
-| `metadata.resultBytes` | Size of the result, when the tool ran |
-| `metadata.outcome` | `ok`, `error`, `refused`, `replayed`, `approval_requested`, `input_requested` or `cancelled` |
-| `metadata.approval`, `metadata.approvalId` | `person` with the approved effect's id, `policy`, or `none` |
-| `metadata.runId`, `metadata.threadId`, `metadata.botId`, `metadata.durationMs` | Where and how long |
+| Field                                                                          | Value                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `userId`, `spaceId`                                                            | The run's owner and Space                                                                                                                                                                    |
+| `metadata.tool`                                                                | The tool name, or `(unknown)` when the model asked for a tool the run does not have                                                                                                          |
+| `metadata.connector`, `metadata.remoteTool`, `metadata.resourceId`             | The connector route the call resolved to, if any                                                                                                                                             |
+| `metadata.host`                                                                | An MCP server's endpoint hostname, or `stdio:<command>` for a local one, plus the package when the command is a known launcher (`npx`, `pnpx`, `bunx`, `uvx`). Option values are never read. |
+| `metadata.argsSha256`, `metadata.argsBytes`                                    | SHA-256 and size of the canonical JSON of the arguments that ran (for an approved replay, the approved request)                                                                              |
+| `metadata.resultBytes`                                                         | Size of the result, when the tool ran                                                                                                                                                        |
+| `metadata.outcome`                                                             | `ok`, `error`, `refused`, `replayed`, `approval_requested`, `input_requested` or `cancelled`                                                                                                 |
+| `metadata.approval`, `metadata.approvalId`                                     | `person` with the approved effect's id, `policy`, or `none`                                                                                                                                  |
+| `metadata.runId`, `metadata.threadId`, `metadata.botId`, `metadata.durationMs` | Where and how long                                                                                                                                                                           |
 
 `approval.decided` now also carries `effectId`, so a call a person approved joins to the
 decision.
@@ -34,15 +35,15 @@ as the thread history they point at.
 
 ## Where it touches upstream files
 
-- `packages/contracts/src/security-events.ts`: one event type.
-- `packages/adapters/src/run-tools.ts`: `applyTool` runs the dispatch inside `auditToolCall`, which
+- `packages/contracts/src/account/security-events.ts`: one event type.
+- `packages/adapters/src/runs/tools/run-tools.ts`: `applyTool` runs the dispatch inside `auditToolCall`, which
   is told the resolved request, the call that passed its gate, and whether the gate replayed.
-- `packages/adapters/src/run-tool-gate.ts`: results an earlier attempt settled carry
+- `packages/adapters/src/runs/tools/run-tool-gate.ts`: results an earlier attempt settled carry
   `replayed: true`.
-- `packages/adapter-kit/src/types.ts` and `packages/adapters/src/pi-runtime-tools.ts`: a tool
+- `packages/adapter-kit/src/types.ts` and `packages/adapters/src/runtime/pi/tools/pi-runtime-tools.ts`: a tool
   completion carries its arguments.
-- `packages/adapters/src/executor.ts`: the completion callback records runtime-owned tools.
-- `packages/db/src/events.ts`: `approval.decided` carries `effectId`.
+- `packages/adapters/src/runs/turn/run-model-turn.ts`: the completion callback records runtime-owned tools.
+- `packages/db/src/threads/thread-ask.ts`: `approval.decided` carries `effectId`.
 - `docs/self-host-observability.md`: the event and an alert query.
 
-Everything else is in `packages/adapters/src/tool-call-event.ts` and its tests.
+Everything else is in `packages/adapters/src/runs/tools/tool-call-event.ts` and its tests.

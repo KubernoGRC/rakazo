@@ -11,11 +11,11 @@ Set these on both the API (inbound) and the worker (replies). Like the other for
 the compose files don't carry them; the deployment's own compose overlay or env file passes
 them (`infra/updater/src/compose-env.test.ts` lists them as deployment-supplied).
 
-| Variable | Meaning |
-| --- | --- |
-| `TEAMS_APP_ID` | The Azure Bot's Microsoft app id (the bot's Entra app registration). |
-| `TEAMS_APP_PASSWORD` | That app registration's client secret. Keep it with the deployment's other credentials. |
-| `TEAMS_APP_TENANT_ID` | The directory (tenant) id the app registration lives in. |
+| Variable              | Meaning                                                                                 |
+| --------------------- | --------------------------------------------------------------------------------------- |
+| `TEAMS_APP_ID`        | The Azure Bot's Microsoft app id (the bot's Entra app registration).                    |
+| `TEAMS_APP_PASSWORD`  | That app registration's client secret. Keep it with the deployment's other credentials. |
+| `TEAMS_APP_TENANT_ID` | The directory (tenant) id the app registration lives in.                                |
 
 The bot is always **single-tenant**. The bot's messaging endpoint is
 `/api/v1/messaging/webhook/teams`. Under [trusted access identity](fork-access-identity.md),

@@ -21,8 +21,8 @@ name: kgrc-upstream-sync
 
 on:
   schedule:
-    - cron: "17 10 * * *"   # daily main sync
-    - cron: "23 13 * * 1"   # Monday: sync, then the PR into kgrc
+    - cron: "17 10 * * *" # daily main sync
+    - cron: "23 13 * * 1" # Monday: sync, then the PR into kgrc
   workflow_dispatch:
     inputs:
       open_pr:

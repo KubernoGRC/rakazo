@@ -226,6 +226,8 @@ export function accessIdentityClosesPath(path: string): boolean {
       "/unlink-account",
       "/verify-email",
       "/send-verification-email",
+      // Hands a native client to a social or OIDC provider's authorization page.
+      "/expo-authorization-proxy",
     ].includes(path)
   );
 }

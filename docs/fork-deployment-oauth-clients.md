@@ -14,14 +14,14 @@ Set these on both the API and the worker. Like the other fork settings, the comp
 files don't carry them; the deployment's own compose overlay or env file passes them
 (`infra/updater/src/compose-env.test.ts` lists them as deployment-supplied).
 
-| Variable | Meaning |
-| --- | --- |
-| `MCP_OAUTH_CLIENTS` | Comma-separated labels, for example `GITHUB,ENTRA`. Each label is upper case. |
-| `MCP_OAUTH_CLIENT_<LABEL>_ISSUER` | Required. The authorization server URL: HTTPS, with no credentials, query or fragment. |
-| `MCP_OAUTH_CLIENT_<LABEL>_ID` | Required. The client id. |
-| `MCP_OAUTH_CLIENT_<LABEL>_SECRET` | Optional; a public client has none. Keep it with the deployment's other credentials. |
-| `MCP_OAUTH_CLIENT_<LABEL>_SCOPE` | Optional. The scope to request. |
-| `MCP_OAUTH_CLIENT_<LABEL>_AUTHORIZATION_PARAMS` | Optional. Extra authorization request parameters, in query-string form. |
+| Variable                                        | Meaning                                                                                |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `MCP_OAUTH_CLIENTS`                             | Comma-separated labels, for example `GITHUB,ENTRA`. Each label is upper case.          |
+| `MCP_OAUTH_CLIENT_<LABEL>_ISSUER`               | Required. The authorization server URL: HTTPS, with no credentials, query or fragment. |
+| `MCP_OAUTH_CLIENT_<LABEL>_ID`                   | Required. The client id.                                                               |
+| `MCP_OAUTH_CLIENT_<LABEL>_SECRET`               | Optional; a public client has none. Keep it with the deployment's other credentials.   |
+| `MCP_OAUTH_CLIENT_<LABEL>_SCOPE`                | Optional. The scope to request.                                                        |
+| `MCP_OAUTH_CLIENT_<LABEL>_AUTHORIZATION_PARAMS` | Optional. Extra authorization request parameters, in query-string form.                |
 
 A malformed configuration stops the API and the worker at startup. They don't fall
 back to per-user clients for a server the deployment meant to configure.

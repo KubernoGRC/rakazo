@@ -5,9 +5,9 @@ It carries a small set of fork-only changes and publishes its own images.
 
 ## Branches
 
-| Branch | Role | Rules |
-|---|---|---|
-| `main` | **Exact mirror of upstream `main`.** Never commit here. "Sync fork" must only ever fast-forward it. | Deletion blocked |
+| Branch | Role                                                                                                                      | Rules                                         |
+| ------ | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `main` | **Exact mirror of upstream `main`.** Never commit here. "Sync fork" must only ever fast-forward it.                       | Deletion blocked                              |
 | `kgrc` | **Default branch.** Upstream at a chosen commit, plus this fork's changes. Everything built and deployed comes from here. | Pull requests only; no force-push or deletion |
 
 **Never use "Discard commits" on Sync fork.** If `main` ever shows as diverged,
@@ -69,12 +69,12 @@ conflict with them:
 Syncing `main` runs upstream's own workflow files, so the ones that publish or
 create things are **disabled in the repository's Actions settings**, not edited:
 
-| Workflow | Why |
-|---|---|
-| `publish-server-image.yml` | Would publish upstream code under this fork's image namespace on every sync. `kgrc-publish-images.yml` replaces it. |
-| `release-desktop.yml` | Creates GitHub releases on push |
-| `model-catalog-bump.yml` | Scheduled job that opens pull requests, which here would target `kgrc` |
-| `desktop-macos-screenshot.yml` | macOS runners on every push and pull request; no use here |
+| Workflow                       | Why                                                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `publish-server-image.yml`     | Would publish upstream code under this fork's image namespace on every sync. `kgrc-publish-images.yml` replaces it. |
+| `release-desktop.yml`          | Creates GitHub releases on push                                                                                     |
+| `model-catalog-bump.yml`       | Scheduled job that opens pull requests, which here would target `kgrc`                                              |
+| `desktop-macos-screenshot.yml` | macOS runners on every push and pull request; no use here                                                           |
 
 Re-enable one only on purpose (`gh workflow enable <file>`). `ci.yml`,
 `playwright.yml` and the guard and verification workflows stay enabled and check

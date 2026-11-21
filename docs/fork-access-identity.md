@@ -11,14 +11,14 @@ assertion and does no sign-in of its own. Nothing changes unless
 
 Set these on the API. The worker does not authenticate users and does not read them.
 
-| Variable | Value |
-| --- | --- |
-| `ACCESS_IDENTITY_ENABLED` | `true` turns the mode on. `false` or unset leaves it off. |
-| `ACCESS_IDENTITY_ISSUER` | The assertion's `iss`: the access team's HTTPS origin, for example `https://<team>.cloudflareaccess.com`. A trailing `/` is dropped; a path, query or credentials are refused. |
-| `ACCESS_IDENTITY_AUDIENCE` | The access application's audience (AUD) tag. The assertion's `aud` must contain it. |
-| `ACCESS_IDENTITY_CERTS_FILE` | A path to the signing keys, written by the host: a JWKS, or the proxy's `certs` document, which has the same `keys` array. |
-| `ACCESS_IDENTITY_LOGOUT_URL` | Optional. Where the browser goes after signing out, to end the proxy's session too. A path on this server, or an https URL on the issuer's origin, for example `https://<team>.cloudflareaccess.com/cdn-cgi/access/logout`. Anything else refuses startup, so it can't become an open redirect. |
-| `ACCESS_IDENTITY_EXEMPT_WEBHOOKS` | Optional. Comma-separated messaging provider names, for example `teams`, whose webhook needs no assertion. See [Exempt routes](#what-the-mode-enforces). Refuses startup without this mode. |
+| Variable                          | Value                                                                                                                                                                                                                                                                                           |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ACCESS_IDENTITY_ENABLED`         | `true` turns the mode on. `false` or unset leaves it off.                                                                                                                                                                                                                                       |
+| `ACCESS_IDENTITY_ISSUER`          | The assertion's `iss`: the access team's HTTPS origin, for example `https://<team>.cloudflareaccess.com`. A trailing `/` is dropped; a path, query or credentials are refused.                                                                                                                  |
+| `ACCESS_IDENTITY_AUDIENCE`        | The access application's audience (AUD) tag. The assertion's `aud` must contain it.                                                                                                                                                                                                             |
+| `ACCESS_IDENTITY_CERTS_FILE`      | A path to the signing keys, written by the host: a JWKS, or the proxy's `certs` document, which has the same `keys` array.                                                                                                                                                                      |
+| `ACCESS_IDENTITY_LOGOUT_URL`      | Optional. Where the browser goes after signing out, to end the proxy's session too. A path on this server, or an https URL on the issuer's origin, for example `https://<team>.cloudflareaccess.com/cdn-cgi/access/logout`. Anything else refuses startup, so it can't become an open redirect. |
+| `ACCESS_IDENTITY_EXEMPT_WEBHOOKS` | Optional. Comma-separated messaging provider names, for example `teams`, whose webhook needs no assertion. See [Exempt routes](#what-the-mode-enforces). Refuses startup without this mode.                                                                                                     |
 
 The API refuses to start when the mode is on and any of these hold:
 
