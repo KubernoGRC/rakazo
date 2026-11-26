@@ -61,6 +61,10 @@ conflict with them:
 
 - **Image changes** go in `infra/compose/Dockerfile.kgrc`, an overlay applied on top
   of the image built from upstream's unmodified `infra/compose/Dockerfile`.
+  The computer image works the same way: `infra/sandboxes/computer/Dockerfile.kgrc`
+  is applied on top of upstream's unmodified `infra/sandboxes/computer/Dockerfile`.
+  It currently removes Debian's `novnc` package and the unused `nodejs`, Pillow and
+  urllib3 it pulls in, keeping only the static noVNC client that `websockify` serves.
 - **Image publishing** is `.github/workflows/kgrc-publish-images.yml`, which releases
   from `kgrc` with `kgrc-v*` tags.
 
