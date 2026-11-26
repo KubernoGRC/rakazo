@@ -8,7 +8,9 @@ name: kgrc-publish-images
 #   * source   - push to `kgrc`, a `kgrc-v*` tag, or dispatch without
 #                base_image: build upstream's infra/compose/Dockerfile from this
 #                commit unmodified, then infra/compose/Dockerfile.kgrc on top.
-#                The computer image is built from source unmodified.
+#                The computer image is built the same way: upstream's
+#                infra/sandboxes/computer/Dockerfile unmodified, then
+#                infra/sandboxes/computer/Dockerfile.kgrc on top.
 #   * overlay  - dispatch with base_image (a digest-pinned app image): apply
 #                Dockerfile.kgrc to that image only. Used to fix an already
 #                deployed release without moving its code.
@@ -21,6 +23,7 @@ on:
     branches: [kgrc]
     paths:
       - "infra/compose/Dockerfile.kgrc"
+      - "infra/sandboxes/computer/Dockerfile.kgrc"
       - ".github/workflows/kgrc-publish-images.yml"
   workflow_dispatch:
     inputs:
@@ -90,12 +93,35 @@ jobs:
           docker run --rm --network none --entrypoint sh kgrc-app:ci -c \
             '[ "$(id -un)" = node ] && pnpm --filter @rakazo/api exec node -e "process.exit(0)"'
 
-      - name: Build the computer image from source, unmodified
+      - name: Build the computer base from upstream's Dockerfile, unmodified
         if: env.BASE_INPUT == ''
         run: |
           set -euo pipefail
           docker build --platform linux/amd64 -f infra/sandboxes/computer/Dockerfile \
-            -t kgrc-computer:ci infra/sandboxes/computer
+            -t kgrc-computer-base:ci infra/sandboxes/computer
+
+      - name: Apply the computer Dockerfile.kgrc
+        if: env.BASE_INPUT == ''
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 -f infra/sandboxes/computer/Dockerfile.kgrc \
+            --build-arg BASE_IMAGE=kgrc-computer-base:ci -t kgrc-computer:ci infra/sandboxes/computer
+
+      - name: Start the computer image offline as the runtime user
+        if: env.BASE_INPUT == ''
+        run: |
+          set -euo pipefail
+          # The overlay removes packages; prove the desktop still comes up and
+          # serves the noVNC client without them.
+          cid=$(docker run -d --network none kgrc-computer:ci)
+          trap 'docker logs "$cid" | tail -50; docker rm -f "$cid" >/dev/null' EXIT
+          for _ in $(seq 1 60); do
+            if docker exec "$cid" curl -fsS -o /dev/null http://127.0.0.1:6080/embed.html; then
+              echo "noVNC client served by websockify"; exit 0
+            fi
+            sleep 1
+          done
+          echo "the computer image did not serve noVNC within 60s" >&2; exit 1
 
       - name: Log in to GHCR
         if: env.PUBLISH == 'true'

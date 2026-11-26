@@ -1,0 +1,47 @@
+# Fork-owned overlay on the upstream computer image
+# (infra/sandboxes/computer/Dockerfile). The upstream Dockerfile is built
+# unmodified as BASE_IMAGE and every change this fork needs on top lives here,
+# so merging upstream never conflicts.
+#
+# Debian 12's `novnc` package depends on `nodejs` (18, end of life) and on
+# `python3-novnc`, which pulls in `python3-pil` (Pillow 9.4) and, through
+# python3-oslo.config -> python3-requests, `python3-urllib3` 1.26. Scanners
+# report all three, and bookworm will not move them to newer versions.
+#
+# The image uses none of them. start.sh only serves the static noVNC client in
+# /usr/share/novnc through `websockify --web`, and websockify is its own
+# package with its own dependencies. So the overlay keeps those files, purges
+# the package and its unused dependency tree, and puts the files back.
+# python3-pil is also *recommended* by python3-openpyxl, which keeps it from
+# autoremove; openpyxl only needs it to embed images in a workbook, so it is
+# purged by name and openpyxl is checked to still import.
+# Drop this block once upstream stops shipping these packages.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+RUN set -eux; \
+  unset LD_PRELOAD; \
+  keep="$(mktemp -d)"; \
+  cp -a /usr/share/novnc "$keep/novnc"; \
+  cp -a /usr/share/doc/novnc "$keep/doc"; \
+  apt-get purge -y novnc python3-novnc nodejs python3-pil; \
+  apt-get autoremove --purge -y; \
+  rm -rf /var/lib/apt/lists/*; \
+  rm -rf /usr/share/novnc /usr/share/doc/novnc; \
+  cp -a "$keep/novnc" /usr/share/novnc; \
+  cp -a "$keep/doc" /usr/share/doc/novnc; \
+  rm -rf "$keep"; \
+  for pkg in nodejs libnode108 python3-novnc python3-pil python3-urllib3; do \
+    if dpkg-query -W -f '${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then \
+      echo "$pkg is still installed" >&2; exit 1; \
+    fi; \
+  done; \
+  ! command -v node; \
+  for f in vnc.html embed.html clipboard-bridge.js mobile-keyboard.js core/rfb.js; do \
+    test -f "/usr/share/novnc/$f"; \
+  done; \
+  websockify --help >/dev/null; \
+  python3 -c 'import websockify.token_plugins'; \
+  python3 -c 'import openpyxl; print(openpyxl.__version__)'
+USER 1000:1000
