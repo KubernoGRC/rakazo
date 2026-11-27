@@ -159,6 +159,7 @@ export async function assertMcpRemoteEndpoint(
   try {
     await assertSafeRemoteUrl(endpoint, deps.remoteConnectors?.resolveHostname, {
       allowPrivateEndpoint: mayUsePrivateEndpoint(deps),
+      privateEndpointHosts: deps.env.mcpPrivateEndpointHosts,
     });
   } catch (error) {
     if (!isHostNotFound(error)) throw error;

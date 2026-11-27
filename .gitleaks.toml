@@ -1,0 +1,28 @@
+# gitleaks configuration for the public-fork guard
+# (.github/scripts/public-fork-guard.sh). It extends the default rules.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "private-session-url"
+description = "Private assistant session, share or chat URL"
+regex = '''https?://(?:www\.)?claude\.ai/(?:code/session_|share/|chat/)[A-Za-z0-9_-]{8,}'''
+keywords = ["claude.ai"]
+
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''\bsk-or-v1-[a-f0-9]{64}\b'''
+keywords = ["sk-or-v1-"]
+
+[[rules]]
+id = "groq-api-key"
+description = "Groq API key"
+regex = '''\bgsk_[A-Za-z0-9]{52}\b'''
+keywords = ["gsk_"]
+
+[[rules]]
+id = "xai-api-key"
+description = "xAI API key"
+regex = '''\bxai-[A-Za-z0-9]{80}\b'''
+keywords = ["xai-"]

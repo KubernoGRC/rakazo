@@ -1,0 +1,396 @@
+# Fork-owned (see docs/kgrc-fork.md). Keeps `main` a pure mirror of upstream and
+# proposes upstream into `kgrc` every weekday. Nothing here deploys anything.
+#
+# - Daily: fast-forward `main` to upstream `main` with an atomic, non-force ref
+#   update. GitHub refuses anything that is not a fast-forward, so `main` can
+#   never gain a merge commit. Also refuses if `main` holds a commit upstream
+#   lacks. Then cancel the runs that push started: upstream's own workflows,
+#   testing and publishing upstream code that this fork never deploys from `main`.
+# - Weekdays: propose `kgrc` + `main` as ONE merge commit on a disposable
+#   `upstream-sync/<date>` branch, so the PR is mergeable and its own checks and
+#   review cover the real result:
+#     clean     - the merge commit as git makes it.
+#     lockfile  - only pnpm-lock.yaml conflicts: it is regenerated with
+#                 `pnpm install --lockfile-only` in a job holding no credentials
+#                 (pnpm runs the repository's .pnpmfile.cjs), and the
+#                 credentialed job re-does the merge itself and takes ONLY that
+#                 file from it.
+#     conflict  - anything else: a draft PR labelled `sync-conflict`, from a
+#                 branch at `main`, listing the conflicted paths. Resolve it on
+#                 that branch by merging `kgrc` in.
+#   An open sync PR whose head is still the commit this workflow pushed (the
+#   `kgrc-sync-head` marker in its body) is rebuilt in place with the newest
+#   `main` and `kgrc`. So is one this app opened before the marker existed,
+#   while its head is still a commit on `main`. Once anyone else pushes to it,
+#   it is left alone.
+#   Merge it with a MERGE COMMIT, never squash.
+#
+# Credentials: a GitHub App installed ONLY on this repository, with Contents,
+# Pull requests and Workflows write. Its id and key are secrets of the
+# `upstream-sync` environment, whose deployment branches are `kgrc` only. A
+# workflow arriving on `main` from upstream (which an app-token push DOES
+# trigger) therefore cannot read them. GITHUB_TOKEN is not used to write
+# content: it cannot push upstream commits that touch .github/workflows, and PRs
+# it opens do not trigger CI. It is used only to cancel runs on `main`.
+name: kgrc-upstream-sync
+
+on:
+  schedule:
+    - cron: "17 10 * * *" # daily main sync
+    - cron: "23 13 * * 1-5" # weekdays: sync, then propose into kgrc
+  workflow_dispatch:
+    inputs:
+      open_pr:
+        description: "Also propose into kgrc (takes upstream's current tip)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kgrc-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: elie222/rakazo
+  LABEL: sync-conflict
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: upstream-sync
+    permissions:
+      contents: read
+      actions: write # cancel the mirror's runs on main
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.FORK_SYNC_APP_ID }}
+          private-key: ${{ secrets.FORK_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - id: ff
+        name: Fast-forward main to upstream
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # `main` must hold nothing upstream lacks; otherwise it is no longer a mirror.
+          extra=$(gh api "repos/${UPSTREAM}/compare/main...${OWNER}:main" --jq .ahead_by)
+          if [ "$extra" != 0 ]; then
+            echo "::error::main carries ${extra} commit(s) upstream does not have; it must stay a pure mirror. Not syncing."
+            exit 1
+          fi
+          upstream=$(gh api "repos/${UPSTREAM}/git/ref/heads/main" --jq .object.sha)
+          current=$(gh api "repos/${REPO}/git/ref/heads/main" --jq .object.sha)
+          if [ "$upstream" = "$current" ]; then
+            echo "main is already at upstream ${upstream:0:12}." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Non-force update: GitHub rejects it unless it is a fast-forward, so a
+          # concurrent writer can make this fail but never make main diverge.
+          gh api -X PATCH "repos/${REPO}/git/refs/heads/main" -f sha="$upstream" -F force=false >/dev/null
+          echo "main fast-forwarded ${current:0:12} -> ${upstream:0:12} (${UPSTREAM})." | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "sha=${upstream}" >> "$GITHUB_OUTPUT"
+
+      # The app-token push above starts upstream's own push-to-main workflows. On a
+      # mirror they only test and publish upstream code (and fail on fork-only
+      # differences such as the image namespace), so cancel them. Runs can take a
+      # few seconds to appear, so look for two minutes.
+      - name: Cancel the runs the fast-forward started on main
+        if: steps.ff.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.ff.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cancelled=0
+          for _ in $(seq 1 12); do
+            ids=$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&branch=main&event=push&per_page=100" \
+              --jq '.workflow_runs[] | select(.status != "completed") | .id')
+            for id in $ids; do
+              if gh api -X POST "repos/${REPO}/actions/runs/${id}/cancel" >/dev/null 2>&1; then
+                cancelled=$((cancelled + 1))
+              fi
+            done
+            sleep 10
+          done
+          echo "Cancelled ${cancelled} upstream run(s) on main at ${SHA:0:12}." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # No credentials: decides what to propose, and regenerates the lockfile when
+  # that is the only conflict. pnpm runs repository code (.pnpmfile.cjs).
+  plan:
+    needs: sync
+    if: github.event.schedule == '23 13 * * 1-5' || inputs.open_pr
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.merge.outputs.state }}
+      kgrc: ${{ steps.merge.outputs.kgrc }}
+      main: ${{ steps.merge.outputs.main }}
+      behind: ${{ steps.merge.outputs.behind }}
+      conflicts: ${{ steps.merge.outputs.conflicts }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: kgrc
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: merge
+        name: Trial-merge main into kgrc
+        run: |
+          set -euo pipefail
+          kgrc=$(git rev-parse origin/kgrc)
+          main=$(git rev-parse origin/main)
+          behind=$(git rev-list --count "${kgrc}..${main}")
+          {
+            echo "kgrc=${kgrc}"
+            echo "main=${main}"
+            echo "behind=${behind}"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$behind" = 0 ]; then
+            echo "state=none" >> "$GITHUB_OUTPUT"
+            echo "kgrc already includes main; nothing to propose." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          set +e
+          out=$(git merge-tree --write-tree --name-only --no-messages "$kgrc" "$main")
+          rc=$?
+          set -e
+          [ "$rc" -le 1 ] || exit "$rc"
+          files=$(printf '%s\n' "$out" | tail -n +2 | sed '/^$/d')
+          if [ "$rc" = 0 ]; then
+            state=clean
+          elif [ "$files" = "pnpm-lock.yaml" ]; then
+            state=lockfile
+          else
+            state=conflict
+          fi
+          echo "state=${state}" >> "$GITHUB_OUTPUT"
+          echo "conflicts=$(printf '%s' "$files" | jq -Rsc 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+          echo "main ${main:0:12} into kgrc ${kgrc:0:12}: ${behind} commit(s), ${state}." | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -n "$files" ]; then
+            while IFS= read -r f; do echo "- \`${f}\`"; done <<<"$files" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Start the merge with upstream's lockfile
+        if: steps.merge.outputs.state == 'lockfile'
+        env:
+          MAIN: ${{ steps.merge.outputs.main }}
+        run: |
+          set -euo pipefail
+          git -c user.name=sync -c user.email=sync@invalid merge --no-commit --no-ff "$MAIN" || true
+          test "$(git diff --name-only --diff-filter=U)" = "pnpm-lock.yaml"
+          git checkout --theirs -- pnpm-lock.yaml
+
+      - if: steps.merge.outputs.state == 'lockfile'
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - if: steps.merge.outputs.state == 'lockfile'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Regenerate pnpm-lock.yaml for the merged manifests
+        if: steps.merge.outputs.state == 'lockfile'
+        # CI defaults pnpm to a frozen lockfile, which would refuse to rewrite it.
+        run: pnpm install --lockfile-only --no-frozen-lockfile --ignore-scripts
+
+      - if: steps.merge.outputs.state == 'lockfile'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sync-lockfile
+          path: pnpm-lock.yaml
+          retention-days: 1
+          if-no-files-found: error
+
+  propose:
+    needs: plan
+    if: needs.plan.outputs.state == 'clean' || needs.plan.outputs.state == 'lockfile' || needs.plan.outputs.state == 'conflict'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: upstream-sync
+    permissions:
+      contents: read
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.FORK_SYNC_APP_ID }}
+          private-key: ${{ secrets.FORK_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: kgrc
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Untrusted output of the credential-free job: only this one file is used,
+      # and only when the merge here leaves exactly that file unmerged.
+      - if: needs.plan.outputs.state == 'lockfile'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sync-lockfile
+          path: ${{ runner.temp }}/sync-lockfile
+
+      - name: Build the sync branch and open or refresh its PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          REPO: ${{ github.repository }}
+          STATE: ${{ needs.plan.outputs.state }}
+          KGRC: ${{ needs.plan.outputs.kgrc }}
+          MAIN: ${{ needs.plan.outputs.main }}
+          BEHIND: ${{ needs.plan.outputs.behind }}
+          CONFLICTS: ${{ needs.plan.outputs.conflicts }}
+          LOCK_DIR: ${{ runner.temp }}/sync-lockfile
+        run: |
+          set -euo pipefail
+          today=$(date -u +%Y-%m-%d)
+          title="chore(sync): merge upstream main into kgrc (${today})"
+
+          # An open sync PR is rebuilt only while nobody else has pushed to it:
+          # its head is the commit this workflow recorded in the body, or (for a
+          # PR this app opened before the marker existed) its head is still a
+          # commit on `main`, so it carries nothing but upstream. Anyone else's
+          # push makes it theirs.
+          pr=$(gh pr list --repo "$REPO" --base kgrc --state open --json number,headRefName,headRefOid,body,isDraft,author \
+            --jq '[.[] | select(.headRefName | startswith("upstream-sync/"))][0] // empty')
+          lease=""
+          if [ -n "$pr" ]; then
+            number=$(jq -r .number <<<"$pr")
+            branch=$(jq -r .headRefName <<<"$pr")
+            current=$(jq -r .headRefOid <<<"$pr")
+            author=$(jq -r .author.login <<<"$pr")
+            marker=$(jq -r '.body // ""' <<<"$pr" | grep -oE 'kgrc-sync-head: [0-9a-f]{40}' | head -n1 | cut -d' ' -f2 || true)
+            if [ -n "$marker" ]; then
+              owned=$([ "$marker" = "$current" ] && echo yes || echo no)
+            elif [ "$author" = "app/${APP_SLUG}" ] && git merge-base --is-ancestor "$current" "$MAIN" 2>/dev/null; then
+              owned=yes
+            else
+              owned=no
+            fi
+            if [ "$owned" != yes ]; then
+              echo "Sync PR #${number} has commits this workflow did not push; leaving it alone." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            lease="$current"
+          else
+            number=""
+            branch="upstream-sync/${today}"
+            current=""
+          fi
+
+          uid=$(gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          export GIT_AUTHOR_NAME="${APP_SLUG}[bot]" GIT_COMMITTER_NAME="${APP_SLUG}[bot]"
+          export GIT_AUTHOR_EMAIL="${uid}+${APP_SLUG}[bot]@users.noreply.github.com"
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+          case "$STATE" in
+            clean)
+              tree=$(git merge-tree --write-tree "$KGRC" "$MAIN")
+              head=$(git commit-tree "$tree" -p "$KGRC" -p "$MAIN" -m "$title")
+              ;;
+            lockfile)
+              [ "$(find "$LOCK_DIR" -type f | wc -l)" = 1 ] && [ -f "$LOCK_DIR/pnpm-lock.yaml" ]
+              git checkout -q --detach "$KGRC"
+              git merge --no-commit --no-ff "$MAIN" >/dev/null 2>&1 || true
+              test "$(git diff --name-only --diff-filter=U)" = "pnpm-lock.yaml"
+              cp "$LOCK_DIR/pnpm-lock.yaml" pnpm-lock.yaml
+              git add pnpm-lock.yaml
+              git commit -q -m "$title" -m "pnpm-lock.yaml conflicted; regenerated with pnpm install --lockfile-only from upstream's lockfile and the merged manifests."
+              head=$(git rev-parse HEAD)
+              ;;
+            conflict)
+              head="$MAIN"
+              ;;
+          esac
+
+          if [ "$head" = "$current" ]; then
+            echo "Sync PR #${number} is already at ${head:0:12}." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Credentials go through the environment, never argv.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          export GIT_CONFIG_VALUE_0
+          echo "::add-mask::$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          if [ -n "$lease" ]; then
+            git push --force-with-lease="refs/heads/${branch}:${lease}" "https://github.com/${REPO}.git" "${head}:refs/heads/${branch}"
+          else
+            git push "https://github.com/${REPO}.git" "${head}:refs/heads/${branch}"
+          fi
+
+          case "$STATE" in
+            clean)
+              status="- The merge is clean: this branch is the merge commit as git makes it."
+              tested="No tests were run by the sync workflow. This PR's own checks and review run on the merged result." ;;
+            lockfile)
+              status="- Only \`pnpm-lock.yaml\` conflicted. It was regenerated with \`pnpm install --lockfile-only\` from upstream's lockfile and the merged manifests."
+              tested="No tests were run by the sync workflow beyond regenerating the lockfile. This PR's own checks and review run on the merged result." ;;
+            conflict)
+              list=$(jq -r '.[] | "  - `" + . + "`"' <<<"$CONFLICTS")
+              status=$(printf '%s\n%s\n%s' \
+                "- **Conflicts.** This branch is upstream \`main\` itself, so it can't merge yet. Conflicted paths:" \
+                "$list" \
+                "- Resolve on this branch: \`git switch ${branch} && git merge origin/kgrc\`, fix, commit and push. After your push this workflow leaves the PR alone.")
+              tested="Nothing yet. Pull-request checks can't run until the conflicts are resolved." ;;
+          esac
+          body=$(cat <<BODY
+          ## What
+
+          Brings ${BEHIND} upstream commit(s) into \`kgrc\`: \`main\` at ${MAIN:0:12} (a pure mirror of ${UPSTREAM}) merged with \`kgrc\` at ${KGRC:0:12}.
+
+          ## Why
+
+          \`kgrc\` carries this fork's changes on top of upstream. Taking upstream every weekday keeps its fixes flowing in and keeps each merge small.
+
+          ## Changes
+
+          ${status}
+          - Merge this with a merge commit. Do not squash or rebase it: the next sync depends on the shared history.
+          - Read the upstream range, especially migrations, the compose file and anything touching the fork's patch sets. Fork-owned files are listed in \`docs/kgrc-fork.md\`.
+          - Until someone else pushes here, each weekday run rebuilds this branch from the newest \`main\` and \`kgrc\`. The branch is disposable; delete it after merge.
+          - After merge, \`kgrc-publish-images\` builds new images. The deployment's image pins are updated separately.
+
+          ## Tested
+
+          ${tested}
+
+          <!-- kgrc-sync-head: ${head} -->
+          BODY
+          )
+
+          if [ -z "$number" ]; then
+            draft=()
+            [ "$STATE" = conflict ] && draft=(--draft)
+            url=$(gh pr create --repo "$REPO" --base kgrc --head "$branch" --title "$title" --body "$body" "${draft[@]}")
+            number="${url##*/}"
+          else
+            gh pr edit "$number" --repo "$REPO" --title "$title" --body "$body" >/dev/null
+            is_draft=$(jq -r .isDraft <<<"$pr")
+            if [ "$STATE" = conflict ] && [ "$is_draft" = false ]; then
+              gh pr ready "$number" --repo "$REPO" --undo
+            elif [ "$STATE" != conflict ] && [ "$is_draft" = true ]; then
+              gh pr ready "$number" --repo "$REPO"
+            fi
+          fi
+          if [ "$STATE" = conflict ]; then
+            gh pr edit "$number" --repo "$REPO" --add-label "$LABEL" >/dev/null
+          else
+            gh pr edit "$number" --repo "$REPO" --remove-label "$LABEL" >/dev/null 2>&1 || true
+          fi
+          echo "Sync PR #${number}: ${STATE}, head ${head:0:12}." | tee -a "$GITHUB_STEP_SUMMARY"

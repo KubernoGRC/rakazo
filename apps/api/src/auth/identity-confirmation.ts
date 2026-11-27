@@ -9,7 +9,7 @@ import { IDENTITY_CONFIRMATION_REQUIRED } from "@rakazo/contracts";
  */
 export async function requireIdentityConfirmation(
   auth: Pick<Auth, "hasRecentIdentityConfirmation">,
-  context: { actor: Actor | null; sessionId?: string },
+  context: { actor: Actor | null; sessionId?: string; headers?: Headers },
 ): Promise<void> {
   if (
     context.actor &&
@@ -17,6 +17,8 @@ export async function requireIdentityConfirmation(
     (await auth.hasRecentIdentityConfirmation({
       sessionId: context.sessionId,
       userId: context.actor.userId,
+      // Fork: under access identity a fresh proxy assertion confirms the session.
+      ...(context.headers ? { headers: context.headers } : {}),
     }))
   )
     return;

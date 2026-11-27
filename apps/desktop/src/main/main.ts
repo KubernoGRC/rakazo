@@ -35,6 +35,7 @@ import { appWindowTargets, desktop, permissionTarget } from "./desktop-state.js"
 import { createLocaleHandler, errorDetail, startDesktopLocale, t, withDetail } from "./i18n.js";
 import type { IpcCaller } from "./ipc/ipc.js";
 import { handleIpc, sentFrom } from "./ipc/ipc.js";
+import { refuseAccessIdentityServers } from "./setup/access-identity-probe.js";
 import { installServerHeaders } from "./setup/server-request-headers.js";
 import {
   DEFAULT_LOCAL_WEB_URL,
@@ -256,6 +257,7 @@ async function probeServer(
     return { ok: false, url, error: probeFailureMessage(error) };
   }
 }
+const probeScreened = refuseAccessIdentityServers(probeServer); // Fork: access-identity-probe.ts
 /**
  * Asked once, and only of someone running This computer on Docker while Docker answers: a
  * declined offer is remembered; an accepted one moves the data when the stack next starts.
@@ -902,7 +904,7 @@ app.whenReady().then(async () => {
   registerSetupIpc({
     userDataDir,
     appOpener,
-    probeServer,
+    probeServer: probeScreened,
     configureHeaderSession,
     syncHostComputerAccess,
     commitPendingAppSwitch,
@@ -944,7 +946,7 @@ app.whenReady().then(async () => {
       showSetupWindow();
     }
   } else if (target.source !== "env") {
-    const reachability = await probeServer(target.url, undefined, desktop.currentSetup?.headers);
+    const reachability = await probeScreened(target.url, undefined, desktop.currentSetup?.headers);
     if (reachability.ok) {
       await openInitialServer(target.url);
     } else {

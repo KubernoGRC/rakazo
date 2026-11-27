@@ -7,6 +7,7 @@ import {
 } from "../calls/call-session";
 import { clearComposerDrafts } from "../composer/composer-draft";
 import { clearSpaceSelection } from "../query/rpc";
+import { leaveThroughAccessLogout } from "./access-identity";
 import { authClient } from "./auth";
 import { holdSsoAutoStart } from "./sso-auto-start";
 
@@ -35,6 +36,8 @@ export async function signOut(destination: string): Promise<void> {
     forgetSignedInUser();
     clearSpaceSelection();
     clearComposerDrafts();
+    // Fork: continue to the access proxy's logout when the deployment names one.
+    if (await leaveThroughAccessLogout(true)) return;
     window.location.assign(destination);
   } else {
     try {

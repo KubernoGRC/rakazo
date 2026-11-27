@@ -66,6 +66,7 @@ function dispatchContext(tainted: boolean) {
       disabled: new Set<string>(),
       approvedReplays: createApprovedEffectReplayQueue([]),
       connector: new Map(),
+      builtins: [],
     },
     context: { signal: new AbortController().signal },
     secrets: [],

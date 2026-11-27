@@ -6,6 +6,7 @@ import type { Hono } from "hono";
 import type { BillingService } from "../billing/billing.js";
 import type { AppEnv } from "../env.js";
 import { nativePasskeys } from "../http/app-association.js";
+import type { ForkAccess } from "../kgrc/access-identity-wiring.js";
 
 /** `GET /api/auth/capabilities`: the sign-in options this deployment offers. */
 export function mountAuthCapabilities(
@@ -15,11 +16,14 @@ export function mountAuthCapabilities(
     auth,
     email,
     billing,
+    fork = {},
   }: {
     env: AppEnv;
     auth: Auth;
     email: TransactionalEmailProvider | undefined;
     billing: BillingService | undefined;
+    /** Fork: the access-identity capabilities (`createForkAccess().capabilities`). */
+    fork?: ForkAccess["capabilities"];
   },
 ) {
   app.get("/api/auth/capabilities", (c) => {
@@ -32,6 +36,7 @@ export function mountAuthCapabilities(
         : null,
       providers: publicSignInProviders(env.social, env.oidc),
       passwordAuth: env.passwordAuth !== false,
+      ...fork,
       passwordReset: env.passwordAuth !== false && Boolean(email),
       resetUrl:
         env.passwordAuth !== false && email ? new URL("/reset-password", env.webOrigin).href : null,

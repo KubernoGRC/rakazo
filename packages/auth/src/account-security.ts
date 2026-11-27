@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { TransactionalEmailProvider } from "@rakazo/adapter-kit";
-import type { BetterAuthPlugin } from "better-auth";
+import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import {
   APIError,
   createAuthEndpoint,
@@ -21,6 +21,8 @@ export function accountSecurity(
   ssoName?: string,
   ssoIssuer?: string,
   passwordChangeEnabled = true,
+  /** Fork: a fresh access assertion re-authenticates; see docs/fork-access-identity.md. */
+  freshReauthentication?: (ctx: GenericEndpointContext, userId: string) => Promise<boolean>,
 ): BetterAuthPlugin {
   return {
     id: "account-security",
@@ -46,11 +48,12 @@ export function accountSecurity(
             )
           ).some(Boolean);
           return ctx.json({
-            freshOidcAuth: Boolean(
-              proof &&
-                proof.value === ctx.context.session.user.id &&
-                proof.expiresAt.getTime() > Date.now(),
-            ),
+            freshOidcAuth:
+              Boolean(
+                proof &&
+                  proof.value === ctx.context.session.user.id &&
+                  proof.expiresAt.getTime() > Date.now(),
+              ) || Boolean(await freshReauthentication?.(ctx, ctx.context.session.user.id)),
             ssoLinked,
             linkedProviderIds: [...new Set(accounts.map((account) => account.providerId))],
             hasPassword: Boolean(credential?.password),
@@ -110,6 +113,7 @@ export function accountSecurity(
             }
             // Better Auth consumes and validates email deletion tokens against this user.
             if (ctx.body?.token) return;
+            if (await freshReauthentication?.(ctx, session.user.id)) return;
             const proof = await ctx.context.internalAdapter.findVerificationValue(
               oidcProofKey(session.session.id),
             );

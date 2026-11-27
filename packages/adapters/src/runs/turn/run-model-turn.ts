@@ -25,6 +25,7 @@ import { failRun, handoffEndedTurn, requeueRunAfterDatabaseOutage } from "../lif
 import { searchRunTools } from "../tools/run-tool-search.js";
 import { followUpsOffered, offeredFleetTools } from "../tools/run-tool-selection.js";
 import { applyTool } from "../tools/run-tools.js";
+import { recordRuntimeToolCall } from "../tools/tool-call-event.js";
 import { consumeRunEvents } from "./run-turn.js";
 import { claimRunSteering } from "./run-turn-images.js";
 import { appendToolCompletionAudit, toolCompletionOutcome } from "./tool-completion-audit.js";
@@ -352,6 +353,7 @@ function modelTurnRequest(
       if (effects.restoredPending?.executionId === completion.executionId)
         effects.restoredPending = undefined;
       if (!completion.paused) effects.pendingTurnCheckpoints.delete(completion.executionId);
+      void recordRuntimeToolCall(ctx, completion);
       const outcome = toolCompletionOutcome(completion);
       if (outcome) state.reply.toolOutcomes.set(completion.executionId, outcome);
       keepToolStepResult(state.reply, completion, runSecrets);

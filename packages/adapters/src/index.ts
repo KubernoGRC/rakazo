@@ -88,6 +88,7 @@ export {
 } from "./integrations/connection-context.js";
 export * from "./integrations/connector-catalog.js";
 export * from "./integrations/connector-registry.js";
+export * from "./integrations/deployment-connectors.js";
 export * from "./integrations/graphql-connectors.js";
 export * from "./integrations/installed-connectors.js";
 export * from "./integrations/integration-provider-settings.js";

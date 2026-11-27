@@ -603,6 +603,7 @@ export async function answerRunInput(
       metadata: {
         decision: committed.approval.decision,
         effectKind: committed.approval.effectKind,
+        // The id a later `tool.called` names as its approvalId.
         effectId: committed.approval.effectId,
         runId: input.runId,
       },

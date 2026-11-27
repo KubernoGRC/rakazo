@@ -4,6 +4,8 @@ import type { PrismaClient } from "@rakazo/db";
 import { IsolationError, requireMembership } from "@rakazo/db";
 import { enrichLogContext } from "@rakazo/logging";
 import type { MiddlewareHandler } from "hono";
+import type { SessionBinder } from "../kgrc/access-identity-wiring.js";
+import { unboundSession } from "../kgrc/access-identity-wiring.js";
 
 /**
  * No membership is no actor, which the RPC layer answers as 401. A database
@@ -20,11 +22,20 @@ export async function actorFromMembership(membership: Promise<Actor>): Promise<A
 }
 
 /** Who sent a request: its session, and the member it acts as in the Space it names. */
-export function requestSessions({ auth, prisma }: { auth: Auth; prisma: PrismaClient }) {
+export function requestSessions({
+  auth,
+  prisma,
+  bindSession = unboundSession,
+}: {
+  auth: Auth;
+  prisma: PrismaClient;
+  /** Fork: under access identity a session counts only for its access subject. */
+  bindSession?: SessionBinder;
+}) {
   // Reading a session here can renew it. The browser must get the renewed cookie too,
   // or it keeps the one from sign-in and is signed out when that one expires.
   const renewedSessionCookies = new WeakMap<Request, string[]>();
-  const readSession = async (request: Request, disableRefresh = false) => {
+  const readSession = bindSession(async (request: Request, disableRefresh = false) => {
     const { headers, response } = await auth.api.getSession({
       headers: request.headers,
       returnHeaders: true,
@@ -39,7 +50,7 @@ export function requestSessions({ auth, prisma }: { auth: Auth; prisma: PrismaCl
       .filter((cookie) => incomingCookieNames.has(cookie.split("=")[0]));
     if (cookies.length > 0) renewedSessionCookies.set(request, cookies);
     return response;
-  };
+  });
   const sendRenewedCookies: MiddlewareHandler = async (c, next) => {
     const request = c.req.raw;
     await next();

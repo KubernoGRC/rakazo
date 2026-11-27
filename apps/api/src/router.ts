@@ -186,6 +186,8 @@ export interface RouterDeps {
     gitSha?: string;
     integrationsCatalogUrl?: string;
     mcpAllowPrivateEndpoint?: boolean;
+    /** Exact DNS names user MCP servers may reach on private addresses. */
+    mcpPrivateEndpointHosts?: readonly string[];
     desktopHostChoiceEnabled?: boolean;
     computerSettingsEnabled?: boolean;
     mcpStdioEnabled?: boolean;
@@ -256,6 +258,7 @@ export function routerEnv(env: AppEnv): RouterDeps["env"] {
     gitSha: env.gitSha,
     integrationsCatalogUrl: env.integrationsCatalogUrl,
     mcpAllowPrivateEndpoint: env.mcpAllowPrivateEndpoint,
+    mcpPrivateEndpointHosts: env.mcpStdio.privateEndpointHosts,
     desktopHostChoiceEnabled: Boolean(env.desktopStackToken),
     computerSettingsEnabled: env.computerSettingsEnabled,
     mcpStdioEnabled: env.mcpStdioEnabled,

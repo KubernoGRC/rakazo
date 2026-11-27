@@ -55,6 +55,7 @@ export function mountRpcRoute(
           c.req.header("authorization")?.startsWith("Bearer ")
             ? session?.sessionId
             : undefined,
+        headers: c.req.raw.headers,
         signal: c.req.raw.signal,
         // Same user in the same space, so leaving the space also ends a stream.
         // A database failure rejects this check; only a missing membership is unauthorized.

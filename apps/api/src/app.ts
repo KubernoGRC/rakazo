@@ -151,6 +151,7 @@ import { mountScriptAssets } from "./http/script-assets.js";
 import { SYSTEM_CONTEXT_PATHS } from "./http/system-context-routes.js";
 import { moveMcpArgsIntoSecrets } from "./integrations/mcp-args-migration.js";
 import { pluginSubmissionRoutes } from "./integrations/plugin-submissions.js";
+import { createForkAccess } from "./kgrc/access-identity-wiring.js";
 import { mountMeetingCalendarHttp } from "./meetings/calendar/calendar-routes.js";
 import { createMeetingAnswers } from "./meetings/meeting-answers.js";
 import { mountMeetingWebhook } from "./meetings/meeting-routes.js";
@@ -460,6 +461,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     devices: userDevices ?? new UserDevices({ prisma, forwardSecret: userDeviceSecret }),
   };
   const directory = await scimDirectory(prisma, env);
+  const forkAccess = createForkAccess(env, { prisma, pushTokens }); // Fork: access identity
   const auth = createAuth(prisma, {
     directoryProvisioning: Boolean(directory),
     analytics,
@@ -468,6 +470,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     breachedPasswordCheck: env.breachedPasswordCheck,
     oidc: env.oidc,
     social: env.social,
+    accessIdentity: forkAccess.verifier,
     secret: env.authSecret,
     baseURL: env.authUrl,
     webOrigin: env.webOrigin,
@@ -758,6 +761,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   const { readSession, sendRenewedCookies, requestSession, sessionActor } = requestSessions({
     auth,
     prisma,
+    bindSession: forkAccess.bindSession,
   });
   app.use("*", sendRenewedCookies);
   // Session and account replies must never be stored by a client or an HTTP cache.
@@ -767,7 +771,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       c.header("cache-control", "no-store");
     });
   }
-  mountAuthCapabilities(app, { env, auth, email, billing });
+  forkAccess.mountGate(app); // Fork: under access identity every later route needs an assertion.
+  mountAuthCapabilities(app, { env, auth, email, billing, fork: forkAccess.capabilities });
   mountAppAssociation(app, env);
   if (localEmailEmulator && env.nodeEnv === "development") {
     app.get(
@@ -825,6 +830,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     if (isBlockedAuthPath(path)) {
       return c.json({ error: "Not available in version 1" }, 404);
     }
+    await forkAccess.beforeAuthHandler(c.req.raw, (headers) => auth.api.getSession({ headers }));
     const ip = requestClientIp(c);
     const response = await withAuthLibraryFailures(() =>
       auth.handler(withClientIp(emptyAuthBodyAsJson(c.req.raw), ip)),
@@ -934,6 +940,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         revision: env.gitSha ?? null,
       }),
       databaseProbe(prisma),
+      forkAccess.unready, // Fork: no usable access-identity key set, no traffic.
     ),
   );
 
