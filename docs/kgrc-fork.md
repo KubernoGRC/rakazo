@@ -134,7 +134,7 @@ bumps. Upstream's `main` still resolves the vulnerable versions, so each sync
 must keep them. Drop an entry, and re-lock, once upstream's lockfile resolves
 the fixed version or later by itself.
 
-| Entry                            | Upstream had | Reason                                       |
-| -------------------------------- | ------------ | -------------------------------------------- |
-| `ws@>=8 <8.23.0: 8.23.0`         | `8.22.0`     | High-severity advisory, fixed in 8.23.0. Replaces upstream's `ws@>=8 <8.21.1: 8.22.0` line, so a sync conflicts on it: keep this one. |
-| `vite@>=8 <8.3.7: 8.3.7`         | `8.3.5`      | Critical advisory, fixed in 8.3.7. Build tooling only; no vite server runs in the image. |
+| Entry                    | Upstream had | Reason                                                                                                                                |
+| ------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `ws@>=8 <8.23.0: 8.23.0` | `8.22.0`     | High-severity advisory, fixed in 8.23.0. Replaces upstream's `ws@>=8 <8.21.1: 8.22.0` line, so a sync conflicts on it: keep this one. |
+| `vite@>=8 <8.3.7: 8.3.7` | `8.3.5`      | Critical advisory, fixed in 8.3.7. Build tooling only; no vite server runs in the image.                                              |
