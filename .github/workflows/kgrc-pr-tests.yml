@@ -1,0 +1,28 @@
+name: kgrc-pr-tests
+
+# Fork-owned (see docs/kgrc-fork.md). Upstream runs its unit, lint, typecheck
+# and Postgres journey suites for pull requests on Depot
+# (.depot/workflows/ci.yml), which this fork doesn't have, and ci.yml runs the
+# same suites on GitHub's runners only for pushes to `main`. Here `main` is a
+# pure mirror, so without this file no pull request into `kgrc` runs them.
+#
+# This calls upstream's unmodified test-suites.yml on GitHub's runners. Its own
+# changed-areas gate still skips suites a pull request can't affect. Nothing
+# here reads a secret.
+on:
+  pull_request:
+    branches: [kgrc]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kgrc-pr-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Fork tests
+    uses: ./.github/workflows/test-suites.yml
+    with:
+      runner: ubuntu-latest
