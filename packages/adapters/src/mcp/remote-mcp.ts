@@ -46,6 +46,8 @@ import {
 } from "./mcp-elicitation.js";
 import { limitMcpResponseBody } from "./mcp-response-limit.js";
 import { withoutDuplicatedStructuredText } from "./mcp-structured-text.js";
+import type { PinnedPrivateHostPolicy } from "./pinned-host.js";
+import { inspectPinnedUrl, pinnedAddressesChecked, remoteUrlPolicy } from "./pinned-host.js";
 
 const DEFAULT_MAX_MCP_TOOLS = 250;
 const DEFAULT_MAX_MCP_PAGES = 20;
@@ -68,20 +70,9 @@ const MAX_RESULT_BYTES = 1_000_000;
 
 export type { ResolveHostname } from "../network/network-address.js";
 
-export interface RemoteUrlPolicy {
+export interface RemoteUrlPolicy extends PinnedPrivateHostPolicy {
   /** Deployment-owner escape for loopback / LAN / Docker-network endpoints. Default off. */
   allowPrivateEndpoint?: boolean;
-  /**
-   * One exact DNS name a deployment-owned connector may reach on private addresses,
-   * such as a private service endpoint. Only that name is exempt: it still needs HTTPS,
-   * and every address it resolves to must be RFC 1918 IPv4 or IPv6 unique-local
-   * (fd00::/8), never cloud metadata, link-local or loopback. Every other host keeps
-   * the default policy.
-   */
-  privateEndpointHost?: string;
-  /** Exact DNS names an operator lets user-configured servers reach on private
-   * addresses, each under the same rules as `privateEndpointHost`. */
-  privateEndpointHosts?: readonly string[];
 }
 
 export interface RemoteTransportDependencies {
@@ -213,20 +204,11 @@ export async function callRemoteMcpTool(
   projectResult?: (result: unknown) => unknown,
 ): Promise<unknown> {
   const long = options.longToolCalls === true;
+  const { asker, meta } = options;
   return withScopedMcpClient(
     options,
     (client, signal, router) =>
-      callMcpTool(
-        client,
-        signal,
-        router,
-        options.asker,
-        toolName,
-        args,
-        long,
-        projectResult,
-        options.meta,
-      ),
+      callMcpTool(client, signal, router, asker, toolName, args, long, projectResult, meta),
     // A long call keeps its own clock, which leaves out the time a person spends answering.
     long ? null : MCP_TIMEOUT_MS,
   );
@@ -263,11 +245,10 @@ async function callMcpTool(
           asker,
           meta,
         })
-      : await client.callTool(
-          { name: toolName, arguments: args, ...(meta ? { _meta: meta } : {}) },
-          undefined,
-          { signal, timeout: MCP_TIMEOUT_MS },
-        );
+      : await client.callTool({ name: toolName, arguments: args, _meta: meta }, undefined, {
+          signal,
+          timeout: MCP_TIMEOUT_MS,
+        });
   const isError = result.isError === true;
   const envelope = {
     content: withoutDuplicatedStructuredText(result.content, result.structuredContent, isError),
@@ -303,11 +284,7 @@ async function withRemoteMcpClient<T>(
   run: McpRun<T>,
   deadlineMs: number | null,
 ): Promise<T> {
-  const policy = {
-    allowPrivateEndpoint: options.allowPrivateEndpoint,
-    privateEndpointHost: options.privateEndpointHost,
-    privateEndpointHosts: options.privateEndpointHosts,
-  };
+  const policy = remoteUrlPolicy(options);
   const endpoint = await assertSafeRemoteUrl(
     options.endpoint,
     options.resolveHostname ?? resolveHostname,
@@ -649,12 +626,8 @@ async function inspectSafeRemoteUrl(
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (isCloudMetadataHost(hostname))
     throw egressRefused(hostname, new ConnectionSetupError("Connector URL targets a private host"));
-  if (isPinnedPrivateHost(hostname, policy)) {
-    if (url.protocol !== "https:") throw new ConnectionSetupError("Connector URL must use HTTPS");
-    const addresses = await resolve(hostname);
-    assertPinnedPrivateAddresses(addresses);
-    return { url, addresses };
-  }
+  const pinned = await inspectPinnedUrl(url, hostname, policy, resolve);
+  if (pinned) return pinned;
   // Loopback is a private endpoint too: only the private-endpoint escape reaches it.
   const allowPrivate = policy.allowPrivateEndpoint === true;
   const privateHost = isPrivateRemoteMcpHostname(hostname);
@@ -909,22 +882,14 @@ export function createSafeLookup(
   );
 }
 
-/**
- * The address policy for a remote MCP host, shared by the direct lookup and the proxy's
- * CONNECT tunnel: a pinned private host (MCP_PRIVATE_ENDPOINT_HOSTS) may reach only RFC 1918
- * or unique-local addresses, loopback only under the private-endpoint escape, anything else
- * only public addresses.
- */
+/** A remote MCP host's address policy, shared by the direct lookup and the proxy tunnel. */
 export function assertRemoteAddresses(
   host: string,
   addresses: ResolvedAddress[],
   policy: RemoteUrlPolicy,
 ): void {
   const hostname = host.replace(/^\[|\]$/g, "");
-  if (isPinnedPrivateHost(hostname, policy)) {
-    assertPinnedPrivateAddresses(addresses);
-    return;
-  }
+  if (pinnedAddressesChecked(hostname, addresses, policy)) return;
   if (policy.allowPrivateEndpoint === true && isLocalhostOrLoopbackIp(hostname)) {
     assertLoopbackAddresses(addresses);
     return;
@@ -939,50 +904,6 @@ export function isPrivateRemoteMcpHostname(hostname: string): boolean {
     isInternalHostname(normalized) ||
     (ipVersion(normalized) !== 0 && isNonPublicAddress(normalized))
   );
-}
-
-function normalizeHostname(hostname: string): string {
-  return hostname.toLowerCase().replace(/\.$/, "");
-}
-
-/** Exact match only: no suffix, wildcard or IP-literal pins. */
-function isPinnedPrivateHost(hostname: string, policy: RemoteUrlPolicy): boolean {
-  const host = normalizeHostname(hostname);
-  return [policy.privateEndpointHost, ...(policy.privateEndpointHosts ?? [])].some((entry) => {
-    const pin = entry ? normalizeHostname(entry) : "";
-    return pin !== "" && ipVersion(pin) === 0 && host === pin;
-  });
-}
-
-/** RFC 1918 IPv4 or locally assigned IPv6 unique-local (fd00::/8) only. Cloud
- * metadata, link-local and loopback are refused first, because AWS serves its IPv6
- * metadata endpoint (fd00:ec2::254) from inside fd00::/8. Being an allowlist, it also
- * refuses CGNAT and transition-encoded forms (NAT64, 6to4). */
-function isPinnablePrivateAddress(value: string): boolean {
-  const address = value.toLowerCase().replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, "");
-  if (
-    isCloudMetadataAddress(address) ||
-    isLinkLocalAddress(address) ||
-    isLoopbackAddress(address)
-  ) {
-    return false;
-  }
-  if (ipVersion(address) === 4) {
-    const [a, b] = address.split(".").map(Number);
-    return a === 10 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168);
-  }
-  if (ipVersion(address) !== 6) return false;
-  const first = address.split(":")[0] ?? "";
-  return first.length === 4 && (Number.parseInt(first, 16) & 0xff00) === 0xfd00;
-}
-
-function assertPinnedPrivateAddresses(addresses: ResolvedAddress[]): void {
-  if (
-    addresses.length === 0 ||
-    addresses.some((entry) => !isPinnablePrivateAddress(entry.address))
-  ) {
-    throw new Error("Private endpoint must resolve only to private addresses");
-  }
 }
 
 function assertLoopbackAddresses(addresses: ResolvedAddress[]): void {

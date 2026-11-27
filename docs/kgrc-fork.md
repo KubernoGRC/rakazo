@@ -87,6 +87,9 @@ conflict with them:
   access-identity patch set needs in `app.ts`. When a sync conflicts in `app.ts`, keep
   upstream's version and re-add the `forkAccess` call sites listed in
   [fork-access-identity.md](fork-access-identity.md).
+- **Pinned private MCP hosts** live in `packages/adapters/src/mcp/pinned-host.ts`.
+  `remote-mcp.ts` keeps only its call sites, which also keeps that file under upstream's
+  1000-line limit (`scripts/checks/ratchets`).
 
 ## Upstream workflows disabled in this fork
 
@@ -110,6 +113,11 @@ checks the fork keeps:
 Re-enable one only on purpose (`gh workflow enable <file>`). `ci.yml`,
 `playwright.yml` and the guard and verification workflows stay enabled and check
 every pull request into `kgrc`.
+
+Upstream runs its unit, lint, typecheck and Postgres journey suites for pull
+requests on Depot (`.depot/workflows/ci.yml`), which this fork doesn't have.
+`.github/workflows/kgrc-pr-tests.yml` runs the same `test-suites.yml` on GitHub's
+runners for every pull request into `kgrc`, reported as `Fork tests / …`.
 
 Code changes that have to edit upstream source (for example in `packages/` or
 `apps/`) are the exception. Keep them small, and offer generally useful ones
