@@ -67,6 +67,11 @@ conflict with them:
   urllib3 it pulls in, keeping only the static noVNC client that `websockify` serves.
 - **Image publishing** is `.github/workflows/kgrc-publish-images.yml`, which releases
   from `kgrc` with `kgrc-v*` tags.
+- **API wiring** goes in `apps/api/src/kgrc/`, which `apps/api/src/app.ts` calls through
+  one-line call sites at stable anchors. `access-identity-wiring.ts` holds everything the
+  access-identity patch set needs in `app.ts`. When a sync conflicts in `app.ts`, keep
+  upstream's version and re-add the `forkAccess` call sites listed in
+  [fork-access-identity.md](fork-access-identity.md).
 
 ## Upstream workflows disabled in this fork
 
@@ -129,7 +134,7 @@ bumps. Upstream's `main` still resolves the vulnerable versions, so each sync
 must keep them. Drop an entry, and re-lock, once upstream's lockfile resolves
 the fixed version or later by itself.
 
-| Entry                            | Upstream had | Reason                                       |
-| -------------------------------- | ------------ | -------------------------------------------- |
-| `ws@>=8 <8.23.0: 8.23.0`         | `8.22.0`     | High-severity advisory, fixed in 8.23.0. Replaces upstream's `ws@>=8 <8.21.1: 8.22.0` line, so a sync conflicts on it: keep this one. |
-| `vite@>=8 <8.3.7: 8.3.7`         | `8.3.5`      | Critical advisory, fixed in 8.3.7. Build tooling only; no vite server runs in the image. |
+| Entry                    | Upstream had | Reason                                                                                                                                |
+| ------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `ws@>=8 <8.23.0: 8.23.0` | `8.22.0`     | High-severity advisory, fixed in 8.23.0. Replaces upstream's `ws@>=8 <8.21.1: 8.22.0` line, so a sync conflicts on it: keep this one. |
+| `vite@>=8 <8.3.7: 8.3.7` | `8.3.5`      | Critical advisory, fixed in 8.3.7. Build tooling only; no vite server runs in the image.                                              |

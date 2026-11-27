@@ -152,10 +152,15 @@ file is refused.
   - the `validateUserInfo` and `user.create` refusals;
   - the session `create` hook's access branch;
   - `hasRecentIdentityConfirmation`, which also accepts a fresh, matching assertion.
-- `apps/api/src/app.ts`: building the verifier, mounting the gate, binding sessions in
-  `boundSession` (used by `requestSession`, the device routes and browser monitoring) and
-  on `/api/auth/*`, passing request headers into the RPC context, and the `accessIdentity`
-  and `accessLogoutUrl` capabilities.
+- `apps/api/src/kgrc/access-identity-wiring.ts` (fork-owned): building the verifier, the
+  gate, the session binding, the readiness check and the `accessIdentity` and
+  `accessLogoutUrl` capabilities, behind one `createForkAccess` object.
+- `apps/api/src/app.ts`: one-line call sites only. It creates `forkAccess` before
+  `createAuth` and passes its verifier, mounts the gate after the `no-store` headers, wraps
+  `readSession` in `forkAccess.bindSession` (so `requestSession`, the device routes and
+  browser monitoring all see bound sessions), calls `forkAccess.beforeAuthHandler` on
+  `/api/auth/*`, spreads `forkAccess.capabilities`, passes `forkAccess.unready` to health,
+  and passes request headers into the RPC context.
 - `apps/api/src/identity-confirmation.ts` and `apps/api/src/routes/context.ts`: the request
   headers reach the identity-confirmation lookup.
 - `apps/api/src/env.ts`: `accessIdentityFromEnv` and its fail-closed checks.
