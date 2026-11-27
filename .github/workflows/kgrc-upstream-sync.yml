@@ -20,7 +20,9 @@
 #                 that branch by merging `kgrc` in.
 #   An open sync PR whose head is still the commit this workflow pushed (the
 #   `kgrc-sync-head` marker in its body) is rebuilt in place with the newest
-#   `main` and `kgrc`. Once anyone else pushes to it, it is left alone.
+#   `main` and `kgrc`. So is one this app opened before the marker existed,
+#   while its head is still a commit on `main`. Once anyone else pushes to it,
+#   it is left alone.
 #   Merge it with a MERGE COMMIT, never squash.
 #
 # Credentials: a GitHub App installed ONLY on this repository, with Contents,
@@ -258,17 +260,28 @@ jobs:
           today=$(date -u +%Y-%m-%d)
           title="chore(sync): merge upstream main into kgrc (${today})"
 
-          # An open sync PR is rebuilt only while its head is still what this
-          # workflow pushed. Anyone else's push makes it theirs.
-          pr=$(gh pr list --repo "$REPO" --base kgrc --state open --json number,headRefName,headRefOid,body,isDraft \
+          # An open sync PR is rebuilt only while nobody else has pushed to it:
+          # its head is the commit this workflow recorded in the body, or (for a
+          # PR this app opened before the marker existed) its head is still a
+          # commit on `main`, so it carries nothing but upstream. Anyone else's
+          # push makes it theirs.
+          pr=$(gh pr list --repo "$REPO" --base kgrc --state open --json number,headRefName,headRefOid,body,isDraft,author \
             --jq '[.[] | select(.headRefName | startswith("upstream-sync/"))][0] // empty')
           lease=""
           if [ -n "$pr" ]; then
             number=$(jq -r .number <<<"$pr")
             branch=$(jq -r .headRefName <<<"$pr")
             current=$(jq -r .headRefOid <<<"$pr")
-            marker=$(jq -r .body <<<"$pr" | grep -oE 'kgrc-sync-head: [0-9a-f]{40}' | head -n1 | cut -d' ' -f2 || true)
-            if [ "$marker" != "$current" ]; then
+            author=$(jq -r .author.login <<<"$pr")
+            marker=$(jq -r '.body // ""' <<<"$pr" | grep -oE 'kgrc-sync-head: [0-9a-f]{40}' | head -n1 | cut -d' ' -f2 || true)
+            if [ -n "$marker" ]; then
+              owned=$([ "$marker" = "$current" ] && echo yes || echo no)
+            elif [ "$author" = "app/${APP_SLUG}" ] && git merge-base --is-ancestor "$current" "$MAIN" 2>/dev/null; then
+              owned=yes
+            else
+              owned=no
+            fi
+            if [ "$owned" != yes ]; then
               echo "Sync PR #${number} has commits this workflow did not push; leaving it alone." | tee -a "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
@@ -323,26 +336,39 @@ jobs:
 
           case "$STATE" in
             clean)
-              status="Merges cleanly. This PR's checks and review cover the merged result." ;;
+              status="- The merge is clean: this branch is the merge commit as git makes it."
+              tested="No tests were run by the sync workflow. This PR's own checks and review run on the merged result." ;;
             lockfile)
-              status="Merged. \`pnpm-lock.yaml\` conflicted and was regenerated with \`pnpm install --lockfile-only\` from upstream's lockfile and the merged manifests." ;;
+              status="- Only \`pnpm-lock.yaml\` conflicted. It was regenerated with \`pnpm install --lockfile-only\` from upstream's lockfile and the merged manifests."
+              tested="No tests were run by the sync workflow beyond regenerating the lockfile. This PR's own checks and review run on the merged result." ;;
             conflict)
               list=$(jq -r '.[] | "  - `" + . + "`"' <<<"$CONFLICTS")
-              status=$(printf '%s\n%s\n\n%s' \
-                "**Conflicts.** This branch is upstream \`main\` itself, so it can't merge yet. Conflicted paths:" \
+              status=$(printf '%s\n%s\n%s' \
+                "- **Conflicts.** This branch is upstream \`main\` itself, so it can't merge yet. Conflicted paths:" \
                 "$list" \
-                "Resolve on this branch: \`git switch ${branch} && git merge origin/kgrc\`, fix, commit and push. After your push this workflow leaves the PR alone.") ;;
+                "- Resolve on this branch: \`git switch ${branch} && git merge origin/kgrc\`, fix, commit and push. After your push this workflow leaves the PR alone.")
+              tested="Nothing yet. Pull-request checks can't run until the conflicts are resolved." ;;
           esac
           body=$(cat <<BODY
-          Upstream sync into \`kgrc\`: ${BEHIND} commit(s), \`main\` at ${MAIN:0:12} (a pure mirror of ${UPSTREAM}), \`kgrc\` at ${KGRC:0:12}.
+          ## What
+
+          Brings ${BEHIND} upstream commit(s) into \`kgrc\`: \`main\` at ${MAIN:0:12} (a pure mirror of ${UPSTREAM}) merged with \`kgrc\` at ${KGRC:0:12}.
+
+          ## Why
+
+          \`kgrc\` carries this fork's changes on top of upstream. Taking upstream every weekday keeps its fixes flowing in and keeps each merge small.
+
+          ## Changes
 
           ${status}
-
-          - **Merge with a merge commit. Do not squash or rebase.** The next sync depends on the shared history.
+          - Merge this with a merge commit. Do not squash or rebase it: the next sync depends on the shared history.
           - Read the upstream range, especially migrations, the compose file and anything touching the fork's patch sets. Fork-owned files are listed in \`docs/kgrc-fork.md\`.
-          - Until someone else pushes here, each weekday run rebuilds this branch from the newest \`main\` and \`kgrc\`.
-          - The branch is disposable; delete it after merge.
-          - After merge, \`kgrc-publish-images\` builds new images, and the deployment's image pins are updated separately.
+          - Until someone else pushes here, each weekday run rebuilds this branch from the newest \`main\` and \`kgrc\`. The branch is disposable; delete it after merge.
+          - After merge, \`kgrc-publish-images\` builds new images. The deployment's image pins are updated separately.
+
+          ## Tested
+
+          ${tested}
 
           <!-- kgrc-sync-head: ${head} -->
           BODY

@@ -38,7 +38,9 @@ weekday, and take security and auth fixes the same day.
     `git merge origin/kgrc`, never on `main`.
   - An open sync pull request whose head is still the workflow's own commit
     (the `kgrc-sync-head` marker in its body) is rebuilt in place from the
-    newest `main` and `kgrc`. Once anyone else pushes to it, it is left alone.
+    newest `main` and `kgrc`. So is one the app opened before the marker
+    existed, while its head is still a commit on `main`. Once anyone else
+    pushes to it, it is left alone.
 
   Read the upstream range, especially migrations, the compose file and anything
   touching the fork's patch sets (below).
