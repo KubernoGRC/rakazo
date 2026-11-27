@@ -80,6 +80,13 @@ create things are **disabled in the repository's Actions settings**, not edited:
 | `model-catalog-bump.yml`       | Scheduled job that opens pull requests, which here would target `kgrc`                                              |
 | `desktop-macos-screenshot.yml` | macOS runners on every push and pull request; no use here                                                           |
 
+One upstream workflow is edited instead of disabled, because the same file runs
+checks the fork keeps:
+
+| Workflow       | Change                                                                                                                                                                                                                                                                                     |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `security.yml` | The `dependency-review` job's `if:` also requires `github.repository == 'elie222/rakazo'`, so it skips here. It needs the dependency graph, which is off on this fork, so it failed on every pull request. CodeQL in the same file still runs. Keep this line when a sync touches the job. |
+
 Re-enable one only on purpose (`gh workflow enable <file>`). `ci.yml`,
 `playwright.yml` and the guard and verification workflows stay enabled and check
 every pull request into `kgrc`.
