@@ -94,10 +94,8 @@ import {
 import { configuredMeetingMedia } from "@rakazo/adapters/meeting-media";
 import type { DirectoryAccountChange } from "@rakazo/auth";
 import {
-  ACCESS_PROVIDER_ID,
   buildTrustedOrigins,
   CLIENT_IP_HEADER,
-  createAccessVerifier,
   createAuth,
   createDirectory,
   isBlockedAuthPath,
@@ -153,7 +151,6 @@ import { mountAccountExportRoute } from "./account/account-export.js";
 import { mountAccountImportRoute } from "./account/account-import.js";
 import { settleDirectoryChange } from "./account/account-status.js";
 import { mountAuditExportRoute } from "./account/audit-export.js";
-import { accessIdentityGate, createAccessSessionBinding } from "./auth/access-identity.js";
 import { createAuthResponseAudit } from "./auth/security-audit.js";
 import { endUserDeviceSession, mountUserDeviceRoutes } from "./auth/user-devices.js";
 import { createBillingService } from "./billing/billing.js";
@@ -189,6 +186,7 @@ import { mountScriptAssets } from "./http/script-assets.js";
 import { SYSTEM_CONTEXT_PATHS } from "./http/system-context-routes.js";
 import { moveMcpArgsIntoSecrets } from "./integrations/mcp-args-migration.js";
 import { pluginSubmissionRoutes } from "./integrations/plugin-submissions.js";
+import { createForkAccess } from "./kgrc/access-identity-wiring.js";
 import { mountMeetingCalendarHttp } from "./meetings/calendar/calendar-routes.js";
 import { createMeetingAnswers } from "./meetings/meeting-answers.js";
 import { mountMeetingWebhook } from "./meetings/meeting-routes.js";
@@ -570,7 +568,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   // Organizations an account being deleted joined, kept until it is gone to count their seats again.
   const seatsAfterDeletion = new Map<string, string[]>();
   // Fork: trusted access-proxy identity; see docs/fork-access-identity.md.
-  const accessVerifier = env.accessIdentity ? createAccessVerifier(env.accessIdentity) : undefined;
+  const forkAccess = createForkAccess(env, { prisma, pushTokens });
   const auth = createAuth(prisma, {
     directoryProvisioning: Boolean(directory),
     analytics,
@@ -579,7 +577,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     breachedPasswordCheck: env.breachedPasswordCheck,
     oidc: env.oidc,
     social: env.social,
-    accessIdentity: accessVerifier,
+    accessIdentity: forkAccess.verifier,
     secret: env.authSecret,
     baseURL: env.authUrl,
     webOrigin: env.webOrigin,
@@ -680,23 +678,6 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     .catch((error) => {
       if (!shutdown.signal.aborted) getLogger().error("mcp server arguments move failed", error);
     });
-  const accessSessionBound = accessVerifier
-    ? createAccessSessionBinding(accessVerifier, {
-        linkedSubject: async (userId) =>
-          (
-            await prisma.account.findFirst({
-              where: { userId, providerId: ACCESS_PROVIDER_ID },
-              select: { accountId: true },
-            })
-          )?.accountId,
-        endSession: async (session) => {
-          await prisma.session.deleteMany({ where: { id: session.id } });
-          await pushTokens
-            .endSession(session.userId, session.id)
-            .catch((error) => getLogger().error("push token removal failed", error));
-        },
-      })
-    : undefined;
   // One provider instance so emulator launches and polls share the same Map.
   const cloudAgent = createCloudAgentConnection({
     CLOUD_AGENT_PROVIDER: env.cloudAgentProvider,
@@ -998,7 +979,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   // Reading a session here can renew it. The browser must get the renewed cookie too,
   // or it keeps the one from sign-in and is signed out when that one expires.
   const renewedSessionCookies = new WeakMap<Request, string[]>();
-  const readSession = async (request: Request, disableRefresh = false) => {
+  const readSession = forkAccess.bindSession(async (request: Request, disableRefresh = false) => {
     const { headers, response } = await auth.api.getSession({
       headers: request.headers,
       returnHeaders: true,
@@ -1013,7 +994,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       .filter((cookie) => incomingCookieNames.has(cookie.split("=")[0]));
     if (cookies.length > 0) renewedSessionCookies.set(request, cookies);
     return response;
-  };
+  });
   app.use("*", async (c, next) => {
     const request = c.req.raw;
     await next();
@@ -1031,11 +1012,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     });
   }
   // Fork: under access identity every other route needs a verified assertion.
-  if (accessVerifier)
-    app.use(
-      "*",
-      accessIdentityGate(accessVerifier, { exemptWebhooks: env.accessExemptWebhooks ?? [] }),
-    );
+  forkAccess.mountGate(app);
   app.get("/api/auth/capabilities", (c) => {
     const registrationOpen = env.desktopStackToken
       ? auth.registrationOpen(c.req.raw.headers)
@@ -1046,10 +1023,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         : null,
       providers: publicSignInProviders(env.social, env.oidc),
       passwordAuth: env.passwordAuth !== false,
-      ...(accessVerifier ? { accessIdentity: true } : {}),
-      ...(accessVerifier && env.accessIdentity?.logoutUrl
-        ? { accessLogoutUrl: env.accessIdentity.logoutUrl }
-        : {}),
+      ...forkAccess.capabilities,
       passwordReset: env.passwordAuth !== false && Boolean(email),
       resetUrl:
         env.passwordAuth !== false && email ? new URL("/reset-password", env.webOrigin).href : null,
@@ -1072,19 +1046,12 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
         }),
     );
   }
-  // Fork: under access identity a session counts only for the access subject it belongs to.
-  const boundSession = async (request: Request, disableRefresh = false) => {
-    const session = await readSession(request, disableRefresh);
-    if (!session?.user) return null;
-    if (accessSessionBound && !(await accessSessionBound(request, session))) return null;
-    return session;
-  };
   app.route(
     "/",
     monitoringRoutes(
       env.browserMonitoring,
       fetch,
-      async (request) => (await boundSession(request))?.user.id,
+      async (request) => (await readSession(request))?.user.id,
     ),
   );
   app.route("/", cspReportRoutes(requestClientIp));
@@ -1163,11 +1130,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
     if (isBlockedAuthPath(path)) {
       return c.json({ error: "Not available in version 1" }, 404);
     }
-    if (accessSessionBound) {
-      // End a session bound to another identity before Better Auth reads it.
-      const session = await auth.api.getSession({ headers: c.req.raw.headers });
-      if (session?.user) await accessSessionBound(c.req.raw, session);
-    }
+    // Fork: end a session bound to another identity before Better Auth reads it.
+    await forkAccess.beforeAuthHandler(c.req.raw, (headers) => auth.api.getSession({ headers }));
     const ip = requestClientIp(c);
     const response = await withAuthLibraryFailures(() =>
       auth.handler(withClientIp(emptyAuthBodyAsJson(c.req.raw), ip)),
@@ -1182,8 +1146,8 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   });
   const requestSession = async (request: Request, disableRefresh = false) => {
     // The bearer plugin turns a signed `Authorization: Bearer` into the session cookie.
-    const session = await boundSession(request, disableRefresh);
-    if (!session) return null;
+    const session = await readSession(request, disableRefresh);
+    if (!session?.user) return null;
     const actor = await actorFromMembership(
       requireMembership(
         prisma,
@@ -1202,7 +1166,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
       devices: userDevices,
       forwardSecret: userDeviceSecret,
       session: async (request) => {
-        const found = await boundSession(request);
+        const found = await readSession(request);
         return found ? { userId: found.user.id, sessionId: found.session.id } : null;
       },
       trustedOrigin: (origin) => isTrustedOrigin(origin, env),
@@ -1353,10 +1317,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
           prisma.$queryRaw`SELECT 1`,
         ]),
       // Fork: without a usable key set every assertion is refused, so do not take traffic.
-      accessVerifier
-        ? async () =>
-            (await accessVerifier.ready()) ? undefined : "access_identity_keys_unavailable"
-        : undefined,
+      forkAccess.unready,
     ),
   );
 
