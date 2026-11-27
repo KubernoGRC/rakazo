@@ -16,17 +16,32 @@ request, then reset `main` to upstream.
 
 ## Taking upstream changes
 
-Upstream moves fast (more than a hundred commits a week), so take it on a
-**weekly** cadence, and take security and auth fixes the same day.
+Upstream moves fast (more than a hundred commits a week), so take it every
+weekday, and take security and auth fixes the same day.
 `kgrc-upstream-sync.yml` automates the mechanical part:
 
 - **Daily:** it fast-forwards `main` to upstream `main` with a fast-forward-only
   ref update, so `main` can never gain a merge commit. It refuses, and fails
-  the run, if `main` holds a commit upstream lacks.
-- **Mondays:** it opens one pull request into `kgrc` from a disposable
-  `upstream-sync/<date>` branch cut at the synced `main`, when `kgrc` is behind
-  and no sync PR is open. Resolve any conflicts **on that branch**, never on
-  `main`. CI and review run on it like any other change.
+  the run, if `main` holds a commit upstream lacks. It then cancels the runs
+  that push starts on `main`: upstream's own workflows, which only test and
+  publish upstream code (and fail on fork-only differences such as the image
+  namespace).
+- **Weekdays:** it proposes `kgrc` with `main` merged in, as one merge commit
+  on a disposable `upstream-sync/<date>` branch, so the pull request is
+  mergeable and its own checks and review cover the real result.
+  - If only `pnpm-lock.yaml` conflicts, a job holding no credentials
+    regenerates it with `pnpm install --lockfile-only` (pnpm runs the
+    repository's `.pnpmfile.cjs`), and the credentialed job redoes the merge
+    itself, taking only that file.
+  - Any other conflict opens a **draft** labelled `sync-conflict`, from a branch
+    at `main`, listing the conflicted paths. Resolve it **on that branch** with
+    `git merge origin/kgrc`, never on `main`.
+  - An open sync pull request whose head is still the workflow's own commit
+    (the `kgrc-sync-head` marker in its body) is rebuilt in place from the
+    newest `main` and `kgrc`. So is one the app opened before the marker
+    existed, while its head is still a commit on `main`. Once anyone else
+    pushes to it, it is left alone.
+
   Read the upstream range, especially migrations, the compose file and anything
   touching the fork's patch sets (below).
 - **Merge it with a merge commit.** Never squash or rebase it: the next sync
@@ -67,6 +82,11 @@ conflict with them:
   urllib3 it pulls in, keeping only the static noVNC client that `websockify` serves.
 - **Image publishing** is `.github/workflows/kgrc-publish-images.yml`, which releases
   from `kgrc` with `kgrc-v*` tags.
+- **API wiring** goes in `apps/api/src/kgrc/`, which `apps/api/src/app.ts` calls through
+  one-line call sites at stable anchors. `access-identity-wiring.ts` holds everything the
+  access-identity patch set needs in `app.ts`. When a sync conflicts in `app.ts`, keep
+  upstream's version and re-add the `forkAccess` call sites listed in
+  [fork-access-identity.md](fork-access-identity.md).
 - **Pinned private MCP hosts** live in `packages/adapters/src/mcp/pinned-host.ts`.
   `remote-mcp.ts` keeps only its call sites, which also keeps that file under upstream's
   1000-line limit (`scripts/checks/ratchets`).
