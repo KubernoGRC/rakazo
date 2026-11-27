@@ -6,9 +6,25 @@ import type { Root } from "react-dom/client";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SkillScreen from "../../app/(settings)/skill";
+import { announceToScreenReader } from "../native/announce";
 import { queryClient } from "../query/query";
 
+vi.mock("../spaces/organizations", () => ({
+  useOrganizations: () => ({}),
+  activeOrganization: () => ({ role: mocks.organizationRole }),
+}));
+vi.mock("../../components/settings/settings-group", () => ({
+  SettingsGroup: ({ children }: { children: ReactNode }) => children,
+  SettingsSwitch: ({ value, onChange }: { value: boolean; onChange: (value: boolean) => void }) => (
+    <button type="button" onClick={() => onChange(!value)}>
+      Share with organization
+    </button>
+  ),
+}));
+vi.mock("../native/announce", () => ({ announceToScreenReader: vi.fn() }));
+
 const mocks = vi.hoisted(() => ({
+  organizationRole: "member",
   params: {} as { id?: string },
   options: {} as { title?: string; headerRight?: () => ReactNode },
   back: vi.fn(),
@@ -106,6 +122,7 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   queryClient.clear();
   mocks.params = {};
+  mocks.organizationRole = "member";
   mocks.options = {};
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -245,10 +262,12 @@ it("keeps a skill that failed to load from being saved as a new one, and retries
     (button) => button.textContent === "Retry",
   );
   expect(container.textContent).toContain("offline");
+  expect(announceToScreenReader).not.toHaveBeenCalled();
   await act(async () => retry?.click());
   await settle();
   expect(editor().value).toBe(own.content);
   expect(container.textContent).not.toContain("offline");
+  expect(announceToScreenReader).not.toHaveBeenCalled();
 });
 
 it("creates a new skill from the template and goes back", async () => {
@@ -265,6 +284,23 @@ it("creates a new skill from the template and goes back", async () => {
     pinned,
   );
   expect(mocks.back).toHaveBeenCalled();
+});
+
+it("keeps the selected organization scope after management permission changes", async () => {
+  mocks.organizationRole = "admin";
+  mocks.rpc.mockResolvedValue(own);
+  await render();
+  await act(async () => button("Share with organization").click());
+
+  mocks.organizationRole = "member";
+  await render();
+  await pressSave();
+
+  expect(mocks.rpc).toHaveBeenCalledWith(
+    "agentSkills/create",
+    { content: expect.stringContaining("name: my-skill"), organization: true },
+    pinned,
+  );
 });
 
 it("reads the skill again on a later visit instead of showing the earlier copy", async () => {
@@ -336,6 +372,87 @@ it("keeps Delete held after a delete that closes the screen", async () => {
   expect(button("Delete").disabled).toBe(true);
   expect(editor().readOnly).toBe(true);
 });
+
+const writes = [
+  ["agentSkills/create", undefined, () => pressSave(), "Could not save skill"],
+  [
+    "agentSkills/update",
+    own.id,
+    async () => {
+      await type(`${own.content}More.\n`);
+      await pressSave();
+    },
+    "Could not save skill",
+  ],
+  ["agentSkills/remove", own.id, () => confirmDelete(), "Could not delete skill"],
+] as const;
+
+it.each(writes)(
+  "announces each %s failure with the displayed message, including repeated failures",
+  async (write, id, start, fallback) => {
+    mocks.params = id ? { id } : {};
+    await renderWithWrite();
+    expect(announceToScreenReader).not.toHaveBeenCalled();
+
+    for (const [index, message] of ["Name taken", "Name taken", ""].entries()) {
+      const pending = deferred<never>();
+      mocks.rpc.mockImplementation((proc: string) =>
+        proc === "agentSkills/get" ? Promise.resolve(own) : pending.promise,
+      );
+      await start();
+      expect(mocks.rpc).toHaveBeenCalledWith(write, expect.anything(), pinned);
+      expect(announceToScreenReader).toHaveBeenCalledTimes(index);
+      await act(async () => pending.reject(new Error(message)));
+      await settle();
+      const displayed = container.querySelector("p")?.textContent;
+      expect(displayed).toBe(message || fallback);
+      expect(announceToScreenReader).toHaveBeenCalledTimes(index + 1);
+      expect(announceToScreenReader).toHaveBeenLastCalledWith(displayed);
+      expect(mocks.back).not.toHaveBeenCalled();
+    }
+  },
+);
+
+async function renderWithWrite() {
+  mocks.rpc.mockResolvedValue(own);
+  await render();
+}
+
+it.each(writes)("does not announce a successful %s", async (_write, id, start) => {
+  mocks.params = id ? { id } : {};
+  await renderWithWrite();
+  await start();
+  await settle();
+  expect(announceToScreenReader).not.toHaveBeenCalled();
+});
+
+it.each(writes)(
+  "does not announce a late %s failure after leaving or switching skills",
+  async (write, id, start) => {
+    for (const leave of ["unmount", "switch"] as const) {
+      mocks.params = id ? { id } : {};
+      await renderWithWrite();
+      const pending = deferred<never>();
+      mocks.rpc.mockImplementation((proc: string) =>
+        proc === "agentSkills/get" ? Promise.resolve(own) : pending.promise,
+      );
+      await start();
+      expect(mocks.rpc).toHaveBeenCalledWith(write, expect.anything(), pinned);
+      if (leave === "unmount") {
+        await act(async () => root.render(null));
+      } else {
+        mocks.params = { id: "skill-2" };
+        await render();
+      }
+      await act(async () => pending.reject(new Error("Late failure")));
+      await settle();
+      expect(announceToScreenReader).not.toHaveBeenCalled();
+      expect(container.textContent).not.toContain("Late failure");
+      expect(mocks.back).not.toHaveBeenCalled();
+      await act(async () => root.render(null));
+    }
+  },
+);
 
 it.each([
   ["agentSkills/create", undefined, () => pressSave()],

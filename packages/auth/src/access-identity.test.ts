@@ -3,7 +3,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bootstrapUserSpace } from "@rakazo/db";
+import { bootstrapUserSpace, clearAccountIdentity } from "@rakazo/db";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessIdentityConfig, AccessVerifier } from "./access-identity.js";
 import {
@@ -58,6 +58,8 @@ vi.mock("better-auth/adapters/prisma", async () => {
 });
 vi.mock("@rakazo/db", () => ({
   bootstrapUserSpace: vi.fn(async () => ({ spaceId: "space-1" })),
+  // Upstream clears passkeys, messaging identities and the personal organization before deletion.
+  clearAccountIdentity: vi.fn(async () => undefined),
   recordSecurityEvent: vi.fn(async () => undefined),
   personalOrganizationIds: vi.fn(async () => []),
 }));
@@ -642,9 +644,11 @@ describe("access identity re-authentication for account deletion", () => {
     const { f, cookie } = await signedIn();
     const security = await f.request("/account-security", { cookie, assertion: token() });
     expect(await security.json()).toMatchObject({ freshOidcAuth: true });
+    vi.mocked(clearAccountIdentity).mockClear();
     const deleted = await f.request("/delete-user", { cookie, assertion: token(), body: {} });
     expect(deleted.status).toBe(200);
     expect(f.data.user).toHaveLength(0);
+    expect(clearAccountIdentity).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -657,9 +661,11 @@ describe("access identity re-authentication for account deletion", () => {
     const assertion = make?.();
     const security = await f.request("/account-security", { cookie, assertion });
     expect(await security.json()).toMatchObject({ freshOidcAuth: false });
+    vi.mocked(clearAccountIdentity).mockClear();
     const deleted = await f.request("/delete-user", { cookie, assertion, body: {} });
     expect(deleted.status).toBe(403);
     expect(f.data.user).toHaveLength(1);
+    expect(clearAccountIdentity).not.toHaveBeenCalled();
   });
 });
 

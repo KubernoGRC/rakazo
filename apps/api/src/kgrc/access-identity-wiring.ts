@@ -15,6 +15,17 @@ import type { AppEnv } from "../env.js";
 
 type SessionLike = { session: { id: string; userId: string }; user?: unknown };
 
+/** How upstream's session reader is wrapped; see `ForkAccess.bindSession`. */
+export type SessionBinder = ForkAccess["bindSession"];
+
+/** The binder when access identity is not wired in: a session without a user reads as none. */
+export const unboundSession: SessionBinder =
+  (read) =>
+  async (request, ...rest) => {
+    const session = await read(request, ...rest);
+    return session?.user ? session : null;
+  };
+
 export interface ForkAccess {
   /** Passed to `createAuth` as `accessIdentity`; undefined when access identity is off. */
   readonly verifier: AccessVerifier | undefined;

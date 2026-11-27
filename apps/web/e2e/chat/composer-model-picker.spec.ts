@@ -131,9 +131,15 @@ test("the chat's model can be changed from the message box once turned on", asyn
     modelId: "e2e-smart",
     thinkingLevel: null,
   });
+
+  // A write outside the settings UI reaches the open chat through the live stream.
+  await rpc(page, "preferences/update", { chatPreferences: { composerModelPicker: false } });
+  await expect(picker).toHaveCount(0);
+  await rpc(page, "preferences/update", { chatPreferences: { composerModelPicker: true } });
+  await expect(picker).toBeVisible();
 });
 
-test("the message box lists a provider's newest models first", async ({ page }, testInfo) => {
+test("the message box lists each model's newest version first", async ({ page }, testInfo) => {
   const stamp = Date.now();
   await signup(page, `composer-model-order-${stamp}@rakazo.test`, "password12", "Model Order");
   await completeOnboarding(page);
@@ -160,11 +166,17 @@ test("the message box lists a provider's newest models first", async ({ page }, 
   );
 
   const settings = await openUserSettings(page);
-  await settings.getByTestId("composer-model-picker-toggle").click();
+  const toggle = settings.getByTestId("composer-model-picker-toggle");
+  await toggle.click();
+  await expect(toggle).toBeChecked();
   await page.goto(`/app/${botId}`);
   const picker = page.getByTestId("composer-bar").getByRole("button", { name: /^Model/ });
   await expect(picker).toBeVisible();
   await picker.click();
+  // Older versions wait behind Show more.
+  await expect(page.getByRole("option", { name: /^demo-/ })).toHaveText([/demo-5/]);
+  await captureScreenshot(page, testInfo, "composer-model-picker-latest");
+  await page.getByRole("option", { name: "Show more" }).click();
   await expect(page.getByRole("option", { name: /^demo-/ })).toHaveText([
     /demo-5/,
     /demo-4\.5/,

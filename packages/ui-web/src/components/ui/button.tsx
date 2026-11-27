@@ -18,11 +18,13 @@ const buttonVariants = cva(
           "hover:bg-accent hover:text-foreground aria-expanded:bg-accent aria-expanded:text-foreground",
         destructive:
           "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
+        // Neutral until hovered or pressed, so a page of rows isn't lined with red.
+        "destructive-secondary":
+          "bg-secondary text-secondary-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:border-destructive/40 focus-visible:ring-destructive/20 active:bg-destructive/20 aria-expanded:bg-destructive/10 aria-expanded:text-destructive dark:hover:bg-destructive/20 dark:focus-visible:ring-destructive/40 dark:active:bg-destructive/30",
         link: "text-primary underline-offset-4 hover:underline",
         text: "text-muted-foreground hover:text-foreground aria-expanded:text-foreground",
-        // Floats over scrolling content, so it carries its own frosted surface.
-        floating:
-          "border-border bg-muted/90 text-foreground/75 backdrop-blur hover:bg-accent data-active:bg-accent aria-pressed:bg-accent",
+        // Floats over scrolling content, so it carries its own glass surface.
+        floating: "glass bg-clip-border text-foreground/80 hover:text-foreground",
       },
       size: {
         default: `${controlHeight.default} gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2`,

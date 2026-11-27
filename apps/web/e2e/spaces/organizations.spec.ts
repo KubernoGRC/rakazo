@@ -25,7 +25,7 @@ function selectedSpace(page: Page) {
 async function openAvatarMenu(page: Page) {
   await page.getByTestId("user-menu-trigger").click();
   const menu = page.locator('[data-slot="popover-content"]');
-  await expect(menu.getByRole("button", { name: "Settings" })).toBeVisible();
+  await expect(menu.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   return menu;
 }
 
@@ -67,13 +67,12 @@ test("create, switch, rename and delete an organization", async ({ page }, testI
   await signup(page, `organizations-${stamp}@rakazo.test`, "password12", "Org Owner");
   await completeOnboarding(page);
 
-  // One organization: settings show only its name and its members, and the avatar menu names it
-  // and opens a submenu that lists it and starts a new one.
+  // The avatar menu names the active organization and opens its switcher.
   let settings = await openUserSettings(page);
   await settings.getByTestId("settings-nav-organization").click();
   const single = settings.getByTestId("organization-settings");
   await expect(single.getByLabel("Name")).toHaveValue("Personal");
-  await expect(single.getByRole("button")).toHaveText([/^Members/]);
+  await expect(single.getByRole("button", { name: /^Members/ })).toBeVisible();
   // The options menu is in the page header, next to the close button.
   await settings
     .getByTestId("settings-header")
@@ -83,6 +82,11 @@ test("create, switch, rename and delete an organization", async ({ page }, testI
   await expect(page.getByRole("menuitem", { name: "Delete organization" })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await captureScreenshot(page, testInfo, "org-settings-single");
+  await single.getByRole("button", { name: "Shared logins" }).click();
+  await expect(settings.getByRole("heading", { name: "Shared logins" })).toBeVisible();
+  await expect(settings.getByText("Protected sign-in is unavailable.")).toBeVisible();
+  await captureScreenshot(page, testInfo, "organization-shared-logins");
+  await settings.getByRole("button", { name: "Back", exact: true }).click();
   await page.keyboard.press("Escape");
 
   let menu = await openOrganizationMenu(page);
@@ -242,9 +246,10 @@ test("create, switch, rename and delete an organization", async ({ page }, testI
   );
 });
 
-test("an organization owner opens the activity log from the organization menu", async ({
-  page,
-}, testInfo) => {
+const auditTest = test.extend({ locale: "de-DE", timezoneId: "America/New_York" });
+
+auditTest("owner activity log uses the UI language", async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem("rakazo.uiLocale", "en"));
   await signup(page, `audit-log-${Date.now()}@rakazo.test`, "password12", "Audit Owner");
   await completeOnboarding(page);
   await rpc(page, "spaces/create", { name: "Audited space" });
@@ -261,9 +266,24 @@ test("an organization owner opens the activity log from the organization menu", 
   const log = settings.getByTestId("audit-log");
   await expect(log.getByRole("heading", { name: "Activity log" })).toBeVisible();
   await expect(log.getByRole("button", { name: "Export" })).toBeEnabled();
-  await expect(log.getByRole("listitem").filter({ hasText: "space.created" })).toContainText(
-    "Audited space",
-  );
+  const creation = log.getByRole("listitem").filter({ hasText: "space.created" });
+  await expect(creation).toContainText("Audited space");
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  const time = creation.locator("time");
+  await expect(time).toHaveAttribute("datetime", /^\d{4}-\d{2}-\d{2}T/);
+  const formats = await time.evaluate((element) => {
+    const iso = element.getAttribute("datetime");
+    if (!iso) throw new Error("Missing audit timestamp");
+    const date = new Date(iso);
+    return {
+      app: date.toLocaleString("en"),
+      browser: date.toLocaleString(),
+      utc: date.toLocaleString("en", { timeZone: "UTC" }),
+    };
+  });
+  expect(formats.app).not.toBe(formats.browser);
+  expect(formats.app).not.toBe(formats.utc);
+  await expect(time).toHaveText(formats.app);
   await captureScreenshot(page, testInfo, "audit-log");
 
   await log.getByRole("button", { name: "Back" }).click();

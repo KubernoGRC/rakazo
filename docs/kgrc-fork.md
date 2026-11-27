@@ -84,9 +84,11 @@ conflict with them:
   from `kgrc` with `kgrc-v*` tags.
 - **API wiring** goes in `apps/api/src/kgrc/`, which `apps/api/src/app.ts` calls through
   one-line call sites at stable anchors. `access-identity-wiring.ts` holds everything the
-  access-identity patch set needs in `app.ts`. When a sync conflicts in `app.ts`, keep
-  upstream's version and re-add the `forkAccess` call sites listed in
-  [fork-access-identity.md](fork-access-identity.md).
+  access-identity patch set needs in `app.ts` and upstream's request-session and
+  capabilities helpers. When a sync conflicts there, keep upstream's version and re-add the
+  `forkAccess` call sites listed in [fork-access-identity.md](fork-access-identity.md).
+  Upstream caps source files at 1000 lines (`scripts/checks/ratchets`), so fork lines in a
+  file near the cap go in a fork-owned module with a one-line call site.
 - **Pinned private MCP hosts** live in `packages/adapters/src/mcp/pinned-host.ts`.
   `remote-mcp.ts` keeps only its call sites, which also keeps that file under upstream's
   1000-line limit (`scripts/checks/ratchets`).

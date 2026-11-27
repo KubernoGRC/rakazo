@@ -1,7 +1,13 @@
 import type { Actor } from "@rakazo/contracts";
 import { AI_DISCLOSURE_VERSION } from "@rakazo/contracts";
+import type * as Database from "@rakazo/db";
+import { remainingSpeechAllowance } from "@rakazo/db";
 import { describe, expect, it, vi } from "vitest";
 
+vi.mock("@rakazo/db", async (original) => ({
+  ...(await original<typeof Database>()),
+  remainingSpeechAllowance: vi.fn(async () => 1000n),
+}));
 vi.mock("../threads/thread-target.js", () => ({
   resolveThreadTarget: async () => ({ kind: "bot", botId: "bot" }),
 }));
@@ -15,6 +21,8 @@ function setup() {
   const deps = {
     env: { agentRuntime: "scripted" },
     prisma: {
+      spaceMember: { findUnique: vi.fn(async () => null) },
+      organizationModelConnection: { findFirst: vi.fn(async () => null) },
       userModelPreference: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
       spaceSettingOverride: { findUnique: vi.fn(async () => null) },
       userModelRoleChoice: { findMany: vi.fn(async () => []) },
@@ -38,6 +46,65 @@ function setup() {
   return { deps, upsert, actor: { userId: "user", spaceId: "space" } as Actor };
 }
 describe("consent grants", () => {
+  it("requires fresh consent when the selected organization endpoint changes", async () => {
+    const { deps, actor } = setup();
+    deps.env.agentRuntime = "pi";
+    vi.mocked(deps.prisma.spaceMember.findUnique).mockResolvedValue({
+      organizationModelConnectionId: "shared-model",
+      organizationModelProvider: "openai-compatible",
+      organizationModelId: "fixture-model",
+    } as never);
+    vi.mocked(deps.prisma.organizationModelConnection.findFirst).mockResolvedValue({
+      secretId: "fixture-secret",
+      ciphertext: "fixture-cipher",
+    } as never);
+    const load = vi.fn();
+    deps.secrets = { load } as never;
+    const disclosure = async (path: string) => {
+      load.mockResolvedValue(
+        JSON.stringify({
+          kind: "openai_compatible",
+          baseUrl: `https://models.example.test/${path}`,
+          apiKey: "fixture-model-key",
+        }),
+      );
+      const status = await aiConsentStatus(deps, actor, { uses: ["model"] });
+      return status.recipients[0]!;
+    };
+    const first = await disclosure("first");
+    vi.mocked(deps.prisma.aiDataConsent.findMany).mockResolvedValue([
+      { recipientKey: first.key },
+    ] as never);
+    const moved = await disclosure("second");
+    expect(first.name).toContain("(https://models.example.test)");
+    expect(moved.name).toBe(first.name);
+    expect(moved.key).not.toBe(first.key);
+    expect(moved.allowed).toBe(false);
+  });
+
+  it("discloses the provider when the selected organization key cannot be read", async () => {
+    const { deps, actor } = setup();
+    deps.env.agentRuntime = "pi";
+    vi.mocked(deps.prisma.spaceMember.findUnique).mockResolvedValue({
+      organizationModelConnectionId: "shared-model",
+      organizationModelProvider: "openai-compatible",
+      organizationModelId: "fixture-model",
+    } as never);
+    vi.mocked(deps.prisma.organizationModelConnection.findFirst).mockResolvedValue({
+      secretId: "fixture-secret",
+      ciphertext: "fixture-cipher",
+    } as never);
+    deps.secrets = {
+      load: vi.fn().mockRejectedValue(new Error("Fixture secret unavailable")),
+    } as never;
+
+    const status = await aiConsentStatus(deps, actor, { uses: ["model"] });
+
+    expect(status.recipients).toEqual([
+      expect.objectContaining({ name: "OpenAI-compatible", allowed: false }),
+    ]);
+  });
+
   it("includes reachable helper models and cloud services for a targeted send", async () => {
     const { deps, actor } = setup();
     deps.env.agentRuntime = "pi";
@@ -397,7 +464,6 @@ function includedSpeechSetup() {
   vi.mocked(deps.prisma.userVoicePreference.findFirst).mockResolvedValue(null);
   vi.mocked(deps.prisma.userVoicePreference.findMany).mockResolvedValue([]);
   Object.assign(deps.prisma, {
-    speechAllowance: { findFirst: vi.fn(async () => ({ limitMicros: 1000n, usedMicros: 0n })) },
     spaceVoicePreference: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
   });
   return fixture;
@@ -423,7 +489,7 @@ it("requires consent for included speech and a separate recognition endpoint wit
 
 it("omits unavailable included speech and respects an explicitly empty Space voice copy", async () => {
   const { deps, actor } = includedSpeechSetup();
-  vi.mocked(deps.prisma.speechAllowance.findFirst).mockResolvedValueOnce(null);
+  vi.mocked(remainingSpeechAllowance).mockResolvedValueOnce(0n);
   expect((await aiConsentStatus(deps, actor, { uses: ["voice"] })).recipients).toEqual([]);
   vi.mocked(deps.prisma.spaceSettingOverride.findUnique).mockResolvedValue({
     setting: "voice",
@@ -442,7 +508,7 @@ it("discloses only the saved personal voice when it overrides included speech", 
   } as never);
   const status = await aiConsentStatus(deps, actor, { uses: ["voice"] });
   expect(status.recipients.map((recipient) => recipient.name)).toEqual(["OpenAI"]);
-  expect(deps.prisma.speechAllowance.findFirst).not.toHaveBeenCalled();
+  expect(remainingSpeechAllowance).not.toHaveBeenCalled();
 });
 
 it("allows included speech consent with saved non-default voice preferences", async () => {

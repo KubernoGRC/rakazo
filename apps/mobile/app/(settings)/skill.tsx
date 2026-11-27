@@ -1,5 +1,6 @@
 import { ph } from "@lingui/core/macro";
 import { useLingui } from "@lingui/react/macro";
+import { canShareWithOrganization } from "@rakazo/core";
 import { useQuery } from "@tanstack/react-query";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useState } from "react";
@@ -14,12 +15,15 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { NativeActionButton } from "../../components/native/native-action-button";
+import { SettingsGroup, SettingsSwitch } from "../../components/settings/settings-group";
 import { errorText } from "../../lib/api/user-error";
 import { mobileTokens } from "../../lib/appearance/appearance";
 import { useSideInsets } from "../../lib/layout/side-insets";
+import { announceToScreenReader } from "../../lib/native/announce";
 import { native, useThemedStyles } from "../../lib/native/native";
 import { useScreenHeader } from "../../lib/navigation/screen-header";
 import { formRead, queryClient, rpcQuery, useSave } from "../../lib/query/query";
+import { activeOrganization, useOrganizations } from "../../lib/spaces/organizations";
 
 const NEW_SKILL_TEMPLATE = `---
 name: my-skill
@@ -37,6 +41,10 @@ export default function SkillScreen() {
 }
 
 function SkillEditor({ id }: { id?: string }) {
+  const organization = activeOrganization(useOrganizations().data);
+  const canShare = canShareWithOrganization(organization);
+  const [forOrganization, setForOrganization] = useState(false);
+
   const router = useRouter();
   const sideInsets = useSideInsets();
   const styles = useThemedStyles(createStyles);
@@ -47,28 +55,35 @@ function SkillEditor({ id }: { id?: string }) {
   const loading = skillQuery.isFetching && !skill;
   const [edited, setDraft] = useState<string | null>(null);
   const draft = edited ?? skill?.content ?? (id ? "" : NEW_SKILL_TEMPLATE);
+  const saveFailure = (failure: Error) => errorText(failure, t`Could not save skill`);
+  const deleteFailure = (failure: Error) => errorText(failure, t`Could not delete skill`);
 
   const save = useSave({
     save: async (content: string, send) => {
       if (skill) return send("agentSkills/update", { skillId: skill.id, content });
-      await send("agentSkills/create", { content });
+      await send("agentSkills/create", {
+        content,
+        ...(forOrganization ? { organization: true } : {}),
+      });
       return null;
     },
     onSaved: (saved) => {
       if (saved) queryClient.setQueryData(skillRead.queryKey, saved);
       else router.back();
     },
+    onFailed: (failure) => announceToScreenReader(saveFailure(failure)),
   });
   const remove = useSave({
     save: (skillId: string, send) => send("agentSkills/remove", { skillId }),
     onSaved: () => router.back(),
+    onFailed: (failure) => announceToScreenReader(deleteFailure(failure)),
     closesScreen: true,
   });
   const busy = save.pending || remove.pending;
   const error = save.error
-    ? errorText(save.error, t`Could not save skill`)
+    ? saveFailure(save.error)
     : remove.error
-      ? errorText(remove.error, t`Could not delete skill`)
+      ? deleteFailure(remove.error)
       : skillQuery.error
         ? errorText(skillQuery.error, t`Could not load skill`)
         : null;
@@ -116,6 +131,17 @@ function SkillEditor({ id }: { id?: string }) {
         contentInsetAdjustmentBehavior="automatic"
         keyboardShouldPersistTaps="handled"
       >
+        {!id && (canShare || forOrganization) ? (
+          <SettingsGroup>
+            <SettingsSwitch
+              label={t`Share with organization`}
+              value={forOrganization}
+              onChange={setForOrganization}
+              disabled={busy}
+            />
+          </SettingsGroup>
+        ) : null}
+        {skill?.organization ? <Text>{t`Organization`}</Text> : null}
         {loading ? (
           <ActivityIndicator color={native.secondaryLabel} accessibilityLabel={t`Loading…`} />
         ) : unloaded ? null : (

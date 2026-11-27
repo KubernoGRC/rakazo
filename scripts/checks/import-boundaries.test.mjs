@@ -107,6 +107,10 @@ const RULES = {
     title: "imported workspace packages are declared dependencies",
     fix: 'Add it to this package.json as "workspace:*": under dependencies when shipped code imports it, under devDependencies when only tests do.',
   },
+  bundled: {
+    title: "the desktop app lists the workspace packages it bundles as devDependencies",
+    fix: "The build compiles workspace code into the app, and the packager would also ship each of the package's own dependencies. Move it to devDependencies.",
+  },
   unused: {
     title: "declared workspace dependencies are imported",
     fix: "Nothing in this package imports it. Remove it from this package.json.",
@@ -300,7 +304,8 @@ function findViolations(sources, workspaces) {
       }
       if (target === TESTKIT && !testCode) flag("testkit");
       // Browser end-to-end specs run in Node and may seed the database.
-      const client = CLIENT_CODE.includes(owner) && !under(SERVER_DIRS, file);
+      // Every browser surface, including the desktop preload and setup renderer, is held to this.
+      const client = (CLIENT_CODE.includes(owner) || browser) && !under(SERVER_DIRS, file);
       if (SERVER_PACKAGES.includes(target) && client && !testCode) {
         flag("server");
       }
@@ -312,7 +317,13 @@ function findViolations(sources, workspaces) {
     const file = `${workspace.dir}/package.json`;
     const dirOf = (name) => byName.get(name)?.dir;
     const declared = [...workspace.dependencies, ...workspace.devDependencies];
-    const shippable = BUNDLED.includes(workspace.dir) ? declared : workspace.dependencies;
+    const bundled = BUNDLED.includes(workspace.dir);
+    const shippable = bundled ? declared : workspace.dependencies;
+    if (bundled) {
+      for (const name of workspace.dependencies) {
+        violations.push({ rule: "bundled", file, specifier: name });
+      }
+    }
     for (const target of used.named) {
       const names = used.shipped.has(target) ? shippable : declared;
       if (!names.some((name) => dirOf(name) === target)) {
@@ -439,7 +450,9 @@ test("resolves specifiers to packages and reports each rule", () => {
     });
   const workspaces = [
     workspace("apps/api", ["core", "testkit"]),
-    workspace("apps/desktop", [], { devDependencies: { [scoped("core")]: "workspace:*" } }),
+    workspace("apps/desktop", ["contracts"], {
+      devDependencies: { [scoped("core")]: "workspace:*" },
+    }),
     workspace("apps/web", ["ui-web", "db", "contracts"], {
       devDependencies: { [scoped("core")]: "workspace:*" },
     }),
@@ -452,7 +465,7 @@ test("resolves specifiers to packages and reports each rule", () => {
   const sources = [
     { file: "apps/api/src/index.ts", specifiers: [scoped("core"), scoped("testkit")] },
     { file: "apps/api/src/index.test.ts", specifiers: [scoped("testkit"), "./index.js"] },
-    { file: "apps/desktop/src/main/main.ts", specifiers: [scoped("core")] },
+    { file: "apps/desktop/src/main/main.ts", specifiers: [scoped("core"), scoped("contracts")] },
     {
       file: "apps/web/src/app.tsx",
       specifiers: [
@@ -471,6 +484,7 @@ test("resolves specifiers to packages and reports each rule", () => {
     },
     { file: "apps/web/src/page.test.tsx", specifiers: ["../server/proxy.js"] },
     { file: "apps/desktop/src/preload/preload.cjs", specifiers: ["../main/ipc.js"] },
+    { file: "apps/desktop/src/preload/bridge.cjs", specifiers: [scoped("db")] },
     {
       file: "apps/web/server/proxy.ts",
       specifiers: [scoped("db"), scoped("core/node/screen"), "../src/shared.js"],
@@ -497,6 +511,7 @@ test("resolves specifiers to packages and reports each rule", () => {
       "app: packages/db/src/index.ts -> @rakazo/api",
       "app: packages/testkit/src/browser.ts -> @rakazo/web",
       "app: packages/testkit/src/index.ts -> ../../../apps/api/src/app.ts",
+      "bundled: apps/desktop/package.json -> @rakazo/contracts",
       "core: packages/core/src/index.ts -> @rakazo/db",
       "exports: apps/web/src/app.tsx -> @rakazo/ui-web/src/internal",
       "leaf: packages/contracts/src/index.ts -> @rakazo/core",
@@ -506,8 +521,10 @@ test("resolves specifiers to packages and reports each rule", () => {
       "runtime: apps/desktop/src/preload/preload.cjs -> ../main/ipc.js",
       "runtime: apps/web/src/page.tsx -> ../server/proxy.js",
       "runtime: apps/web/src/page.tsx -> @rakazo/core/node/screen",
+      "server: apps/desktop/src/preload/bridge.cjs -> @rakazo/db",
       "server: apps/web/src/app.tsx -> @rakazo/db",
       "testkit: apps/api/src/index.ts -> @rakazo/testkit",
+      "undeclared: apps/desktop/package.json -> @rakazo/db",
       "undeclared: apps/web/package.json -> @rakazo/core",
       "unused: packages/ui-web/package.json -> @rakazo/contracts",
       "vendor: packages/adapters/src/providers/computer/one/one-sandbox.ts -> ../two/two-sandbox.js",

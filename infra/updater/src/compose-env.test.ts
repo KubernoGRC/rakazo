@@ -44,6 +44,8 @@ const FORK_DEPLOYMENT = "fork setting the deployment supplies through its own co
 
 /** Read by code but never passed to the api or worker containers, with the reason. */
 const LOCAL_VM = "Mac VM computers, which only the desktop app's native stack runs";
+const PROTECTED_BROWSER_HOST =
+  "the protected sign-in launcher uses host paths and runs on the container engine host";
 const NOT_PASSED: Record<string, string> = {
   VITEST: "set by the test runner",
   OWNER_EMAIL: "bootstrap-owner CLI input, passed on its own command line",
@@ -53,6 +55,8 @@ const NOT_PASSED: Record<string, string> = {
   PM2_HOME: "restart-supervisor detection for PM2 hosts; Compose restarts containers",
   INVOCATION_ID: "restart-supervisor detection for systemd hosts; Compose restarts containers",
   RAKAZO_ALLOW_DEV_SECRETS: "development-only escape hatch for placeholder secrets",
+  RAKAZO_CLAUDE_CODE_SETUP_TOKEN:
+    "the Claude Code CLI runs only from a source checkout; the images do not include it",
   EMAIL_EMULATOR: "ignored when NODE_ENV=production",
   BILLING_EMULATOR: "ignored when NODE_ENV=production",
   NODE_USE_ENV_PROXY:
@@ -73,6 +77,8 @@ const NOT_PASSED: Record<string, string> = {
   RAKAZO_IMAGE_TAG_PREVIOUS: "read by the updater sidecar, which has its own environment",
   RAKAZO_DB_PACKAGE_DIR: "passed only to the migration CLI by the desktop app's native stack",
   RAKAZO_ENV_FILE: "set by the desktop app's native stack so no stray .env is read",
+  PROTECTED_BROWSER_IMAGE: PROTECTED_BROWSER_HOST,
+  PROTECTED_BROWSER_SECCOMP_PROFILE: PROTECTED_BROWSER_HOST,
   LOCAL_VM_CLI: LOCAL_VM,
   LOCAL_VM_COMPUTER_IMAGE: LOCAL_VM,
   LOCAL_VM_CPUS: LOCAL_VM,

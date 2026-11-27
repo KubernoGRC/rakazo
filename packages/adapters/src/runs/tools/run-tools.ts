@@ -46,6 +46,7 @@ import {
   USER_COMPUTER_ACT_TOOL,
   USER_COMPUTER_OBSERVE_TOOL,
   USER_COMPUTER_SHELL_TOOL,
+  USER_COMPUTER_TOOLS,
   userComputerAct,
   userComputerList,
   userComputerObserve,
@@ -53,6 +54,10 @@ import {
 } from "./run-tools-user-computer.js";
 import type { ToolCallAudit } from "./tool-call-event.js";
 import { auditToolCall as recordToolCallEvent } from "./tool-call-event.js";
+
+/** The owner's own computer: its shell, screen and computer list. */
+const ownComputerResult = (tool: string) =>
+  USER_COMPUTER_TOOLS.has(tool) || tool === "user_computer_list";
 
 const TOOL_HANDLERS = new Map<string, ToolHandler>([
   ...Object.entries(computerTools),
@@ -108,6 +113,16 @@ export async function applyTool(
   _route?: unknown,
   observer?: AgentToolExecutionObserver,
 ) {
+  ctx.state.toolStarted = true;
+  const knownTool =
+    TOOL_HANDLERS.has(name) ||
+    ctx.tools.connector.has(name) ||
+    Boolean(ctx.tools.builtins?.some((tool) => tool.name === name));
+  // Refused there: a routine with its owner's computer is never offered update_bot.
+  if (ctx.source.ownerComputerRoutine)
+    return recordToolCallEvent(ctx, name, args, knownTool, (audit) =>
+      dispatchTool(ctx, name, args, executionId, observer, audit),
+    );
   // A bot naming itself in bot_id means its own settings. Dropping it here sends the call down
   // the own path everywhere: preparation, the stored approval, the handler and its taint check.
   if (
@@ -118,10 +133,6 @@ export async function applyTool(
     const { bot_id: _self, ...own } = args;
     args = own;
   }
-  const knownTool =
-    TOOL_HANDLERS.has(name) ||
-    ctx.tools.connector.has(name) ||
-    Boolean(ctx.tools.builtins?.some((tool) => tool.name === name));
   return recordToolCallEvent(ctx, name, args, knownTool, (audit) =>
     name === "update_bot" && ownFieldsBesideInstructions(args).length
       ? applyOwnUpdateWithInstructions(ctx, args, executionId, observer, audit)
@@ -254,6 +265,11 @@ async function dispatchTool(
   if (ctx.tools.disabled.has(name)) {
     return refuse(refusal("tool_disabled", "This tool is disabled for this bot."));
   }
+  // A routine with its owner's computer may run only what it was offered, whatever name the
+  // runtime emits. It is offered no catalog or connector tool, so no call of its remaps either.
+  if (ctx.source.ownerComputerRoutine && !ctx.tools.offered.some((tool) => tool.name === name)) {
+    return refuse(refusal("tool_not_offered", `${name} is not available in this run.`));
+  }
   // Only offered tools reach the model, but a runtime can still emit any name, and a connector
   // tool named like a local one still runs the local handler.
   if (
@@ -300,7 +316,9 @@ async function dispatchTool(
     if (gate.replayed) audit.replayed();
     const ownProfile = name === "update_bot" && !argumentGiven(args.bot_id);
     if (gate.replayed && toolResultTaintsRun(request.name) && !ownProfile) {
-      await markReadOutsideContent(ctx, gate.result);
+      await markReadOutsideContent(ctx, gate.result, {
+        ownComputer: ownComputerResult(request.name),
+      });
     }
     return refuse(gate.result, request.name);
   }
@@ -316,7 +334,8 @@ async function dispatchTool(
       // Editing its own profile returns only what this run wrote; a child's profile is another
       // bot's.
       const ownProfile = name === "update_bot" && !argumentGiven(args.bot_id);
-      if (toolResultTaintsRun(name) && !ownProfile) await markReadOutsideContent(ctx, result);
+      if (toolResultTaintsRun(name) && !ownProfile)
+        await markReadOutsideContent(ctx, result, { ownComputer: ownComputerResult(name) });
     }
   };
   if (!gate.call.applied) return runHandler();

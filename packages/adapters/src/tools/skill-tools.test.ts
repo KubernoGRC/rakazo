@@ -11,14 +11,22 @@ import {
 } from "./skill-tools.js";
 
 type Scope = {
+  organization?: unknown;
+  organizationId?: null;
+  allSpaces?: boolean;
+  availableIn?: { some: { spaceId: string } };
   spaceId?: string;
   userId?: string;
   name?: { equals: string } | string;
   NOT?: { id: string };
-  OR?: Array<{ spaceId?: string; allSpaces?: boolean }>;
+  OR?: Scope[];
 };
 /** The owner's rows here: added in this space or available in all of the owner's spaces. */
 function inScope(row: Record<string, unknown>, where: Scope): boolean {
+  if (where.organization) return Boolean(row.organizationId);
+  if (where.organizationId === null && row.organizationId) return false;
+  if (where.availableIn && !Array.isArray(row.availableIn)) return false;
+  if (where.allSpaces && !row.allSpaces) return false;
   if (where.userId && row.userId !== where.userId) return false;
   if (where.spaceId && row.spaceId !== where.spaceId) return false;
   if (
@@ -27,13 +35,7 @@ function inScope(row: Record<string, unknown>, where: Scope): boolean {
   )
     return false;
   if (where.NOT && row.id === where.NOT.id) return false;
-  if (
-    where.OR &&
-    !where.OR.some(
-      (branch) => branch.spaceId === row.spaceId || (branch.allSpaces && row.allSpaces === true),
-    )
-  )
-    return false;
+  if (where.OR && !where.OR.some((branch) => inScope(row, branch))) return false;
   return true;
 }
 
@@ -51,6 +53,7 @@ function makePrisma(
         const row = store.find((item) => item.id === where.id && inScope(item, where));
         return row
           ? {
+              ...row,
               files: row.files ?? null,
               spaceId: row.spaceId,
               allSpaces: row.allSpaces === true,
@@ -165,6 +168,15 @@ describe("skill tools", () => {
     prisma = makePrisma();
   });
 
+  it("creates a personal skill with the same name as an organization skill", async () => {
+    const prisma = makePrisma([{ id: "shared", name: "Daily standup", organizationId: "org-1" }]);
+    const created = await skillCreateFromTool(prisma as never, owner, {
+      name: "Daily standup",
+      description: "Prepare notes",
+    });
+    expect(created).toMatchObject({ ok: true, name: "Daily standup" });
+  });
+
   it("creates, reads, updates, and deletes user skills", async () => {
     const created = await skillCreateFromTool(prisma as never, owner, {
       name: "Daily standup",
@@ -216,6 +228,22 @@ describe("skill tools", () => {
       name: "billing",
       files: ["notes.txt", "references/rates.md"],
     });
+    expect(prisma.agentSkill.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ select: { id: true, name: true } }),
+    );
+    expect(prisma.agentSkill.findFirst).toHaveBeenCalledTimes(1);
+    expect(prisma.agentSkill.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "plugin-1",
+          name: "billing",
+          OR: [
+            expect.objectContaining({ userId: owner.userId }),
+            expect.objectContaining({ organization: expect.any(Object) }),
+          ],
+        },
+      }),
+    );
     expect(
       await skillReadFromTool(prisma as never, owner, {
         name: "billing",
@@ -225,6 +253,12 @@ describe("skill tools", () => {
     expect(
       await skillReadFromTool(prisma as never, owner, { name: "billing", file: "../secrets.md" }),
     ).toMatchObject({ error: expect.stringContaining("No file") });
+
+    // Visibility can change between matching a name and fetching the document.
+    prisma.agentSkill.findFirst.mockResolvedValueOnce(null);
+    expect(await skillReadFromTool(prisma as never, owner, { name: "billing" })).toEqual({
+      error: "Skill not found.",
+    });
   });
 
   it("preserves extra frontmatter keys on update", async () => {
@@ -370,6 +404,32 @@ describe("skill tools", () => {
     expect(prisma._store[0]?.name).toBe("Shared");
   });
 
+  it("keeps a routine prompt edited during the skill rename", async () => {
+    const routine = { id: "r1", userId: "user-1", spaceId: "ws-1", prompt: "@Old" };
+    prisma = makePrisma([], [routine]);
+    const created = await skillCreateFromTool(prisma as never, owner, {
+      name: "Old",
+      description: "d",
+      body: "body",
+    });
+    const update = prisma.routine.updateMany.getMockImplementation()!;
+    prisma.routine.updateMany.mockImplementationOnce((args) => {
+      routine.prompt = "Use the instructions in the attachment.";
+      return update(args);
+    });
+    const publishSpaceChange = vi.fn();
+    expect(
+      await skillUpdateFromTool(
+        prisma as never,
+        owner,
+        { skillId: String(created.id), newName: "New" },
+        { publishSpaceChange },
+      ),
+    ).toMatchObject({ ok: true });
+    expect(routine.prompt).toBe("Use the instructions in the attachment.");
+    expect(publishSpaceChange).not.toHaveBeenCalled();
+  });
+
   it("leaves routines alone when another rename got there first", async () => {
     prisma = makePrisma([], [{ id: "r1", userId: "user-1", spaceId: "ws-1", prompt: "@Old" }]);
     const created = await skillCreateFromTool(prisma as never, owner, {
@@ -434,6 +494,27 @@ describe("skill tools", () => {
     const catalog = formatSkillsCatalogInstruction(records);
     expect(catalog).toContain("- Daily standup: Prepare standup notes");
     expect(catalog).toContain("skill_read");
+  });
+
+  it("advertises the personal recipe when a shared name overlaps", async () => {
+    prisma = makePrisma([
+      { ...owner, id: "personal", name: "Daily review", source: "user" },
+      { organizationId: "org-1", id: "shared", name: "daily review", source: "user" },
+    ]);
+
+    const records = await listAgentSkillRecords(prisma as never, owner);
+    expect(records.filter(({ name }) => name.toLowerCase() === "daily review")).toEqual([
+      expect.objectContaining({ id: "personal" }),
+    ]);
+    expect(await skillReadFromTool(prisma as never, owner, { name: "daily review" })).toMatchObject(
+      {
+        name: "Daily review",
+      },
+    );
+    expect(await skillReadFromTool(prisma as never, owner, { skillId: "shared" })).toMatchObject({
+      name: "daily review",
+      readOnly: true,
+    });
   });
 
   it("rejects update/delete for plugin and builtin skills", async () => {

@@ -7,10 +7,12 @@ import type {
   SandboxProviderOptions,
 } from "@rakazo/adapters";
 import {
+  absoluteHttpOrigin,
   apnsVoipConfig,
   autoReviewMinConfidence,
   deploymentConnectorConfigFromEnv,
   deploymentLabsFromEnv,
+  inboundOrigin,
   liveModelCatalogEnabled,
   mcpStdioOptionsFromEnv,
   messagingEnvFromProcess,
@@ -20,10 +22,11 @@ import {
   resolveSandboxProvider,
   sandboxProviderOptionsFromEnv,
   secretStoreOptionsFromEnv,
+  webOriginFromEnv,
   workspaceSaveLimits,
 } from "@rakazo/adapters";
 import type { AccessIdentityConfig, OidcConfig, SocialAuthConfig } from "@rakazo/auth";
-import { socialAuthFromFields } from "@rakazo/auth";
+import { oidcAuthorizationParams, socialAuthFromFields } from "@rakazo/auth";
 import type { LabFeature, MinimumClientBuilds, NavLink } from "@rakazo/contracts";
 import { isPrivateNetworkHost, parseMinimumClientBuilds, parseNavLinks } from "@rakazo/contracts";
 import { parseCrispWebsiteId } from "@rakazo/contracts/content-security-policy";
@@ -46,13 +49,12 @@ import {
   resolveSupervisorToken,
 } from "@rakazo/core/node/secrets-guard";
 import { getLogger, monitoringPseudonymSecret } from "@rakazo/logging";
+import type { CreditCode } from "./billing/credit-codes.js";
+import { parseCreditCodes } from "./billing/credit-codes.js";
 import type { DeploymentVoice } from "./voice/deployment-config.js";
 import { deploymentVoiceFromEnv } from "./voice/deployment-config.js";
 
 export { resolveCloudAgentProvider, resolveSandboxProvider } from "@rakazo/adapters";
-
-/** Where a local development stack serves the web client. */
-const DEFAULT_WEB_ORIGIN = "http://127.0.0.1:5173";
 
 export interface AppEnv extends MessagingEnvironmentValues {
   deploymentVoice?: DeploymentVoice;
@@ -86,6 +88,8 @@ export interface AppEnv extends MessagingEnvironmentValues {
   passkeyAndroidCertFingerprints: string[];
   privacyPolicyUrl?: string;
   apiUrl: string;
+  /** The public origin outside services post webhooks to, when an ingress provider publishes one. */
+  publishedInboundOrigin?: string;
   apiHost: string;
   /** Proxies whose forwarded client address is believed; empty means local networks. */
   trustedProxies: string[];
@@ -108,6 +112,8 @@ export interface AppEnv extends MessagingEnvironmentValues {
   /** Verified accounts that review plugin submissions, add stdio MCP servers, and grant access
    * (RAKAZO_ADMIN_EMAILS), lowercased. */
   adminEmails: string[];
+  /** Codes an account owner redeems once for free credits (CREDIT_CODES), keyed by code. */
+  creditCodes: Map<string, CreditCode>;
   phoneCallsEnabled: boolean;
   phoneCallRingSeconds: number;
   phoneCallCooldownMinutes: number;
@@ -147,7 +153,6 @@ export interface AppEnv extends MessagingEnvironmentValues {
   smtpUrl: string | undefined;
   botEmailSmtpUrl?: string;
   emailProvider?: string;
-  welcomeEmailEnabled?: boolean;
   emailApiKey?: string;
   emailFrom: string | undefined;
   emailReplyTo?: string;
@@ -265,6 +270,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
             .split(/[\s,]+/)
             .filter(Boolean),
           allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS === "true",
+          emailVerifiedClaim: optional(source.OIDC_EMAIL_VERIFIED_CLAIM),
+          authorizationParams: oidcAuthorizationParams(source.OIDC_AUTHORIZATION_PARAMS),
         }
       : undefined;
   const social = socialAuthFromFields({
@@ -279,7 +286,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   if (scimBearerToken && (scimBearerToken.length < 32 || /\s/.test(scimBearerToken)))
     throw new Error("SCIM_BEARER_TOKEN must be at least 32 characters with no spaces");
   const authSecret = resolveAuthSecret(source);
-  const webOrigin = resolveWebOrigin(source.WEB_ORIGIN, DEFAULT_WEB_ORIGIN, "WEB_ORIGIN");
+  const webOrigin = webOriginFromEnv(source);
   const sandboxProvider = resolveSandboxProvider(source);
   const cloudAgentProvider = resolveCloudAgentProvider(source);
   const deploymentModel = resolveDeploymentModel(source);
@@ -297,7 +304,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     realtimeDatabaseUrl: source.REALTIME_DATABASE_URL ?? required(source, "DATABASE_URL"),
     desktopStackToken: optional(source.RAKAZO_DESKTOP_STACK_TOKEN),
     authSecret,
-    authUrl: resolveWebOrigin(source.BETTER_AUTH_URL, webOrigin, "BETTER_AUTH_URL"),
+    authUrl: absoluteHttpOrigin(source.BETTER_AUTH_URL, webOrigin, "BETTER_AUTH_URL"),
     webOrigin,
     extraAuthOrigins: parseExtraAuthOrigins(source.RAKAZO_EXTRA_AUTH_ORIGINS),
     passkeyAppleAppIds: list(source.PASSKEY_APPLE_APP_IDS),
@@ -305,6 +312,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     privacyPolicyUrl: optional(source.PRIVACY_POLICY_URL),
     ...messagingEnvFromProcess(source),
     apiUrl: source.API_URL ?? "http://127.0.0.1:3100",
+    publishedInboundOrigin: inboundOrigin(source),
     apiHost: source.API_HOST ?? "127.0.0.1",
     trustedProxies: (source.TRUSTED_PROXIES ?? "")
       .split(/[\s,]+/)
@@ -322,6 +330,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     computerSettingsEnabled: source.COMPUTER_SETTINGS_ENABLED === "true",
     navLinks: parseNavLinks(source.RAKAZO_NAV_LINKS),
     adminEmails: list(source.RAKAZO_ADMIN_EMAILS).map((email) => email.toLowerCase()),
+    creditCodes: parseCreditCodes(source.CREDIT_CODES),
     ...phoneCallSettings(source),
     maxUploadSizeBytes: uploadSizeFromEnv(source),
     workspaceSaveLimits: workspaceSaveLimits(source),
@@ -367,7 +376,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     emailFrom: optional(source.EMAIL_FROM),
     emailReplyTo: optional(source.EMAIL_REPLY_TO),
     inboundEmail: inboundEmailFromEnv(source),
-    welcomeEmailEnabled: source.WELCOME_EMAIL_ENABLED === "true",
     stripeSecretKey: optional(source.STRIPE_SECRET_KEY),
     stripeWebhookSecret: optional(source.STRIPE_WEBHOOK_SECRET),
     stripePriceId: optional(source.STRIPE_PRICE_ID),
@@ -399,22 +407,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     crispWebsiteId: parseCrispWebsiteId(source.CRISP_WEBSITE_ID),
     demoAccount: demoAccountFromEnv(source),
   };
-}
-
-/**
- * An origin used to build absolute links. Trailing slashes are dropped so
- * `${webOrigin}/path` cannot produce `https://host//path`; providers reject a
- * double-slash redirect URI as a mismatch against the one registered with them.
- */
-function resolveWebOrigin(value: string | undefined, fallback: string, name: string): string {
-  const origin = (optional(value) ?? fallback).replace(/\/+$/, "");
-  try {
-    const url = new URL(origin);
-    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error();
-  } catch {
-    throw new Error(`${name} must be an absolute http(s) URL`);
-  }
-  return origin;
 }
 
 /**

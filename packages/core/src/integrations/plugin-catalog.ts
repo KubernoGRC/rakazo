@@ -1,5 +1,11 @@
-import type { PluginMarketplaceEntry, PluginPart } from "@rakazo/contracts";
+import type {
+  CapabilityInstall,
+  ConnectionCatalogItem,
+  PluginMarketplaceEntry,
+  PluginPart,
+} from "@rakazo/contracts";
 import { PluginPartSchema } from "@rakazo/contracts";
+import { catalogItemKey } from "./connection-catalog.js";
 
 export const PLUGIN_CATEGORIES = [
   "productivity",
@@ -257,6 +263,87 @@ export function managedAppFor<T extends { name: string; slug: string }>(
   return apps.find((app) => keys.has(brandKey(app.name)) || keys.has(brandKey(app.slug)));
 }
 
+/**
+ * One row per brand: a plugin for a managed app lends that app its skills instead of being
+ * listed again, and skill packs with nothing to connect belong to Skills, not Integrations.
+ */
+export function browsablePlugins(
+  entries: readonly PluginMarketplaceEntry[],
+  managed: readonly ConnectionCatalogItem[],
+): { plugins: PluginMarketplaceEntry[]; pluginForApp: Map<string, PluginMarketplaceEntry> } {
+  const pluginForApp = new Map<string, PluginMarketplaceEntry>();
+  const plugins: PluginMarketplaceEntry[] = [];
+  for (const entry of entries) {
+    const app = managedAppFor(entry, managed);
+    if (app) {
+      if (entry.skillCount && !pluginForApp.has(catalogItemKey(app)))
+        pluginForApp.set(catalogItemKey(app), entry);
+    } else if (entry.hasConnector) plugins.push(entry);
+  }
+  return { plugins, pluginForApp };
+}
+
+export type PluginBrand = { item: ConnectionCatalogItem; entry: PluginMarketplaceEntry };
+
+/** Managed apps standing in for a plugin keep that plugin's category, so a category lists them too. */
+export function pluginBrands(
+  managed: readonly ConnectionCatalogItem[],
+  pluginForApp: ReadonlyMap<string, PluginMarketplaceEntry>,
+): PluginBrand[] {
+  return managed.flatMap((item) => {
+    const entry = pluginForApp.get(catalogItemKey(item));
+    return entry ? [{ item, entry }] : [];
+  });
+}
+
+/** The categories the entries fill, in product order. */
+export function pluginCategories(
+  entries: readonly Pick<PluginMarketplaceEntry, "category">[],
+): PluginCategory[] {
+  return PLUGIN_CATEGORIES.filter((name) => entries.some((entry) => entry.category === name));
+}
+
+function inCategory(entry: PluginMarketplaceEntry, category: string): boolean {
+  return entry.category === (category === OTHER_PLUGINS ? null : category);
+}
+
+function matchesPluginSearch(
+  entry: PluginMarketplaceEntry,
+  query: string,
+  categoryLabel: (name: string) => string,
+): boolean {
+  return matchesPluginQuery(entry, query, entry.category ? categoryLabel(entry.category) : "");
+}
+
+/** Plugins in the category, if one is chosen, that match the query or their category's label. */
+export function filterPlugins(
+  entries: readonly PluginMarketplaceEntry[],
+  query: string,
+  category: string | null,
+  categoryLabel: (name: string) => string,
+): PluginMarketplaceEntry[] {
+  return entries.filter(
+    (entry) =>
+      (!category || inCategory(entry, category)) &&
+      matchesPluginSearch(entry, query, categoryLabel),
+  );
+}
+
+/** Managed apps listed under the chosen category; none until one is chosen. */
+export function filterPluginBrands(
+  brands: readonly PluginBrand[],
+  query: string,
+  category: string | null,
+  categoryLabel: (name: string) => string,
+): PluginBrand[] {
+  if (!category) return [];
+  return brands.filter(
+    ({ item, entry }) =>
+      inCategory(entry, category) &&
+      (matchesWordPrefixes(item.name, query) || matchesPluginSearch(entry, query, categoryLabel)),
+  );
+}
+
 /** GitHub homepages would give every plugin the same mark, so they never stand in for a site. */
 export function pluginSite(
   entry: Pick<PluginMarketplaceEntry, "homepage" | "domains">,
@@ -278,4 +365,57 @@ export function pluginSite(
 export function installedPluginParts(config: Record<string, unknown>): PluginPart[] {
   const parsed = PluginPartSchema.array().safeParse(config.parts);
   return parsed.success ? parsed.data : ["connector", "skills"];
+}
+
+export function selectPluginInstall(
+  installs: readonly CapabilityInstall[],
+  sources: readonly (string | undefined)[],
+  installId: string | undefined,
+  organization: boolean,
+): CapabilityInstall | undefined {
+  const exact = installId
+    ? installs.find((install) => install.kind === "plugin" && install.id === installId)
+    : undefined;
+  return (
+    exact ??
+    installs.find(
+      (install) =>
+        install.kind === "plugin" &&
+        sources.includes(install.source) &&
+        Boolean(install.organization) === organization,
+    )
+  );
+}
+
+export function pluginInstallScope(
+  selectedOrganization: boolean | undefined,
+  canShare: boolean,
+  forOrganization: boolean,
+): boolean {
+  return selectedOrganization ?? (canShare && forOrganization);
+}
+
+export function pluginInstallIsReadOnly(
+  install: CapabilityInstall | undefined,
+  organization: boolean,
+  canShare: boolean,
+): boolean {
+  return install?.manageable === false || (organization && !canShare);
+}
+
+export function installedPluginSelection(
+  install: CapabilityInstall,
+  entries: readonly PluginMarketplaceEntry[],
+) {
+  const entry = entries.find((row) => row.installedSource === install.source);
+  return {
+    source: entry?.source ?? install.source,
+    installedSource: install.source,
+    name: entry?.displayName ?? install.name,
+    description: entry?.description,
+    logo: entry?.logo ?? undefined,
+    site: entry ? (pluginSite(entry) ?? undefined) : undefined,
+    installId: install.id,
+    organization: install.organization,
+  };
 }

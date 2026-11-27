@@ -2,10 +2,12 @@ import { Trans, useLingui } from "@lingui/react/macro";
 import type { AccountSecurity, SignInProvider } from "@rakazo/contracts";
 import { identityConfirmationProviders } from "@rakazo/contracts";
 import { Button, Input, Label } from "@rakazo/ui-web";
+import { Trash2, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import { fetchAccountSecurity, requestAccountDeletionCode } from "../../lib/auth/account-security";
 import { authClient } from "../../lib/auth/auth";
 import { forgetSignedIn } from "../../lib/auth/returning-user";
+import { holdSsoAutoStart } from "../../lib/auth/sso-auto-start";
 import { runSsoFlow } from "../../lib/auth/sso-flow";
 import { clearComposerDrafts } from "../../lib/composer/composer-draft";
 import { useSave } from "../../lib/query/query";
@@ -23,12 +25,12 @@ export function AccountAccess({
       label={<Trans>Delete account</Trans>}
       control={
         <Button
-          variant="secondary"
+          variant="destructive-secondary"
           size="sm"
           data-testid="delete-account"
-          className="text-destructive hover:text-destructive"
           onClick={() => setOpen((value) => !value)}
         >
+          <Trash2 data-icon="inline-start" />
           <Trans>Delete</Trans>
         </Button>
       }
@@ -100,10 +102,17 @@ export function DeleteAccountForm({
   return (
     <>
       {open ? (
-        <div className="mt-3 space-y-3">
-          <p className="text-body">
-            <Trans>This permanently deletes your account and data.</Trans>
-          </p>
+        <div className="mt-3 space-y-3 rounded-lg border border-destructive/40 bg-destructive/10 p-3">
+          <div className="flex gap-2.5 text-body">
+            <TriangleAlert
+              aria-hidden
+              className="mt-0.5 size-4 shrink-0 text-destructive"
+              strokeWidth={1.75}
+            />
+            <p>
+              <Trans>This permanently deletes your account and data.</Trans>
+            </p>
+          </div>
           {!security ? (
             <Button variant="outline" onClick={() => setAttempt((value) => value + 1)}>
               <Trans>Retry</Trans>
@@ -194,6 +203,9 @@ export function DeleteAccountForm({
                 onSecurity?.(current);
                 if (!current.hasPassword && !current.freshOidcAuth && !code.trim()) return;
                 if (current.hasPassword && !password) return;
+                // Held before asking, as for sign-out: once the account is gone, the provider's
+                // session would sign straight into a new one, even if this answer is lost.
+                holdSsoAutoStart();
                 const result = await authClient.deleteUser(
                   current.hasPassword ? { password } : code.trim() ? { token: code.trim() } : {},
                 );

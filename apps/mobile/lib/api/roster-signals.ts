@@ -1,9 +1,11 @@
 import type { SpaceChangeKind } from "@rakazo/contracts";
+import { CAPABILITY_READ_PATHS } from "@rakazo/contracts";
 import { abortableDelay, isRetryableError, reconnectDelayMs, retryDelayMs } from "@rakazo/core";
 import { useEffect, useRef } from "react";
 import { computerUpdates } from "../computers/computer-updates";
 import { invalidateWatchChat } from "../notifications/watch-chat";
 import { useAppForeground } from "../platform/app-foreground";
+import { refreshRpcQueries } from "../query/query";
 import { refreshOrganizationReads } from "../spaces/organizations";
 import { subscribeSpaceSelection } from "./api";
 import { subscribeRosterSignals } from "./api-live";
@@ -11,6 +13,10 @@ import { subscribeSessionGeneration } from "./session";
 
 // One stream for the whole app, open while any screen holds it.
 const rosterListeners = new Set<() => void>();
+function refreshCapabilities() {
+  for (const path of CAPABILITY_READ_PATHS) void refreshRpcQueries(path);
+}
+
 const spaceChangeListeners = new Set<(kind: SpaceChangeKind) => void>();
 let holders = 0;
 let close: (() => void) | undefined;
@@ -52,6 +58,7 @@ async function follow(signal: AbortSignal) {
         () => {
           if (connection.signal.aborted) return;
           opened = true;
+          refreshCapabilities();
           invalidateWatchChat("roster");
           // Each connection opens with a signal, so a reconnect catches up on what it missed.
           for (const listener of rosterListeners) listener();
@@ -59,7 +66,26 @@ async function follow(signal: AbortSignal) {
         connection.signal,
         (kind) => {
           if (connection.signal.aborted) return;
+          if (kind === "capabilities") refreshCapabilities();
           if (kind === "runs") invalidateWatchChat();
+          if (kind === "preferences") {
+            void refreshRpcQueries("me");
+            void refreshRpcQueries("approvalRules/list");
+            void refreshRpcQueries("approvalRules/effective");
+            void refreshRpcQueries("autoReview/get");
+            void refreshRpcQueries("spaceSettings/overrides");
+            void refreshRpcQueries("models/organizationConnections/available");
+          }
+          if (kind === "integrations") {
+            void refreshRpcQueries("connections/catalog");
+            void refreshRpcQueries("connections/list");
+            void refreshRpcQueries("connections/tools");
+          }
+          if (kind === "deploymentModel") {
+            void refreshRpcQueries("me");
+            void refreshRpcQueries("models/role");
+            void refreshRpcQueries("models/list");
+          }
           if (kind === "computerUpdates") computerUpdates.signalled();
           else for (const listener of spaceChangeListeners) listener(kind);
         },

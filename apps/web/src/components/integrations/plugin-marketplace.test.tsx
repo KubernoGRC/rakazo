@@ -5,6 +5,10 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../../lib/spaces/organizations", () => ({
+  useOrganizations: () => ({ organizations: [], activeOrganizationId: null }),
+}));
+
 const api = vi.hoisted(() => ({
   preview: vi.fn(),
   install: vi.fn(),
@@ -13,6 +17,7 @@ const api = vi.hoisted(() => ({
   connect: vi.fn(),
   skills: vi.fn(),
   skill: vi.fn(),
+  favicon: vi.fn(),
 }));
 // One space, so no "Available in" choice appears.
 vi.mock("./space-availability", () => ({
@@ -31,7 +36,10 @@ vi.mock("../../lib/query/rpc", () => ({
 }));
 vi.mock("../../lib/integrations/mcp-connect", () => ({ connectMcpOauth: api.connect }));
 vi.mock("@rakazo/chat-ui/web", () => ({
-  useLinkFavicon: () => ({ icon: null, unusable: () => undefined }),
+  useLinkFavicon: (site: string) => {
+    api.favicon(site);
+    return { icon: null, unusable: () => undefined };
+  },
 }));
 vi.mock("@lingui/react/macro", () => ({
   useLingui: () => ({
@@ -186,6 +194,13 @@ describe("plugin detail", () => {
     expect(api.approve).not.toHaveBeenCalled();
   });
 
+  it("lets a member install a personal copy from the catalog when the organization has one", async () => {
+    await render({ install: { ...install, organization: true, manageable: false } });
+    await click("Connect");
+    expect(api.install).toHaveBeenCalledWith(expect.objectContaining({ kind: "plugin" }));
+    expect(api.install.mock.calls[0]?.[0]).not.toHaveProperty("organization");
+  });
+
   it("shows a rejected install without claiming it was added", async () => {
     api.install.mockRejectedValue(new Error("Plugin content changed"));
     await render();
@@ -295,7 +310,14 @@ describe("plugin detail", () => {
 
   it("opens an installed plugin skill's saved instructions", async () => {
     api.skills.mockResolvedValue([
-      { id: "skill-db-1", name: "skill-1", source: "plugin", description: "", readOnly: true },
+      {
+        id: "skill-db-1",
+        installId: install.id,
+        name: "skill-1",
+        source: "plugin",
+        description: "",
+        readOnly: true,
+      },
     ]);
     api.skill.mockResolvedValue({ content: "Follow the plugin steps." });
     await render({ install, servers: [server] });
@@ -417,6 +439,77 @@ describe("integration fallback icons", () => {
       [...container.querySelectorAll("img")].map((image) => image.getAttribute("src")),
     ).toEqual([logo, logo, logo]);
   });
+
+  it("waits for catalog icons to enter view before requesting artwork or a favicon", async () => {
+    let onIntersection!: IntersectionObserverCallback;
+    const disconnect = vi.fn();
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        observe = vi.fn();
+        unobserve = vi.fn();
+        disconnect = disconnect;
+
+        constructor(callback: IntersectionObserverCallback) {
+          onIntersection = callback;
+        }
+      },
+    );
+    const connectorLogo = "https://example.test/connector.png";
+    const pluginLogo = "https://example.test/plugin.png";
+    const site = "https://plugin.example.test";
+    try {
+      await act(async () =>
+        root.render(
+          <>
+            <ConnectorIcon name="Connector" logo={connectorLogo} />
+            <PluginRow
+              name="Plugin"
+              logo={pluginLogo}
+              description=""
+              installed={false}
+              onOpen={vi.fn()}
+            />
+            <PluginRow
+              name="Fallback"
+              site={site}
+              description=""
+              installed={false}
+              onOpen={vi.fn()}
+            />
+          </>,
+        ),
+      );
+      const [connector, plugin, fallback] = [...container.querySelectorAll(".place-items-center")];
+      if (!connector || !plugin || !fallback) throw new Error("Missing catalog icon placeholders");
+      expect(container.querySelectorAll("img")).toHaveLength(0);
+      expect(api.favicon).not.toHaveBeenCalledWith(site);
+      const intersect = async (target: Element, isIntersecting: boolean) =>
+        act(async () =>
+          onIntersection(
+            [{ target, isIntersecting } as IntersectionObserverEntry],
+            {} as IntersectionObserver,
+          ),
+        );
+      await intersect(connector, true);
+      await intersect(plugin, false);
+      expect([...container.querySelectorAll("img")].map((image) => image.src)).toEqual([
+        connectorLogo,
+      ]);
+      await intersect(plugin, true);
+      expect([...container.querySelectorAll("img")].map((image) => image.src)).toEqual([
+        connectorLogo,
+        pluginLogo,
+      ]);
+      expect(api.favicon).not.toHaveBeenCalledWith(site);
+      await intersect(fallback, true);
+      expect(api.favicon).toHaveBeenCalledWith(site);
+      expect(disconnect).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("names each Added button after its standalone plugin without changing the visible text", async () => {
     await act(async () =>
       root.render(
@@ -441,7 +534,7 @@ describe("integration fallback icons", () => {
   it("names each Add button after its app and hides the decorative initial", async () => {
     const item = { connectorId: "gm", slug: "gmail", name: "Gmail" } as never;
     const context = {
-      connections: { itemConnected: () => false, pending: null, connect: vi.fn() },
+      connections: { connections: [], itemConnected: () => false, pending: null, connect: vi.fn() },
       pluginForApp: new Map(),
       onOpenApp: vi.fn(),
       onOpenDetail: vi.fn(),

@@ -1,5 +1,6 @@
 import type { AgentRunRequest } from "@rakazo/adapter-kit";
 import type { MessageBlock } from "@rakazo/contracts";
+import { personalOrOrganizationItemIn } from "@rakazo/db";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ComputerLifecycleModule from "../../computers/computer-lifecycle.js";
 import { createRunExecutor } from "./executor.js";
@@ -172,7 +173,7 @@ async function runInSpace(space: Space, options: RunOptions = {}) {
     chatGroup: { findMany: vi.fn(async () => []) },
     taughtSkill: { findMany: vi.fn(async () => options.taughtSkills ?? []) },
     agentSkill: { findMany: vi.fn(async (_args: unknown) => []) },
-    scratchpadItem: { findMany: vi.fn(async () => []) },
+    scratchpadItem: { findMany: vi.fn(async () => []), count: vi.fn(async () => 0) },
     externalEffect: { findMany: vi.fn(async () => []) },
     spaceSettingOverride: { findUnique: async () => null },
     userActionApprovalRule: { findMany: vi.fn(async () => []) },
@@ -272,11 +273,13 @@ describe("message authors in the prompt", () => {
 });
 
 describe("skills in a shared space", () => {
-  it("lists only the run user's own agent skills", async () => {
+  it("lists the personal and organization skills available to the run user", async () => {
     const { agentSkillQuery } = await runInSpace({ members: 2, authors: true });
 
     expect(agentSkillQuery).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ userId: "user-b" }) }),
+      expect.objectContaining({
+        where: personalOrOrganizationItemIn({ userId: "user-b", spaceId: "space-1" }),
+      }),
     );
   });
 

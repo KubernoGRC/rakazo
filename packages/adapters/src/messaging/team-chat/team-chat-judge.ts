@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentRunModel, AgentRuntime, SecretStore } from "@rakazo/adapter-kit";
-import { redactSecrets } from "@rakazo/core";
+import { redactSecrets, savedThinkingLevel } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
 import { findModelCredential, recordUsage } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -10,6 +10,10 @@ import {
 } from "../../model-credits/offerings.js";
 import { approvedModelCreditMaterial } from "../../model-credits/routing.js";
 import { hostedModelCreditObserver } from "../../models/credits/model-credit-observer.js";
+import {
+  loadAdminDeploymentModelKey,
+  matchingAdminDeploymentModel,
+} from "../../models/deployment-model.js";
 import {
   persistRefreshedModelCredential,
   refreshStoredModelCredential,
@@ -21,13 +25,18 @@ import {
   modelProviderAllowed,
   modelProviderAllowlist,
 } from "../../models/model-provider-allowlist.js";
-import { deploymentModelRole, resolveMemberMainModel } from "../../models/model-roles.js";
+import {
+  deploymentModelRole,
+  ORGANIZATION_MODEL_CONNECTION_PREFIX,
+  resolveMemberMainModel,
+} from "../../models/model-roles.js";
 import { modelBilling, secretValuesToRedact } from "../../models/model-secret.js";
 import {
   hasHostedModelCredits,
   validateCreditOfferingChoice,
 } from "../../models/model-selection.js";
 import { connectionModelSettings } from "../../models/model-settings.js";
+import { resolvedModelRunFields, resolveOrganizationModelKey } from "../../runs/turn/run-model.js";
 import {
   cleanLine,
   renderTeamChatEngagementPrompt,
@@ -115,16 +124,20 @@ export class ModelTeamChatEngagementJudge implements TeamChatEngagementJudge {
   constructor(private readonly deps: ModelTeamChatEngagementJudgeDeps) {}
 
   async decide(input: TeamChatEngagementInput): Promise<TeamChatEngagementDecision> {
-    let secretsToRedact: string[] = [];
+    const secretsToRedact: string[] = [];
     try {
-      const resolved = await this.resolveModel(input.bot);
+      const resolved = await this.resolveModel(input.bot, (values) =>
+        secretsToRedact.push(...values),
+      );
       if (!resolved) return { act: false };
-      secretsToRedact = secretValuesToRedact({
-        kind: "openai_compatible",
-        baseUrl: resolved.model.baseUrl ?? "",
-        apiKey: resolved.model.apiKey,
-        headers: resolved.model.headers,
-      });
+      secretsToRedact.push(
+        ...secretValuesToRedact({
+          kind: "openai_compatible",
+          baseUrl: resolved.model.baseUrl ?? "",
+          apiKey: resolved.model.apiKey,
+          headers: resolved.model.headers,
+        }),
+      );
       // Standing rules can be time-based ("only during work hours"): judge them in the owner's zone.
       let ownerTimeZone: string | null | undefined;
       try {
@@ -197,7 +210,10 @@ export class ModelTeamChatEngagementJudge implements TeamChatEngagementJudge {
     }
   }
 
-  private async resolveModel(bot: TeamChatEngagementInput["bot"]): Promise<{
+  private async resolveModel(
+    bot: TeamChatEngagementInput["bot"],
+    registerSecrets: (values: string[]) => void,
+  ): Promise<{
     model: AgentRunModel;
   } | null> {
     const settings = await this.deps.prisma.deploymentSettings.findUnique({
@@ -231,7 +247,8 @@ export class ModelTeamChatEngagementJudge implements TeamChatEngagementJudge {
     // The member's main model runs on its connection, or on funded deployment credits.
     const main =
       member &&
-      (member.creditOfferingId ||
+      (member.organizationConnectionId ||
+        member.creditOfferingId ||
         member.credentialId ||
         member.credential ||
         (settings?.modelCreditsEnabled &&
@@ -248,11 +265,35 @@ export class ModelTeamChatEngagementJudge implements TeamChatEngagementJudge {
     // the allowlist never refuses it. Any other pin the list refuses is skipped rather than
     // failing the decision, so a member with an allowed main model still gets one.
     const pinned = useOverride && (explicitJudgeOverride || !refused(requestedProvider));
+    // An unavailable organization choice cannot spend on the deployment fallback.
+    if (!pinned && member?.organizationConnectionId && refused(member.provider)) return null;
     const mainModel = main && !refused(main.provider) ? main : null;
     const credential = pinned ? overrideCredential : (mainModel?.credential ?? null);
     const provider = pinned ? requestedProvider : (mainModel ?? fallback)?.provider;
     const modelId = pinned ? requestedModel : (mainModel ?? fallback)?.modelId;
     if (!provider || !modelId) return null;
+
+    if (!pinned && mainModel?.organizationConnectionId) {
+      const resolved = await resolveOrganizationModelKey(
+        {
+          prisma: this.deps.prisma,
+          secretStore: this.deps.secrets,
+          mcpAllowPrivateEndpoint: this.deps.allowPrivateEndpoint,
+        },
+        scope,
+        `${ORGANIZATION_MODEL_CONNECTION_PREFIX}${mainModel.organizationConnectionId}`,
+        mainModel.provider,
+        mainModel.modelId,
+        registerSecrets,
+      );
+      return {
+        model: {
+          provider: mainModel.provider,
+          id: mainModel.modelId,
+          ...resolvedModelRunFields(resolved),
+        },
+      };
+    }
 
     const hosted =
       settings?.modelCreditsEnabled &&
@@ -280,9 +321,18 @@ export class ModelTeamChatEngagementJudge implements TeamChatEngagementJudge {
         provider,
         modelId,
       );
+      const admin =
+        !hosted &&
+        !pinned &&
+        !mainModel &&
+        matchingAdminDeploymentModel(settings, provider, modelId);
       const apiKey =
         material?.apiKey ??
-        (provider === this.deps.deploymentProvider ? this.deps.deploymentModelKey : undefined);
+        (admin
+          ? await loadAdminDeploymentModelKey(this.deps.secrets, admin.cipher)
+          : provider === this.deps.deploymentProvider
+            ? this.deps.deploymentModelKey
+            : undefined);
       const callObserver = settings?.modelCreditsEnabled
         ? await hostedModelCreditObserver(this.deps.prisma, scope)
         : undefined;
@@ -326,6 +376,11 @@ export class ModelTeamChatEngagementJudge implements TeamChatEngagementJudge {
         ? { contextWindow: modelSettings.contextWindow }
         : {}),
       ...(modelSettings.reasoning !== undefined ? { reasoning: modelSettings.reasoning } : {}),
+      thinkingLevel: savedThinkingLevel(
+        modelSettings.thinkingLevel,
+        { modelId: credential.defaultModel, thinkingLevel: credential.thinkingLevel },
+        modelId,
+      ),
     };
     const context = parsed.kind === "oauth" ? {} : { cacheCapabilities: parsed.cacheCapabilities };
     if (parsed.kind === "oauth") {

@@ -12,6 +12,7 @@ import {
   isMessagingEmail,
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
+  parseEnvFlag,
   partnerClickFromHeaders,
   signupAttributionFromHeaders,
   signupPolicyFromEnv,
@@ -19,8 +20,8 @@ import {
 import type { PrismaClient, SecurityEventType } from "@rakazo/db";
 import {
   bootstrapUserSpace,
+  clearAccountIdentity,
   OwnedOrganizationHasMembersError,
-  personalOrganizationIds,
   recordSecurityEvent,
   SpaceDeletionInProgressError,
 } from "@rakazo/db";
@@ -56,6 +57,7 @@ import {
   sessionForAuthHook,
   signedBearer,
 } from "./account-security.js";
+import { apiKeyMethods, apiKeys } from "./api-keys.js";
 import { createAppleClientSecretCache } from "./apple-client-secret.js";
 import { breachedPasswordCheck } from "./breached-password.js";
 import { DEACTIVATED_AT_FIELD } from "./directory.js";
@@ -92,6 +94,8 @@ export {
   createAccessVerifier,
 } from "./access-identity.js";
 export { agentImportEmail } from "./agent-import-email.js";
+export type { VerifiedApiKey } from "./api-keys.js";
+export { API_KEY_PREFIX } from "./api-keys.js";
 export type { DirectoryAccountChange } from "./directory.js";
 export { createDirectory } from "./directory.js";
 export {
@@ -100,10 +104,12 @@ export {
   signInCodeEmail,
   verificationEmail,
 } from "./email.js";
+export { emailCopyAvailable } from "./email-copy/deployment-copy.js";
 export type { HomeDeletionReason } from "./home-deletion-email.js";
 export { homeDeletionEmail } from "./home-deletion-email.js";
 export { modelConnectionEmail } from "./model-connection-email.js";
 export type { OidcConfig } from "./oidc.js";
+export { oidcAuthorizationParams } from "./oidc.js";
 export {
   organizationInvitationEmail,
   spaceInvitationEmail,
@@ -200,11 +206,17 @@ const ACCOUNT_EVENT_PATHS: Record<string, SecurityEventType> = {
   "/passkey/delete-passkey": "auth.passkey.removed",
 };
 
-/** Shared across API processes. Off outside production so tests can sign in freely. */
-export function authRateLimitOptions(nodeEnv = process.env.NODE_ENV) {
+/**
+ * Shared across API processes. Off outside production so tests can sign in freely, unless
+ * `AUTH_RATE_LIMIT_ENABLED` says otherwise.
+ */
+export function authRateLimitOptions(
+  nodeEnv = process.env.NODE_ENV,
+  override = process.env.AUTH_RATE_LIMIT_ENABLED,
+) {
   const rule = { window: 15 * 60, max: 10 };
   return {
-    enabled: nodeEnv === "production",
+    enabled: parseEnvFlag("AUTH_RATE_LIMIT_ENABLED", override, nodeEnv === "production"),
     storage: "database" as const,
     customRules: {
       ...Object.fromEntries(CREDENTIAL_PATHS.map((path) => [path, rule])),
@@ -496,19 +508,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
               throw new APIError("CONFLICT", { message: error.message });
             throw error;
           }
-          const organizationIds = await personalOrganizationIds(prisma, user.id);
-
-          await prisma.$transaction(async (tx) => {
-            // Messaging identities are deliberately FK-free, so clear them
-            // here or the unique address would point at a deleted bot forever.
-            await tx.messagingIdentity.deleteMany({
-              where: { userId: user.id },
-            });
-            await tx.passkey.deleteMany({ where: { userId: user.id } });
-            await tx.organization.deleteMany({
-              where: { id: { in: organizationIds } },
-            });
-          });
+          await prisma.$transaction((tx) => clearAccountIdentity(tx, user.id));
         },
         afterDelete: async (user) => {
           await recordSecurityEvent({ type: "auth.account.deleted", userId: user.id });
@@ -561,6 +561,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
             }) as BetterAuthPlugin,
           ]
         : []),
+      apiKeys(),
       // Marks the method on the sign-in page; written only alongside a new session cookie.
       lastLoginMethod({ cookieName: LAST_SIGN_IN_COOKIE }),
       ...(env.accessIdentity ? [accessIdentity(env.accessIdentity)] : []),
@@ -1043,6 +1044,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
       issueAccountExportToken((await auth.$context).internalAdapter, userId),
     consumeAccountExportToken: async (token: string) =>
       consumeAccountExportToken((await auth.$context).internalAdapter, token),
+    ...apiKeyMethods(auth.api),
     disposeOidcDiscovery: () => {
       discovery?.dispose();
     },
@@ -1222,7 +1224,8 @@ function loopbackTwinOrigins(origin: string): string[] {
  * route under it stays closed, including ones a future plugin version adds.
  */
 export function isBlockedAuthPath(path: string): boolean {
-  return path.startsWith("/organization");
+  // API keys are managed through the app's procedures, which ask the person to confirm it's them.
+  return path.startsWith("/organization") || path.startsWith("/api-key");
 }
 
 /** Set while the directory has turned the account off. */

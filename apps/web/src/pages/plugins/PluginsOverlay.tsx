@@ -9,11 +9,15 @@ import type {
 import { MCP_OAUTH_CLIENT_REQUIRED, mcpServerConnection } from "@rakazo/contracts";
 import type { connectedAppMarks } from "@rakazo/core";
 import {
+  addedMcpEndpoints,
   CONNECTION_CATALOG_PAGE_SIZE,
   catalogItemKey,
+  connectionSharingOrganization,
   customMcpServerInput,
   installedPluginParts,
+  installedPluginSelection,
   managedAppFor,
+  organizationOfSpace,
 } from "@rakazo/core";
 import {
   Button,
@@ -40,7 +44,9 @@ import { PluginDetail, pluginSelection } from "../../components/integrations/plu
 import { reachesOtherSpaces, useOwnSpaces } from "../../components/integrations/space-availability";
 import { connectMcpOauth } from "../../lib/integrations/mcp-connect";
 import { rpc } from "../../lib/query/rpc";
+import { useBoundSpaceId } from "../../lib/query/space-rpc";
 import { errorCode, errorText } from "../../lib/query/user-error";
+import { useOrganizations } from "../../lib/spaces/organizations";
 import { AddMenu } from "./add-menu";
 import { ConnectorDetail } from "./connector-detail";
 import { DomainSearch, useDomainSearch } from "./domain-search";
@@ -75,12 +81,19 @@ export function PluginsOverlay({
 }) {
   const { t } = useLingui();
   const [confirmingSource, setConfirmingSource] = useState<string | null>(null);
+  const boundSpaceId = useBoundSpaceId();
+  const { organizations, activeOrganizationId } = useOrganizations();
+  const organizationName = connectionSharingOrganization(
+    boundSpaceId
+      ? organizationOfSpace(organizations, boundSpaceId)
+      : organizations.find(({ id }) => id === activeOrganizationId),
+  );
   const spaceCount = useOwnSpaces().length;
   const [sourceError, setSourceError] = useState<string | null>(null);
   const sourceAction = useRef(0);
   const [oauthError, setOauthError] = useState<string | null>(null);
   const [view, setView] = useState<OverlayView>("browse");
-  const [publicCatalogQuery, setPublicCatalogQuery] = useState("");
+  const [publicTerm, setPublicTerm] = useState("");
   // Where a source form returns: the domain search that prefilled it, or browse.
   const [sourceBack, setSourceBack] = useState<OverlayView>("browse");
   const [plugin, setPlugin] = useState<PluginSelection | null>(null);
@@ -199,10 +212,7 @@ export function PluginsOverlay({
   };
 
   function installedSelection(install: CapabilityInstall): PluginSelection {
-    const entry = catalogEntries.find((row) => row.installedSource === install.source);
-    return entry
-      ? pluginSelection(entry)
-      : { source: install.source, installedSource: install.source, name: install.name };
+    return installedPluginSelection(install, catalogEntries);
   }
 
   function managedLink(selection: PluginSelection): ManagedAppLink | undefined {
@@ -213,7 +223,12 @@ export function PluginsOverlay({
       logo: item.logo,
       connected: itemConnected(item),
       connecting: pending === catalogItemKey(item),
-      onConnect: () => void connect(item),
+      onConnect: () => {
+        if (organizationName) {
+          setPlugin(null);
+          openDetail(item);
+        } else connect(item);
+      },
       onManage: () => {
         setPlugin(null);
         openDetail(item);
@@ -235,10 +250,15 @@ export function PluginsOverlay({
     pluginForApp,
     onOpenApp: openApp,
     onOpenDetail: openDetail,
+    organizationName,
     onOpenChatApp: onOpenMessaging,
   };
 
   function beginSource(kind: SourceKind, preset: McpSourcePreset | null = null) {
+    if (preset?.url && addedMcpEndpoints(sources, mcpServers).has(preset.url)) {
+      openAddView("manage");
+      return;
+    }
     setPlugin(null);
     setDetailKey(null);
     setSourceBack("browse");
@@ -257,7 +277,7 @@ export function PluginsOverlay({
     if (!surface.source || (surface.kind !== "mcp" && surface.kind !== "openapi")) return;
     setSourceBack("domain");
     setView("source");
-    sourceForm.startFromCatalog(result, surface, surface.source);
+    sourceForm.startFromCatalog(surface.kind, result.name, surface.source, surface.auth);
     setSourceError(null);
     setOauthError(null);
     sourceAction.current += 1;
@@ -454,10 +474,7 @@ export function PluginsOverlay({
                 presets={sourcePresets}
                 onGithub={() => openAddView("github")}
                 onSource={beginSource}
-                onBrowseMcp={() => {
-                  setPublicCatalogQuery("");
-                  openAddView("browseMcp");
-                }}
+                onBrowseMcp={() => openAddView("browseMcp")}
                 onDomainSearch={catalogFeedEnabled ? () => openAddView("domain") : undefined}
                 onOpenMcp={onOpenMcp}
               />
@@ -576,7 +593,7 @@ export function PluginsOverlay({
 
           {plugin ? (
             <PluginDetail
-              key={plugin.installedSource}
+              key={plugin.installId ?? plugin.installedSource}
               selection={plugin}
               installs={pluginInstalls}
               servers={mcpServers}
@@ -588,7 +605,9 @@ export function PluginsOverlay({
             />
           ) : detailItem ? (
             <ConnectorDetail
+              key={catalogItemKey(detailItem)}
               item={detailItem}
+              organizationName={organizationName}
               state={state}
               onBack={closeDetail}
               onOpenChatApp={onOpenMessaging}
@@ -639,7 +658,6 @@ export function PluginsOverlay({
               />
               <IntegrationSetup
                 botId={activeBotId}
-                initialQuery={publicCatalogQuery || undefined}
                 onDone={() => {
                   setView("manage");
                   void refresh().catch((err: unknown) =>
@@ -654,9 +672,16 @@ export function PluginsOverlay({
               state={state}
               tileContext={tileContext}
               onOpenPlugin={openPlugin}
-              onSearchPublic={(publicQuery) => {
-                setPublicCatalogQuery(publicQuery);
-                openAddView("browseMcp");
+              publicTerm={publicTerm}
+              onSearchPublic={setPublicTerm}
+              onOpenPreset={(preset) => beginSource("mcp", preset)}
+              onOpenMcp={(server) => {
+                if (addedMcpEndpoints(sources, mcpServers).has(server.source)) {
+                  openAddView("manage");
+                  return;
+                }
+                beginSource("mcp");
+                sourceForm.startFromCatalog("mcp", server.name, server.source, server.auth);
               }}
             />
           )}

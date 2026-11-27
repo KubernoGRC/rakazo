@@ -1,3 +1,4 @@
+import { bestEffort } from "@rakazo/logging/best-effort";
 import { fetchAuthCapabilities } from "./auth-capabilities";
 
 /**
@@ -25,7 +26,7 @@ export async function signInWithAccessIdentity(): Promise<AccessSignIn> {
   }
   if (response.status === 401 || response.status === 403) return { kind: "refused" };
   if (!response.ok) return { kind: "unavailable" };
-  const body: unknown = await response.json().catch(() => null);
+  const body: unknown = await bestEffort("read the access sign-in reply", response.json());
   const created =
     typeof body === "object" && body !== null && (body as { created?: unknown }).created === true;
   return { kind: "signed-in", created };

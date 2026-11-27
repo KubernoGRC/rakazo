@@ -27,6 +27,7 @@ import { authClient } from "../../lib/auth/auth";
 import type { AuthCapabilities } from "../../lib/auth/auth-capabilities";
 import { fetchAuthCapabilities } from "../../lib/auth/auth-capabilities";
 import { newAccountDestination, signInNext } from "../../lib/auth/sign-in-next";
+import { holdSsoAutoStart, ssoAutoStartAllowed } from "../../lib/auth/sso-auto-start";
 import { runSsoFlow } from "../../lib/auth/sso-flow";
 import { desktopBridge } from "../../lib/platform/desktop";
 import { clearSpaceSelection } from "../../lib/query/rpc";
@@ -144,6 +145,27 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
       );
     });
   }, [accessIdentity, accessAttempt, navigate, next]);
+
+  // A server whose only way in is one provider starts it at once, on sign-up too since a first
+  // visit lands there, but never after the provider sent back an error. Desktop keeps the click,
+  // as its sign-in opens a window. Fork: under access identity the proxy's sign-in runs instead.
+  const onlyProvider =
+    !accessIdentity &&
+    (mode === "in" || (mode === "up" && reset?.registrationOpen !== false)) &&
+    reset &&
+    !reset.passwordAuth &&
+    providers.length === 1 &&
+    (!reset.sso || reset.sso.availability === "available") &&
+    !searchParams.has("error") &&
+    !desktopBridge()
+      ? providers[0]?.id
+      : undefined;
+  useEffect(() => {
+    // The hold also keeps this from starting twice; when it cannot be saved, nothing starts.
+    if (onlyProvider && ssoAutoStartAllowed() && holdSsoAutoStart()) {
+      void signInWithProvider(onlyProvider);
+    }
+  }, [onlyProvider]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();

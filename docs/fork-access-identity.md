@@ -156,11 +156,15 @@ file is refused.
   gate, the session binding, the readiness check and the `accessIdentity` and
   `accessLogoutUrl` capabilities, behind one `createForkAccess` object.
 - `apps/api/src/app.ts`: one-line call sites only. It creates `forkAccess` before
-  `createAuth` and passes its verifier, mounts the gate after the `no-store` headers, wraps
-  `readSession` in `forkAccess.bindSession` (so `requestSession`, the device routes and
-  browser monitoring all see bound sessions), calls `forkAccess.beforeAuthHandler` on
-  `/api/auth/*`, spreads `forkAccess.capabilities`, passes `forkAccess.unready` to health,
-  and passes request headers into the RPC context.
+  `createAuth` and passes its verifier; passes `forkAccess.bindSession` to `requestSessions`;
+  mounts the gate after the `no-store` headers, before `mountAuthCapabilities`; passes
+  `forkAccess.capabilities` to `mountAuthCapabilities`; calls `forkAccess.beforeAuthHandler`
+  on `/api/auth/*`; and passes `forkAccess.unready` to health.
+- `apps/api/src/auth/request-session.ts`: an optional `bindSession` that wraps its
+  `readSession`, so `requestSession`, the device routes and browser monitoring all see bound
+  sessions. Without it, `unboundSession` keeps upstream's reading.
+- `apps/api/src/auth/auth-capabilities.ts`: an optional `fork` object spread into the reply.
+- `apps/api/src/http/rpc-route.ts`: request headers in the RPC context.
 - `apps/api/src/identity-confirmation.ts` and `apps/api/src/routes/context.ts`: the request
   headers reach the identity-confirmation lookup.
 - `apps/api/src/env.ts`: `accessIdentityFromEnv` and its fail-closed checks.
@@ -172,8 +176,10 @@ file is refused.
   by `/account-security` and the `/delete-user` hook.
 - `apps/web/src/pages/Auth.tsx`: the access branch of the sign-in page.
 - `apps/mobile/app/sign-in.tsx` and its non-English catalogs: the browser-only message.
-- `apps/desktop/src/setup-config.ts` and `main.ts`: setup refuses an access-identity server
-  with the same browser-only message.
+- `apps/desktop/src/main/setup/setup-config.ts` and the fork-owned
+  `apps/desktop/src/main/setup/access-identity-probe.ts`: setup refuses an access-identity
+  server with the same browser-only message. `main.ts` only wraps `probeServer` with
+  `refuseAccessIdentityServers` (`probeScreened`) and uses that at both call sites.
 - `apps/api/src/health.ts`: an optional readiness check; `/ready` is 503 until a usable
   key set has loaded.
 - Tests: an `ACCESS_IDENTITY_ENABLED` block appended to `apps/api/src/env.test.ts`, and

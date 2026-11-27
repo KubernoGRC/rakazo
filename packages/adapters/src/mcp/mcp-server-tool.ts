@@ -2,8 +2,8 @@ import type { McpTransport, MessageBlock } from "@rakazo/contracts";
 import { McpRemoteEndpointSchema, McpTransportSchema } from "@rakazo/contracts";
 import { deriveMcpSlug } from "@rakazo/core";
 import type { McpServer } from "@rakazo/db";
-import { availableInSpace, isUniqueViolation } from "@rakazo/db";
-import { bestEffort, getLogger } from "@rakazo/logging";
+import { availableInSpace, isUniqueViolation, organizationServerAt } from "@rakazo/db";
+import { getLogger } from "@rakazo/logging";
 import { toStringRecord } from "../memory/memory-provider-factory.js";
 import { persistMessageInTransaction, runLeaseFor } from "../runs/assembly/run-messages.js";
 import type { ExecutorDeps } from "../runs/executor/executor-deps.js";
@@ -162,6 +162,9 @@ export async function addMcpServerFromTool(
       error: "Secret storage is not available in this deployment.",
     };
   }
+  const shared = await organizationServerAt(deps.prisma, run, parsed.endpoint);
+  if (shared)
+    return { error: `Your organization already added this MCP server as "${shared.name}".` };
   const credentialBlob = buildMcpCredentialBlob(parsed);
   let storedCredential: { id: string; ciphertext: string } | null = null;
   if (credentialBlob) {
@@ -296,10 +299,7 @@ export async function removeMcpServerFromTool(
     removeMcpServerInTransaction(tx, run, server),
   );
   for (const event of seqs) {
-    await bestEffort(
-      "MCP server removal notification",
-      deps.events.notify(event.threadId, event.seq),
-    );
+    await deps.events.notify(event.threadId, event.seq);
   }
   return { ok: true, removed: server.name };
 }

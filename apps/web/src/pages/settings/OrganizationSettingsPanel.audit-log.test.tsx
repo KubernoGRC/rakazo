@@ -13,8 +13,12 @@ const api = vi.hoisted(() => ({
   recheckSession: vi.fn(),
   organizations: [] as unknown[],
 }));
+const uiLocale = vi.hoisted(() =>
+  Intl.DateTimeFormat().resolvedOptions().locale.startsWith("de") ? "en" : "de",
+);
 vi.mock("@lingui/react/macro", () => ({
   useLingui: () => ({
+    i18n: { locale: uiLocale },
     t: (parts: TemplateStringsArray, ...values: unknown[]) =>
       parts.reduce(
         (text, part, index) => `${text}${index > 0 ? values[index - 1] : ""}${part}`,
@@ -205,6 +209,7 @@ it("keeps the log off the organization page until Activity log is chosen, and Ba
   expect(body.querySelector('button[aria-label="Organization options"]')).toBeNull();
   expect([...body.querySelectorAll("button")].map((each) => each.textContent)).toEqual([
     "Members3",
+    "Shared logins",
   ]);
   expect(container.querySelector('[data-testid="audit-log"]')).toBeNull();
   expect(api.events).not.toHaveBeenCalled();
@@ -418,6 +423,7 @@ it.each(["FORBIDDEN", "UNAUTHORIZED"])(
 
 it("falls back to the target id when the label is empty, and keeps Export off until the log has loaded", async () => {
   const first = deferred<unknown>();
+  const entry = event("e1", { targetLabel: "", targetId: "send_email", targetType: "tool" });
   api.events.mockReturnValue(first.promise);
   await open();
   const exportButton = () =>
@@ -425,13 +431,16 @@ it("falls back to the target id when the label is empty, and keeps Export off un
   expect(exportButton().disabled).toBe(true);
   await act(async () =>
     first.resolve({
-      events: [event("e1", { targetLabel: "", targetId: "send_email", targetType: "tool" })],
+      events: [entry],
       nextCursor: null,
     }),
   );
   await vi.waitFor(() => expect(exportButton().disabled).toBe(false));
   const row = container.querySelector('[data-testid="audit-log"] li')!;
   expect(row.textContent).toContain("send_email");
+  const timestamp = row.querySelector("time");
+  expect(timestamp?.getAttribute("datetime")).toBe(entry.createdAt);
+  expect(timestamp?.textContent).toBe(new Date(entry.createdAt).toLocaleString(uiLocale));
 });
 
 it("reads the log again when the window regains focus, so a lost permission shows at once", async () => {

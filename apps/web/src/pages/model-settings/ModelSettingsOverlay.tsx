@@ -25,7 +25,7 @@ import {
   Spinner,
 } from "@rakazo/ui-web";
 import { useQuery } from "@tanstack/react-query";
-import { X } from "lucide-react";
+import { Unplug, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
@@ -34,9 +34,12 @@ import type { ModelCredential } from "../../lib/models/model-auth";
 import { useSpaceQueries } from "../../lib/query/query";
 import { CompatibleModelFields } from "./compatible-model-fields";
 import { CompatibleKeyInput, ConnectionControls } from "./connection-controls";
+import { DeploymentModelSettings } from "./deployment-model-settings";
 import type { ModelRoleConnectIntent } from "./ModelRoleSettings";
 import { ModelRoleSettings, useModelRole } from "./ModelRoleSettings";
+import { MediaModelSettings } from "./media-model-settings";
 import { ModelSettingsPanel } from "./model-settings-panel";
+import { OrganizationModelSettings } from "./organization-model-settings";
 import { ProviderPage } from "./provider-page";
 import { ConnectionNameField, ProvidersSection } from "./providers-section";
 import type { ConnectableProvider } from "./role-model-picker";
@@ -76,6 +79,8 @@ export function ModelSettingsOverlay({
     credentials,
     disconnectCredential,
     disconnectName,
+    disconnectPreviewLoading,
+    disconnectWarning,
     endpointPresets,
     error,
     groups,
@@ -220,12 +225,12 @@ export function ModelSettingsOverlay({
         <ConnectionNameField key={credential.id} credential={credential} disabled={busy} />
         <Button
           type="button"
-          variant="ghost"
+          variant="destructive-secondary"
           size="sm"
-          className="text-destructive"
           disabled={busy}
           onClick={() => setConfirmDisconnect(true)}
         >
+          <Unplug data-icon="inline-start" />
           {pending === "disconnect" ? <Trans>Disconnecting…</Trans> : <Trans>Disconnect</Trans>}
         </Button>
       </div>
@@ -370,6 +375,7 @@ export function ModelSettingsOverlay({
       ) : null}
       {me && !loading ? (
         <>
+          <OrganizationModelSettings providers={allProviders} />
           <ModelRoleSettings
             userId={me.userId}
             spaceId={me.spaceId}
@@ -442,6 +448,14 @@ export function ModelSettingsOverlay({
               panel={connectionAt === "computer" ? panelFor(true) : null}
             />
           ) : null}
+          {firstConnection ? null : (
+            <MediaModelSettings
+              userId={me.userId}
+              spaceId={me.spaceId}
+              scope={scope}
+              connectionIds={credentials.map((credential) => credential.id)}
+            />
+          )}
           {scope === "space" || firstConnection ? null : (
             <ProvidersSection
               credentials={credentials}
@@ -453,6 +467,7 @@ export function ModelSettingsOverlay({
               panel={connectionAt === "providers:add" ? panelFor(true) : null}
             />
           )}
+          {scope === "account" && me.isAdmin ? <DeploymentModelSettings /> : null}
         </>
       ) : loading ? (
         <div className="grid place-items-center py-10">
@@ -474,8 +489,13 @@ export function ModelSettingsOverlay({
       open={confirmDisconnect}
       onCancel={() => setConfirmDisconnect(false)}
       title={<Trans>Disconnect {disconnectName}?</Trans>}
-      description={<Trans>This removes the connection from every space.</Trans>}
-      confirmDisabled={pending === "disconnect"}
+      description={
+        <>
+          <Trans>This removes the connection from every space.</Trans>
+          {disconnectWarning ? <> {disconnectWarning}</> : null}
+        </>
+      }
+      confirmDisabled={pending === "disconnect" || disconnectPreviewLoading}
       onConfirm={() => {
         setConfirmDisconnect(false);
         setConnectionAt(null);

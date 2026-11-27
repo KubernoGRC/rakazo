@@ -281,7 +281,7 @@ beforeEach(() => {
   onSave.mockReset().mockResolvedValue(undefined);
   onExport.mockReset().mockResolvedValue(undefined);
   vi.mocked(rpc.bots.update).mockReset();
-  vi.mocked(rpc.bots.get).mockReset();
+  vi.mocked(rpc.bots.get).mockReset().mockResolvedValue(bot());
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -448,7 +448,6 @@ describe("BotSettings thinking options", () => {
     const checked = (await openModelPicker()).find((option) => option.dataset.checked === "true");
     expect(checked?.dataset.value).toBe("openai-compatible::beta");
     expect((await openOptions(thinkingField())).map((option) => option.textContent)).toEqual([
-      "Default (Medium)",
       "Minimal",
       "Low",
       "Medium",
@@ -686,12 +685,6 @@ describe("instruction settings refresh", () => {
     vi.mocked(rpc.bots.update).mockRejectedValueOnce(
       new ORPCError("CONFLICT", { message: "Instructions changed" }),
     );
-    vi.mocked(rpc.bots.get)
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValueOnce({
-        ...initial,
-        instructions: "Newer saved instructions",
-      });
     await act(async () => {
       root.render(instructions(initial));
     });
@@ -708,6 +701,12 @@ describe("instruction settings refresh", () => {
       descriptionField().dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     });
     expect(rpc.bots.update).toHaveBeenCalledTimes(1);
+    vi.mocked(rpc.bots.get)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({
+        ...initial,
+        instructions: "Newer saved instructions",
+      });
     await act(async () => {
       reload.click();
     });
