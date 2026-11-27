@@ -78,6 +78,7 @@ function fakeContext({
     runId: "run-1",
     bot: { id: "bot-1", name: "Bot" },
     thread: { id: "thread-1" },
+    source: {},
     deps: { prisma: { mcpServer: { findFirst } } },
     tools: {
       connector: new Map(tools.map((tool) => [tool.name, tool])),
@@ -161,6 +162,22 @@ beforeEach(() => {
 });
 
 describe("tool.called through the dispatcher", () => {
+  it("records a refused call from a routine on its owner's computer", async () => {
+    const { ctx } = fakeContext();
+    Object.assign(ctx, { source: { ownerComputerRoutine: true } });
+    Object.assign(ctx.tools, { offered: [] });
+
+    // Not offered to the routine, so refused; the refusal is still recorded.
+    await applyTool(ctx, MCP_TOOL.name, { query: "status" }, "call-1");
+
+    expect(recordedEvents()).toHaveLength(1);
+    expect(recordedEvents()[0]).toMatchObject({
+      type: "tool.called",
+      metadata: { tool: MCP_TOOL.name, outcome: "refused" },
+    });
+    expect(connectorTool).not.toHaveBeenCalled();
+  });
+
   it("records a call that ran, with its host, sizes and hash but none of its content", async () => {
     const { ctx } = fakeContext();
     const args = { query: "acme confidential roadmap" };
