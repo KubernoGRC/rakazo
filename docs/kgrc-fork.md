@@ -67,6 +67,9 @@ conflict with them:
   urllib3 it pulls in, keeping only the static noVNC client that `websockify` serves.
 - **Image publishing** is `.github/workflows/kgrc-publish-images.yml`, which releases
   from `kgrc` with `kgrc-v*` tags.
+- **Pinned private MCP hosts** live in `packages/adapters/src/mcp/pinned-host.ts`.
+  `remote-mcp.ts` keeps only its call sites, which also keeps that file under upstream's
+  1000-line limit (`scripts/checks/ratchets`).
 
 ## Upstream workflows disabled in this fork
 

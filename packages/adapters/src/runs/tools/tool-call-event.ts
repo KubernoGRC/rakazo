@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { AgentToolCompletion, ConnectorRoute } from "@rakazo/adapter-kit";
 import { stableJsonValue } from "@rakazo/core/node/approval-effect-key";
 import { recordSecurityEvent } from "@rakazo/db";
+import { bestEffort } from "@rakazo/logging";
 import { isDeniedEffectResult, isToolPauseResult } from "../../approvals/approval-effect.js";
 import type { RunContext } from "../assembly/run-context.js";
 import type { ToolCall } from "./run-tool-gate.js";
@@ -211,13 +212,15 @@ export async function toolCallHost(
   const hosts = mcpHostCache(ctx);
   const cached = hosts.get(route.resourceId);
   if (cached) return cached;
-  const lookup = ctx.deps.prisma.mcpServer
-    .findFirst({
-      where: { id: route.resourceId, spaceId: ctx.run.spaceId },
-      select: { transport: true, endpoint: true, command: true, args: true },
-    })
-    .then((server) => (server ? mcpServerHost(server) : undefined))
-    .catch(() => undefined);
+  const lookup = bestEffort(
+    "look up an MCP server's host for a tool-call event",
+    ctx.deps.prisma.mcpServer
+      .findFirst({
+        where: { id: route.resourceId, spaceId: ctx.run.spaceId },
+        select: { transport: true, endpoint: true, command: true, args: true },
+      })
+      .then((server) => (server ? mcpServerHost(server) : undefined)),
+  );
   hosts.set(route.resourceId, lookup);
   return lookup;
 }
